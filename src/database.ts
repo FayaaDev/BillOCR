@@ -1,0 +1,480 @@
+import { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
+import type { Bill, ClaimedJob, CreateBillInput, EffectiveBillData, ExtractedBill, Extraction, InitialJobInput, Job, JobState, JobTransition, JobType, ProviderProjectionMetadata, ReviewEvent, ValidationIssue } from "./contracts";
+import { applyMigrations } from "./migrations";
+import { jobTypes } from "./contracts";
+
+type JobRow = {
+  id: string; bill_id: string; type: JobType; state: JobState; idempotency_key: string; attempts: number; available_at: string;
+  lease_token: string | null; lease_expires_at: string | null; claimed_by: string | null; claimed_at: string | null;
+  last_error: string | null; created_at: string; updated_at: string; expected_revision: number | null;
+};
+type BillRow = {
+  id: string; whatsapp_message_id: string; whatsapp_group_id: string; whatsapp_sender_id: string; attachment_index: number;
+  received_at: string; caption: string | null; original_filename: string | null; mime_type: string; original_path: string;
+  content_sha256: string; status: Bill["status"]; drive_file_id: string | null; sheet_row_key: string | null; created_at: string; updated_at: string; content_revision: number; review_revision: number; manual_review_required: number;
+};
+type JobTransitionRow = { id: string; job_id: string; from_state: JobState | null; to_state: JobState; reason: string; created_at: string };
+type ExtractionRow = { id: string; bill_id: string; schema_version: string; normalized_json: string | null; raw_provider_response: string | null; provider_model: string | null; prompt_schema_version: string | null; requested_at: string | null; completed_at: string | null; error_details: string | null; created_at: string; updated_at: string };
+type ValidationIssueRow = { id: string; bill_id: string; field: string | null; code: string; message: string; severity: ValidationIssue["severity"]; observed_value: string | null; created_at: string };
+type ProjectionRow = { id: string; bill_id: string; provider: string; projection_key: string; external_id: string | null; external_url: string | null; metadata_json: string | null; created_at: string; updated_at: string };
+type DriveReservationRow = { reservation_key: string; kind: "file" | "folder"; parent_id: string | null; logical_path: string; drive_id: string; state: "reserved" | "confirmed"; bill_id: string | null; content_sha256: string | null; created_at: string; updated_at: string };
+type ReviewEventRow = { id: string; bill_id: string; reviewer_id: string; action: string; previous_values: string | null; corrected_values: string | null; reason: string | null; note: string | null; created_at: string };
+
+function toJob(row: JobRow): Job {
+  return { id: row.id, billId: row.bill_id, type: row.type, state: row.state, idempotencyKey: row.idempotency_key, attempts: row.attempts, availableAt: row.available_at, leaseToken: row.lease_token, leaseExpiresAt: row.lease_expires_at, claimedBy: row.claimed_by, claimedAt: row.claimed_at, lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at, expectedRevision: row.expected_revision };
+}
+function toBill(row: BillRow): Bill {
+  return { id: row.id, whatsappMessageId: row.whatsapp_message_id, whatsappGroupId: row.whatsapp_group_id, whatsappSenderId: row.whatsapp_sender_id, attachmentIndex: row.attachment_index, receivedAt: row.received_at, caption: row.caption, originalFilename: row.original_filename, mimeType: row.mime_type, originalPath: row.original_path, contentSha256: row.content_sha256, status: row.status, driveFileId: row.drive_file_id, sheetRowKey: row.sheet_row_key, createdAt: row.created_at, updatedAt: row.updated_at, contentRevision: row.content_revision, reviewRevision: row.review_revision };
+}
+function toJobTransition(row: JobTransitionRow): JobTransition {
+  return { id: row.id, jobId: row.job_id, fromState: row.from_state, toState: row.to_state, reason: row.reason, createdAt: row.created_at };
+}
+function toExtraction(row: ExtractionRow): Extraction {
+  return { id: row.id, billId: row.bill_id, schemaVersion: row.schema_version, normalized: row.normalized_json ? JSON.parse(row.normalized_json) as ExtractedBill : null, rawProviderResponse: row.raw_provider_response, providerModel: row.provider_model, promptSchemaVersion: row.prompt_schema_version, requestedAt: row.requested_at, completedAt: row.completed_at, errorDetails: row.error_details, createdAt: row.created_at, updatedAt: row.updated_at };
+}
+function toValidationIssue(row: ValidationIssueRow): ValidationIssue {
+  return { id: row.id, billId: row.bill_id, field: row.field, code: row.code, message: row.message, severity: row.severity, observedValue: row.observed_value, createdAt: row.created_at };
+}
+function toProjection(row: ProjectionRow): ProviderProjectionMetadata {
+  return { id: row.id, billId: row.bill_id, provider: row.provider, projectionKey: row.projection_key, externalId: row.external_id, externalUrl: row.external_url, metadata: row.metadata_json, createdAt: row.created_at, updatedAt: row.updated_at };
+}
+function recordTransition(db: Database, jobId: string, fromState: JobState | null, toState: JobState, reason: string, createdAt: string): void {
+  db.query("INSERT INTO job_transition_history (id, job_id, from_state, to_state, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(randomUUID(), jobId, fromState, toState, reason, createdAt);
+}
+
+export interface RetryPolicy { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number; }
+export interface CreateBillResult { bill: Bill; created: boolean; }
+export interface ReviewSubmission { billId: string; reviewerId: string; action: "approve" | "reject"; reason: string; note: string; expectedContentRevision: number; expectedReviewRevision: number; corrected: ExtractedBill; }
+
+function retryTransition(attempts: number, policy: RetryPolicy, now: Date): { state: "retryable_failure" | "permanent_failure"; availableAt: string } {
+  if (attempts >= policy.maxAttempts) return { state: "permanent_failure", availableAt: now.toISOString() };
+  const delay = Math.min(policy.retryMaxMs, policy.retryBaseMs * 2 ** Math.max(0, attempts - 1));
+  return { state: "retryable_failure", availableAt: new Date(now.getTime() + delay).toISOString() };
+}
+function safeJobError(error: string): string {
+  if (/timeout/i.test(error)) return "provider_timeout";
+  if (/lease/i.test(error)) return "lease_lost";
+  if (/malformed|invalid structured|schema/i.test(error)) return "malformed_provider_output";
+  if (/cannot be read|size limit/i.test(error)) return "original_unreadable_or_too_large";
+  const status = /HTTP\s+(\d{3})/i.exec(error)?.[1];
+  return status ? `provider_http_${status}` : "job_handler_failed";
+}
+
+/** Canonical SQLite store. Every method completes its transaction before returning. */
+export class BillDatabase {
+  readonly sqlite: Database;
+
+  constructor(path: string) {
+    this.sqlite = new Database(path, { create: true, strict: true });
+    this.sqlite.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
+    applyMigrations(this.sqlite);
+  }
+
+  close(): void { this.sqlite.close(); }
+
+  createBillWithInitialJobs(input: CreateBillInput, initialJobs: InitialJobInput[]): CreateBillResult {
+    const now = new Date().toISOString();
+    const billId = input.id ?? randomUUID();
+    const insertBill = this.sqlite.query(`INSERT INTO bills (id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, caption, original_filename, mime_type, original_path, content_sha256, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?) ON CONFLICT(whatsapp_message_id, attachment_index) DO NOTHING`);
+    const bySource = this.sqlite.query<BillRow, [string, number]>("SELECT * FROM bills WHERE whatsapp_message_id = ? AND attachment_index = ?");
+    const insertJob = this.sqlite.query(`INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, 0, ?, ?, ?)`);
+    const jobByKey = this.sqlite.query<{ bill_id: string }, [string]>("SELECT bill_id FROM jobs WHERE idempotency_key = ?");
+    return this.sqlite.transaction(() => {
+      const jobKeys = new Set<string>();
+      for (const job of initialJobs) {
+        if (jobKeys.has(job.idempotencyKey)) throw new Error(`Duplicate required job idempotency key: ${job.idempotencyKey}`);
+        jobKeys.add(job.idempotencyKey);
+      }
+      const result = insertBill.run(billId, input.whatsappMessageId, input.whatsappGroupId, input.whatsappSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, input.mimeType, input.originalPath, input.contentSha256, now, now);
+      const row = bySource.get(input.whatsappMessageId, input.attachmentIndex);
+      if (!row) throw new Error("Bill insert did not produce a bill");
+      const created = result.changes === 1;
+      for (const job of initialJobs) {
+        const existing = jobByKey.get(job.idempotencyKey);
+        if (existing && existing.bill_id !== row.id) throw new Error(`Required job idempotency key belongs to another bill: ${job.idempotencyKey}`);
+        if (!created && !existing) throw new Error(`Required initial job is missing for existing bill: ${job.idempotencyKey}`);
+        if (created) {
+          const jobId = randomUUID();
+          if (insertJob.run(jobId, row.id, job.type, job.idempotencyKey, job.availableAt ?? now, now, now).changes !== 1) throw new Error(`Could not create required initial job: ${job.idempotencyKey}`);
+          recordTransition(this.sqlite, jobId, null, "pending", "created", now);
+        }
+      }
+      return { bill: toBill(row), created };
+    })();
+  }
+
+  getBillByWhatsAppAttachment(messageId: string, attachmentIndex: number): Bill | null {
+    const row = this.sqlite.query<BillRow, [string, number]>("SELECT * FROM bills WHERE whatsapp_message_id = ? AND attachment_index = ?").get(messageId, attachmentIndex);
+    return row ? toBill(row) : null;
+  }
+
+  getBill(id: string): Bill | null {
+    const row = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE id = ?").get(id);
+    return row ? toBill(row) : null;
+  }
+
+  getExtraction(billId: string): Extraction | null {
+    const row = this.sqlite.query<ExtractionRow, [string]>("SELECT * FROM extractions WHERE bill_id = ?").get(billId);
+    return row ? toExtraction(row) : null;
+  }
+
+  getValidationIssues(billId: string): ValidationIssue[] {
+    return this.sqlite.query<ValidationIssueRow, [string]>("SELECT * FROM validation_issues WHERE bill_id = ? ORDER BY rowid").all(billId).map(toValidationIssue);
+  }
+
+  getLatestExtractionAttempt(billId: string): { providerModel: string | null; requestedAt: string; completedAt: string; outcome: "succeeded" | "failed"; errorDetails: string | null } | null {
+    const row = this.sqlite.query<{ provider_model: string | null; requested_at: string; completed_at: string; outcome: "succeeded" | "failed"; error_details: string | null }, [string]>("SELECT provider_model, requested_at, completed_at, outcome, error_details FROM extraction_attempts WHERE bill_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(billId);
+    return row ? { providerModel: row.provider_model, requestedAt: row.requested_at, completedAt: row.completed_at, outcome: row.outcome, errorDetails: row.error_details } : null;
+  }
+
+  getEffectiveBillData(billId: string): EffectiveBillData | null {
+    const row = this.sqlite.query<{ normalized_json: string; revision: number; updated_at: string }, [string]>("SELECT normalized_json, revision, updated_at FROM effective_bill_data WHERE bill_id = ?").get(billId);
+    return row ? { extraction: JSON.parse(row.normalized_json) as ExtractedBill, revision: row.revision, updatedAt: row.updated_at } : null;
+  }
+
+  getEffectiveExtraction(billId: string): ExtractedBill | null { return this.getEffectiveBillData(billId)?.extraction ?? this.getExtraction(billId)?.normalized ?? null; }
+
+  listReviewBills(): Bill[] {
+    return this.sqlite.query<BillRow, []>(`SELECT DISTINCT b.* FROM bills b LEFT JOIN jobs j ON j.bill_id = b.id
+      WHERE b.status = 'needs_review' OR j.state = 'permanent_failure' ORDER BY b.updated_at DESC`).all().map(toBill);
+  }
+
+  getReviewEvents(billId: string): ReviewEvent[] {
+    return this.sqlite.query<ReviewEventRow, [string]>("SELECT * FROM review_events WHERE bill_id = ? ORDER BY created_at, rowid").all(billId).map((row) => ({ id: row.id, billId: row.bill_id, reviewerId: row.reviewer_id, action: row.action, previousValues: row.previous_values, correctedValues: row.corrected_values, reason: row.reason, note: row.note, createdAt: row.created_at }));
+  }
+
+  /** Reviewer mutation is one SQLite transaction. A stale/replayed form changes nothing. */
+  submitReview(input: ReviewSubmission, factualIssues: Array<Omit<ValidationIssue, "id" | "billId" | "createdAt">>): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      const bill = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND status IN ('needs_review','failed')").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      if (!bill) return false;
+      const original = this.getEffectiveExtraction(input.billId);
+      const nextContent = bill.content_revision + 1;
+      const nextReview = bill.review_revision + 1;
+      this.sqlite.query(`INSERT INTO effective_bill_data (bill_id, normalized_json, revision, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(bill_id) DO UPDATE SET normalized_json = excluded.normalized_json, revision = excluded.revision, updated_at = excluded.updated_at`).run(input.billId, JSON.stringify(input.corrected), nextContent, now);
+      this.sqlite.query("INSERT INTO review_events (id, bill_id, reviewer_id, action, previous_values, corrected_values, reason, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(randomUUID(), input.billId, input.reviewerId, input.action, original === null ? null : JSON.stringify(original), JSON.stringify(input.corrected), input.reason, input.note, now);
+      this.sqlite.query("DELETE FROM validation_issues WHERE bill_id = ?").run(input.billId);
+      const insertIssue = this.sqlite.query("INSERT INTO validation_issues (id, bill_id, field, code, message, severity, observed_value, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+      for (const issue of factualIssues) insertIssue.run(randomUUID(), input.billId, issue.field, issue.code, issue.message, issue.severity, issue.observedValue, now);
+      const approved = input.action === "approve";
+      this.sqlite.query("UPDATE bills SET status = ?, manual_review_required = 0, content_revision = ?, review_revision = ?, updated_at = ? WHERE id = ?").run(approved ? "approved" : "failed", nextContent, nextReview, now, input.billId);
+      this.invalidatePendingProjectJobs(input.billId, now);
+      if (approved) {
+        this.ensureArchiveJob(input.billId, now);
+        this.activateProjectJob(input.billId, nextContent, now);
+      } else if (bill.sheet_row_key !== null || this.getProjectionMetadata("sheets", input.billId)) this.activateReviewSyncJob(input.billId, nextReview, now);
+      return true;
+    })();
+  }
+
+  getProjectionMetadata(provider: string, projectionKey: string): ProviderProjectionMetadata | null {
+    const row = this.sqlite.query<ProjectionRow, [string, string]>("SELECT * FROM provider_projection_metadata WHERE provider = ? AND projection_key = ?").get(provider, projectionKey);
+    return row ? toProjection(row) : null;
+  }
+
+  getDriveReservation(key: string): DriveReservationRow | null { return this.sqlite.query<DriveReservationRow, [string]>("SELECT * FROM drive_reservations WHERE reservation_key = ?").get(key) ?? null; }
+  /** The generated ID is obtained outside SQLite; this transaction makes concurrent workers converge on one ID. */
+  reserveDriveId(input: { key: string; kind: "file" | "folder"; parentId: string | null; logicalPath: string; generatedId: string; billId?: string; contentSha256?: string }): DriveReservationRow {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      this.sqlite.query("INSERT INTO drive_reservations (reservation_key, kind, parent_id, logical_path, drive_id, state, bill_id, content_sha256, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?) ON CONFLICT(reservation_key) DO NOTHING").run(input.key, input.kind, input.parentId, input.logicalPath, input.generatedId, input.billId ?? null, input.contentSha256 ?? null, now, now);
+      const value = this.getDriveReservation(input.key); if (!value) throw new Error("Drive reservation was not persisted"); return value;
+    })();
+  }
+  confirmDriveReservation(key: string): void { this.sqlite.query("UPDATE drive_reservations SET state = 'confirmed', updated_at = ? WHERE reservation_key = ?").run(new Date().toISOString(), key); }
+
+  /** Persists only projection state, fenced by the active archive job lease. */
+  persistDriveArchive(input: { billId: string; jobId: string; leaseToken: string; contentSha256: string; fileId: string; webLink: string }): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
+      const bill = this.sqlite.query<BillRow, [string, string]>("SELECT * FROM bills WHERE id = ? AND content_sha256 = ?").get(input.billId, input.contentSha256);
+      if (!bill) return false;
+      const metadata = JSON.stringify({ billId: input.billId, contentSha256: input.contentSha256 });
+      this.sqlite.query(`INSERT INTO provider_projection_metadata (id, bill_id, provider, projection_key, external_id, external_url, metadata_json, created_at, updated_at)
+        VALUES (?, ?, 'drive', ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, projection_key) DO UPDATE SET external_id = excluded.external_id, external_url = excluded.external_url, metadata_json = excluded.metadata_json, updated_at = excluded.updated_at`).run(randomUUID(), input.billId, input.billId, input.fileId, input.webLink, metadata, now, now);
+      this.sqlite.query("UPDATE bills SET drive_file_id = ?, updated_at = ? WHERE id = ?").run(input.fileId, now, input.billId);
+      return true;
+    })();
+  }
+
+  /** Persists only the Sheet row key and projection metadata after a current approved revision upsert. */
+  persistSheetProjection(input: { billId: string; jobId: string; leaseToken: string; expectedRevision: number; rowKey: string }): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      if (!this.leaseOwned(input.jobId, input.leaseToken, now) || !this.isApprovedAtRevision(input.billId, input.expectedRevision)) return false;
+      const metadata = JSON.stringify({ billId: input.billId, revision: input.expectedRevision });
+      this.sqlite.query(`INSERT INTO provider_projection_metadata (id, bill_id, provider, projection_key, external_id, metadata_json, created_at, updated_at)
+        VALUES (?, ?, 'sheets', ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, projection_key) DO UPDATE SET external_id = excluded.external_id, metadata_json = excluded.metadata_json, updated_at = excluded.updated_at`).run(randomUUID(), input.billId, input.billId, input.rowKey, metadata, now, now);
+      this.sqlite.query("UPDATE bills SET sheet_row_key = ?, updated_at = ? WHERE id = ?").run(input.rowKey, now, input.billId);
+      return true;
+    })();
+  }
+
+  getValidationSnapshot(billId: string): { extraction: Extraction; contentRevision: number; reviewRevision: number } | null {
+    const bill = this.getBill(billId);
+    const extraction = this.getExtraction(billId);
+    return bill && extraction?.normalized ? { extraction, contentRevision: bill.contentRevision, reviewRevision: bill.reviewRevision } : null;
+  }
+
+  /** Replaces an authoritative decision only for the exact content/review revision that was read. */
+  persistValidationDecision(input: { billId: string; expectedContentRevision: number; expectedReviewRevision: number; decision: "approved" | "needs_review"; issues: Array<Omit<ValidationIssue, "id" | "billId" | "createdAt">> }): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ?").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      // A human workflow is sticky: only approveReviewCorrection may approve any review revision.
+      if (!current || (current.review_revision > 0 && input.decision === "approved")) return false;
+      this.sqlite.query("DELETE FROM validation_issues WHERE bill_id = ?").run(input.billId);
+      const insertIssue = this.sqlite.query("INSERT INTO validation_issues (id, bill_id, field, code, message, severity, observed_value, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+      for (const item of input.issues) insertIssue.run(randomUUID(), input.billId, item.field, item.code, item.message, item.severity, item.observedValue, now);
+      this.sqlite.query("UPDATE bills SET status = ?, updated_at = ? WHERE id = ?").run(input.decision, now, input.billId);
+      this.ensureArchiveJob(input.billId, now);
+      if (input.decision === "approved") this.activateProjectJob(input.billId, input.expectedContentRevision, now);
+      else this.invalidatePendingProjectJobs(input.billId, now);
+      return true;
+    })();
+  }
+
+  private ensureArchiveJob(billId: string, now: string): void {
+    const existing = this.sqlite.query<JobRow, [string, JobType]>("SELECT * FROM jobs WHERE bill_id = ? AND type = ?").get(billId, "archive_to_drive");
+    if (existing) return;
+    const id = randomUUID();
+    this.sqlite.query("INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, created_at, updated_at) VALUES (?, ?, 'archive_to_drive', 'pending', ?, 0, ?, ?, ?)").run(id, billId, `archive_to_drive:${billId}`, now, now, now);
+    recordTransition(this.sqlite, id, null, "pending", "created", now);
+  }
+
+  private activateProjectJob(billId: string, revision: number, now: string): void {
+    const idempotencyKey = `project:${billId}:${revision}`;
+    const existing = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE idempotency_key = ?").get(idempotencyKey);
+    if (existing) return;
+    const id = randomUUID();
+    this.sqlite.query("INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, expected_revision, created_at, updated_at) VALUES (?, ?, 'project_to_sheet', 'pending', ?, 0, ?, ?, ?, ?)").run(id, billId, idempotencyKey, now, revision, now, now);
+    recordTransition(this.sqlite, id, null, "pending", "created", now);
+    /* Existing pre-revision jobs are intentionally not rewritten: a running lease belongs to its
+       worker. Pending/retryable legacy jobs are invalidated by review routing. */
+  }
+
+  private activateReviewSyncJob(billId: string, revision: number, now: string): void {
+    const key = `sync_review_correction:${billId}:${revision}`;
+    if (this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE idempotency_key = ?").get(key)) return;
+    const id = randomUUID();
+    this.sqlite.query("INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, expected_revision, created_at, updated_at) VALUES (?, ?, 'sync_review_correction', 'pending', ?, 0, ?, ?, ?, ?)").run(id, billId, key, now, revision, now, now);
+    recordTransition(this.sqlite, id, null, "pending", "created", now);
+  }
+
+  /** Explicit reviewer-only approval boundary for a correction already superseded for review. */
+  approveReviewCorrection(input: { billId: string; reviewerId: string; expectedContentRevision: number; expectedReviewRevision: number; action?: string }): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND manual_review_required = 1").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      if (!current) return false;
+      this.sqlite.query("UPDATE bills SET status = 'approved', manual_review_required = 0, updated_at = ? WHERE id = ?").run(now, input.billId);
+      this.sqlite.query("INSERT INTO review_events (id, bill_id, reviewer_id, action, created_at) VALUES (?, ?, ?, ?, ?)").run(randomUUID(), input.billId, input.reviewerId, input.action ?? "approved", now);
+      this.ensureArchiveJob(input.billId, now);
+      this.activateProjectJob(input.billId, input.expectedContentRevision, now);
+      return true;
+    })();
+  }
+
+  private invalidatePendingProjectJobs(billId: string, now: string): void {
+    const projects = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE bill_id = ? AND type = 'project_to_sheet' AND state IN ('pending', 'retryable_failure')").all(billId);
+    for (const job of projects) {
+      this.sqlite.query("UPDATE jobs SET state = 'permanent_failure', last_error = 'validation_invalidated', updated_at = ? WHERE id = ?").run(now, job.id);
+      recordTransition(this.sqlite, job.id, job.state, "permanent_failure", "validation_invalidated", now);
+    }
+  }
+
+  /** Used by Sheets handlers immediately before their provider effect. */
+  isApprovedAtRevision(billId: string, revision: number | null): boolean {
+    return revision !== null && Boolean(this.sqlite.query<{ value: number }, [string, number]>("SELECT 1 AS value FROM bills WHERE id = ? AND status = 'approved' AND content_revision = ?").get(billId, revision)?.value);
+  }
+  isFailedAtReviewRevision(billId: string, revision: number | null): boolean {
+    return revision !== null && Boolean(this.sqlite.query<{ value: number }, [string, number]>("SELECT 1 AS value FROM bills WHERE id = ? AND status = 'failed' AND review_revision = ?").get(billId, revision)?.value);
+  }
+  ensureCurrentProjectionJob(billId: string): void {
+    const bill = this.getBill(billId); if (!bill || bill.status !== "approved") return;
+    this.sqlite.transaction(() => this.activateProjectJob(billId, bill.contentRevision, new Date().toISOString()))();
+  }
+  /** Compensation after a stale rejection clear: never touch a running/succeeded job. */
+  enqueueProjectionRepair(syncJobId: string, billId: string): void {
+    const bill = this.getBill(billId); if (!bill || bill.status !== "approved") return;
+    const now = new Date().toISOString(); const key = `repair:${syncJobId}:${bill.contentRevision}`;
+    this.sqlite.transaction(() => {
+      if (this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE idempotency_key = ?").get(key)) return;
+      const id = randomUUID();
+      this.sqlite.query("INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, expected_revision, created_at, updated_at) VALUES (?, ?, 'project_to_sheet', 'pending', ?, 0, ?, ?, ?, ?)").run(id, billId, key, now, bill.contentRevision, now, now);
+      recordTransition(this.sqlite, id, null, "pending", "created", now);
+    })();
+  }
+
+  /** Stable review boundary for Phase 5: automatic approval stays disabled until reviewer approval. */
+  supersedeForReview(billId: string, reviewerId: string, action = "correction_started"): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      const result = this.sqlite.query("UPDATE bills SET status = 'needs_review', manual_review_required = 1, content_revision = content_revision + 1, review_revision = review_revision + 1, updated_at = ? WHERE id = ?").run(now, billId);
+      if (result.changes !== 1) return false;
+      this.sqlite.query("INSERT INTO review_events (id, bill_id, reviewer_id, action, created_at) VALUES (?, ?, ?, ?, ?)").run(randomUUID(), billId, reviewerId, action, now);
+      this.invalidatePendingProjectJobs(billId, now);
+      return true;
+    })();
+  }
+
+  markBillExtracting(billId: string): void {
+    const now = new Date().toISOString();
+    this.sqlite.query("UPDATE bills SET status = 'extracting', updated_at = ? WHERE id = ? AND status = 'received'").run(now, billId);
+  }
+
+  persistExtractionSuccess(input: { billId: string; jobId: string; leaseToken: string; jobAttempt: number; normalized: ExtractedBill; rawProviderResponse: string; providerModel: string; promptSchemaVersion: string; requestedAt: string; completedAt: string }): boolean {
+    return this.sqlite.transaction(() => {
+      const now = new Date().toISOString();
+      this.recordExtractionAttempt({ ...input, outcome: "succeeded", errorDetails: null });
+      const owned = this.leaseOwned(input.jobId, input.leaseToken, now);
+      if (!owned) return false;
+      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        ON CONFLICT(bill_id) DO UPDATE SET schema_version = excluded.schema_version, normalized_json = excluded.normalized_json, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = NULL, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
+        .run(randomUUID(), input.billId, input.normalized.schemaVersion, JSON.stringify(input.normalized), input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, now, now);
+       if (result.changes === 1) this.sqlite.query("UPDATE bills SET content_revision = content_revision + 1, updated_at = ? WHERE id = ?").run(now, input.billId);
+       return result.changes === 1;
+    })();
+  }
+
+  persistExtractionFailure(input: { billId: string; jobId: string; leaseToken: string; jobAttempt: number; rawProviderResponse: string | null; providerModel: string | null; promptSchemaVersion: string; requestedAt: string; completedAt: string; errorDetails: string; status?: "needs_review" | "failed" }): boolean {
+    return this.sqlite.transaction(() => {
+      const now = new Date().toISOString();
+      this.recordExtractionAttempt({ ...input, outcome: "failed" });
+      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
+      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
+        VALUES (?, ?, '1', NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bill_id) DO UPDATE SET normalized_json = NULL, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = excluded.error_details, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
+        .run(randomUUID(), input.billId, input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, now, input.errorDetails, now, now);
+      if (result.changes === 1 && input.status) this.sqlite.query("UPDATE bills SET status = ?, updated_at = ? WHERE id = ? AND status = 'extracting'").run(input.status, now, input.billId);
+      return result.changes === 1;
+    })();
+  }
+
+  private leaseOwned(jobId: string, leaseToken: string, now: string): boolean {
+    return Boolean(this.sqlite.query<{ value: number }, [string, string, string]>("SELECT 1 AS value FROM jobs WHERE id = ? AND state = 'running' AND lease_token = ? AND lease_expires_at IS NOT NULL AND lease_expires_at > ?").get(jobId, leaseToken, now)?.value);
+  }
+
+  private recordExtractionAttempt(input: { billId: string; jobId: string; jobAttempt: number; providerModel: string | null; requestedAt: string; completedAt: string; outcome: "succeeded" | "failed"; rawProviderResponse: string | null; errorDetails: string | null }): void {
+    this.sqlite.query("INSERT INTO extraction_attempts (id, bill_id, job_id, job_attempt, provider_model, requested_at, completed_at, outcome, raw_provider_response, error_details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(randomUUID(), input.billId, input.jobId, input.jobAttempt, input.providerModel, input.requestedAt, input.completedAt, input.outcome, input.rawProviderResponse, input.errorDetails, new Date().toISOString());
+  }
+
+  getJob(id: string): Job | null {
+    const row = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE id = ?").get(id);
+    return row ? toJob(row) : null;
+  }
+
+  /** Read-only operational view; SQLite remains the source for all status reporting. */
+  listJobs(states?: readonly JobState[]): Job[] {
+    if (states?.length === 0) return [];
+    if (!states) return this.sqlite.query<JobRow, []>("SELECT * FROM jobs ORDER BY available_at, created_at").all().map(toJob);
+    const placeholders = states.map(() => "?").join(",");
+    return this.sqlite.query<JobRow, string[]>(`SELECT * FROM jobs WHERE state IN (${placeholders}) ORDER BY available_at, created_at`).all(...states).map(toJob);
+  }
+
+  listJobsForBill(billId: string): Job[] {
+    return this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE bill_id = ? ORDER BY created_at").all(billId).map(toJob);
+  }
+
+  /** Snapshot-safe canonical original inventory for backup/export tooling. */
+  listCanonicalOriginals(): Array<Pick<Bill, "id" | "originalPath" | "contentSha256" | "mimeType">> {
+    return this.sqlite.query<Pick<BillRow, "id" | "original_path" | "content_sha256" | "mime_type">, []>("SELECT id, original_path, content_sha256, mime_type FROM bills ORDER BY id").all()
+      .map((row) => ({ id: row.id, originalPath: row.original_path, contentSha256: row.content_sha256, mimeType: row.mime_type }));
+  }
+
+  /** Matches the public identifiers operators receive from WhatsApp, Drive, or Sheets. */
+  findBillsByIdentifier(identifier: string): Bill[] {
+    return this.sqlite.query<BillRow, [string, string, string, string, string, string]>(`SELECT DISTINCT b.* FROM bills b
+      LEFT JOIN provider_projection_metadata p ON p.bill_id = b.id
+      WHERE b.id = ? OR b.whatsapp_message_id = ? OR b.drive_file_id = ? OR b.sheet_row_key = ?
+         OR p.external_id = ? OR p.projection_key = ? ORDER BY b.created_at`,
+    ).all(identifier, identifier, identifier, identifier, identifier, identifier).map(toBill);
+  }
+
+  /** Explicit, auditable replay. It never requeues completed work or invalidated projections. */
+  requeueJob(id: string, includePermanent = false): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      const job = this.getJob(id);
+      if (!job || (job.state !== "retryable_failure" && (!includePermanent || job.state !== "permanent_failure")) || job.lastError === "validation_invalidated") return false;
+      const bill = this.getBill(job.billId);
+      if (!bill || (job.type === "project_to_sheet" && !this.isApprovedAtRevision(job.billId, job.expectedRevision)) || (job.type === "sync_review_correction" && bill.status !== "failed" && bill.status !== "approved")) return false;
+      const result = this.sqlite.query("UPDATE jobs SET state = 'pending', available_at = ?, lease_token = NULL, lease_expires_at = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ? AND state IN ('retryable_failure', 'permanent_failure')").run(now, now, id);
+      if (result.changes === 1) recordTransition(this.sqlite, id, job.state, "pending", "operator_replay", now);
+      return result.changes === 1;
+    })();
+  }
+
+  countJobsForBill(billId: string): number {
+    return this.sqlite.query<{ count: number }, [string]>("SELECT count(*) AS count FROM jobs WHERE bill_id = ?").get(billId)?.count ?? 0;
+  }
+
+  getJobTransitions(jobId: string): JobTransition[] {
+    return this.sqlite.query<JobTransitionRow, [string]>("SELECT * FROM job_transition_history WHERE job_id = ? ORDER BY rowid").all(jobId).map(toJobTransition);
+  }
+
+  /** Atomically transitions exactly one available job to running. No provider code is invoked here. */
+  claimNextJob(workerId: string, policy: RetryPolicy, now = new Date(), supportedTypes: readonly JobType[] = jobTypes): ClaimedJob | null {
+    if (supportedTypes.length === 0) return null;
+    if (supportedTypes.some((type) => !jobTypes.includes(type))) throw new Error("Unsupported job type in claim filter");
+    const nowIso = now.toISOString();
+    const leaseExpiresAt = new Date(now.getTime() + policy.leaseMs).toISOString();
+    const token = randomUUID();
+    const expiredLeases = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE state = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?");
+    const expireLease = this.sqlite.query("UPDATE jobs SET state = ?, available_at = ?, last_error = 'lease expired', lease_token = NULL, lease_expires_at = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ? AND state = 'running'");
+    const retriesReady = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE state = 'retryable_failure' AND available_at <= ?");
+    const releaseRetry = this.sqlite.query("UPDATE jobs SET state = 'pending', updated_at = ? WHERE id = ? AND state = 'retryable_failure'");
+    const allowedTypes = supportedTypes.map((type) => `'${type}'`).join(",");
+    const claim = this.sqlite.query<JobRow, [string, string, string, string, string, string]>(`UPDATE jobs SET state = 'running', attempts = attempts + 1, lease_token = ?, lease_expires_at = ?, claimed_by = ?, claimed_at = ?, updated_at = ? WHERE id = (SELECT id FROM jobs WHERE state = 'pending' AND available_at <= ? AND type IN (${allowedTypes}) ORDER BY available_at, created_at LIMIT 1) AND state = 'pending' RETURNING *`);
+    return this.sqlite.transaction(() => {
+      for (const expired of expiredLeases.all(nowIso)) {
+        const transition = retryTransition(expired.attempts, policy, now);
+        if (expireLease.run(transition.state, transition.availableAt, nowIso, expired.id).changes === 1) recordTransition(this.sqlite, expired.id, "running", transition.state, "lease_expired", nowIso);
+      }
+      for (const retry of retriesReady.all(nowIso)) {
+        if (releaseRetry.run(nowIso, retry.id).changes === 1) recordTransition(this.sqlite, retry.id, "retryable_failure", "pending", "retry_available", nowIso);
+      }
+      const row = claim.get(token, leaseExpiresAt, workerId, nowIso, nowIso, nowIso);
+      if (!row || !row.lease_token || !row.lease_expires_at || !row.claimed_by || !row.claimed_at) return null;
+      recordTransition(this.sqlite, row.id, "pending", "running", "claimed", nowIso);
+      return { ...toJob(row), leaseToken: row.lease_token, leaseExpiresAt: row.lease_expires_at, claimedBy: row.claimed_by, claimedAt: row.claimed_at };
+    })();
+  }
+
+  completeJob(id: string, leaseToken: string): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      const result = this.sqlite.query("UPDATE jobs SET state = 'succeeded', lease_token = NULL, lease_expires_at = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ? AND state = 'running' AND lease_token = ?").run(now, id, leaseToken);
+      if (result.changes === 1) recordTransition(this.sqlite, id, "running", "succeeded", "completed", now);
+      return result.changes === 1;
+    })();
+  }
+
+  failJob(id: string, leaseToken: string, error: string, policy: RetryPolicy, now = new Date(), retryable = true): Job | null {
+    return this.sqlite.transaction(() => {
+      const current = this.getJob(id);
+      if (!current || current.state !== "running" || current.leaseToken !== leaseToken) return null;
+      const nowIso = now.toISOString();
+      const transition = retryable ? retryTransition(current.attempts, policy, now) : { state: "permanent_failure" as const, availableAt: now.toISOString() };
+      const result = this.sqlite.query<JobRow, [string, string, string, string, string, string]>(`UPDATE jobs SET state = ?, available_at = ?, last_error = ?, lease_token = NULL, lease_expires_at = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ? AND state = 'running' AND lease_token = ? RETURNING *`).get(transition.state, transition.availableAt, safeJobError(error), nowIso, id, leaseToken);
+      if (!result) return null;
+      recordTransition(this.sqlite, id, "running", transition.state, "handler_failed", nowIso);
+      return toJob(result);
+    })();
+  }
+
+  /** Fenced lease renewal used only while an external handler is running. */
+  renewLease(id: string, leaseToken: string, leaseMs: number, now = new Date()): boolean {
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(now.getTime() + leaseMs).toISOString();
+    const result = this.sqlite.query("UPDATE jobs SET lease_expires_at = ?, updated_at = ? WHERE id = ? AND state = 'running' AND lease_token = ? AND lease_expires_at > ?").run(expiresAt, nowIso, id, leaseToken, nowIso);
+    return result.changes === 1;
+  }
+}

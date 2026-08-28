@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "types": ["bun-types"],
+    "lib": ["ESNext", "DOM"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

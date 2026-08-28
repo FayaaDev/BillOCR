@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.local
+dist/
+coverage/
+data/
+secrets/
+.secrets/
+*-auth/
+whatsapp-auth/
+*.sqlite
+*.sqlite-*

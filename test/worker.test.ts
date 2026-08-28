@@ -1,0 +1,106 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { JobHandlers } from "../src/contracts";
+import { BillDatabase, type RetryPolicy } from "../src/database";
+import { createLogger } from "../src/logger";
+import { BackgroundWorkerLoop, JobWorker } from "../src/worker";
+
+const policy: RetryPolicy = { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 };
+let directory: string;
+let database: BillDatabase;
+
+beforeEach(() => { directory = mkdtempSync(join(tmpdir(), "bill-worker-")); database = new BillDatabase(join(directory, "ledger.sqlite")); });
+afterEach(() => { database.close(); rmSync(directory, { recursive: true, force: true }); });
+
+function enqueue(type: "extract" | "archive_to_drive" | "project_to_sheet" = "extract") {
+  return database.createBillWithInitialJobs({ whatsappMessageId: "message", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: new Date().toISOString(), mimeType: "image/png", originalPath: "/file", contentSha256: "b".repeat(64) }, [{ type, idempotencyKey: `key:${type}` }]);
+}
+
+test("a running projection cannot complete after its revision is superseded", async () => {
+  const bill = enqueue("project_to_sheet");
+  database.sqlite.query("UPDATE bills SET status = 'approved', content_revision = 1 WHERE id = ?").run(bill.bill.id);
+  database.sqlite.query("UPDATE jobs SET expected_revision = 1 WHERE bill_id = ?").run(bill.bill.id);
+  const worker = new JobWorker(database, { project_to_sheet: async () => { database.supersedeForReview(bill.bill.id, "reviewer"); } }, policy, "project-worker", createLogger("error"));
+  expect(await worker.runOnce()).toBe(true);
+  expect(database.sqlite.query<{ state: string; lease_token: string | null }, [string]>("SELECT state, lease_token FROM jobs WHERE bill_id = ?").get(bill.bill.id)).toMatchObject({ state: "permanent_failure", lease_token: null });
+});
+
+test("an unsupported job remains pending for a later injected handler", async () => {
+  const bill = enqueue();
+  const worker = new JobWorker(database, {}, policy, "worker", createLogger("error"));
+  expect(await worker.runOnce()).toBe(false);
+  const job = database.sqlite.query<{ state: string }, [string]>("SELECT state FROM jobs WHERE bill_id = ?").get(bill.bill.id);
+  expect(job?.state).toBe("pending");
+});
+
+test("provider error content is sanitized from durable diagnostics and never logged", async () => {
+  const bill = enqueue();
+  const lines: string[] = [];
+  const handlers: JobHandlers = { extract: async () => { throw new Error("Authorization: Bearer provider-secret-value"); } };
+  const worker = new JobWorker(database, handlers, policy, "worker", createLogger("debug", (line) => lines.push(line)));
+  expect(await worker.runOnce()).toBe(true);
+  expect(lines.join("\n")).not.toContain("provider-secret-value");
+  expect(database.sqlite.query<{ last_error: string }, [string]>("SELECT last_error FROM jobs WHERE bill_id = ?").get(bill.bill.id)?.last_error).toBe("job_handler_failed");
+});
+
+test("background worker loop yields to the event loop and stops cleanly", async () => {
+  let calls = 0;
+  const loop = new BackgroundWorkerLoop({ runOnce: async () => { calls += 1; return false; } }, createLogger("error"), 1_000);
+  loop.start();
+  await Bun.sleep(20);
+  await loop.stop();
+  expect(calls).toBe(1);
+  await Bun.sleep(20);
+  expect(calls).toBe(1);
+});
+
+test("lease heartbeat prevents a second worker from duplicating a long provider call", async () => {
+  const bill = enqueue();
+  const shortLease: RetryPolicy = { ...policy, leaseMs: 30 };
+  let providerCalls = 0;
+  const handlers: JobHandlers = { extract: async () => { providerCalls += 1; await Bun.sleep(100); } };
+  const firstWorker = new JobWorker(database, handlers, shortLease, "worker-a", createLogger("error"));
+  const secondDatabase = new BillDatabase(join(directory, "ledger.sqlite"));
+  const secondWorker = new JobWorker(secondDatabase, handlers, shortLease, "worker-b", createLogger("error"));
+  const firstRun = firstWorker.runOnce();
+  await Bun.sleep(60);
+  expect(await secondWorker.runOnce()).toBe(false);
+  await firstRun;
+  expect(providerCalls).toBe(1);
+  expect(database.sqlite.query<{ state: string }, [string]>("SELECT state FROM jobs WHERE bill_id = ?").get(bill.bill.id)?.state).toBe("succeeded");
+  secondDatabase.close();
+});
+
+test("handler receives a stable idempotency key and cannot fence an expired claim", async () => {
+  const bill = enqueue();
+  const shortLease: RetryPolicy = { ...policy, leaseMs: 30 };
+  const secondDatabase = new BillDatabase(join(directory, "ledger.sqlite"));
+  let key = "";
+  let assertionFailed = false;
+  const handlers: JobHandlers = {
+    extract: async (_job, context) => {
+      key = context.idempotencyKey;
+      secondDatabase.claimNextJob("worker-b", shortLease, new Date(Date.now() + 1_000));
+      try { context.assertLease(); } catch { assertionFailed = true; }
+    },
+  };
+  await new JobWorker(database, handlers, shortLease, "worker-a", createLogger("error")).runOnce();
+  expect(key).toBe("key:extract");
+  expect(assertionFailed).toBe(true);
+  expect(database.sqlite.query<{ state: string }, [string]>("SELECT state FROM jobs WHERE bill_id = ?").get(bill.bill.id)?.state).toBe("retryable_failure");
+  secondDatabase.close();
+});
+
+test("heartbeat database errors are contained and logged without error content", async () => {
+  enqueue();
+  const lines: string[] = [];
+  const originalRenewLease = database.renewLease.bind(database);
+  database.renewLease = () => { throw new Error("heartbeat-provider-secret"); };
+  const handlers: JobHandlers = { extract: async () => { await Bun.sleep(30); } };
+  await new JobWorker(database, handlers, { ...policy, leaseMs: 10 }, "worker", createLogger("debug", (line) => lines.push(line))).runOnce();
+  database.renewLease = originalRenewLease;
+  expect(lines.join("\n")).toContain("job lease heartbeat failed");
+  expect(lines.join("\n")).not.toContain("heartbeat-provider-secret");
+});
