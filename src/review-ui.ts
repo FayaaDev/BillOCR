@@ -1,4 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { AppConfig } from "./config";
 import type { ExtractedBill } from "./contracts";
 import type { BillDatabase } from "./database";
@@ -6,9 +8,10 @@ import { readVerifiedOriginal } from "./originals";
 
 const editable = ["vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description", "handwritten"] as const;
 type Editable = (typeof editable)[number];
-const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'" };
+const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'" };
 const esc = (value: unknown): string => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-const page = (title: string, body: string, status = 200): Response => new Response(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title><style>body{font-family:sans-serif;max-width:1000px;margin:2rem auto}label{display:block;margin:.5rem 0}input,textarea{min-width:30rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}.error{color:#900}</style></head><body>${body}</body></html>`, { status, headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+const page = (title: string, body: string, status = 200): Response => new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)}</title><link rel="stylesheet" href="/review/assets/client.css"></head><body>${body}</body></html>`, { status, headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+const appShell = (): Response => new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Review queue</title><link rel="stylesheet" href="/review/assets/client.css"></head><body><div id="root"></div><script src="/review/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
 
 function authenticated(request: Request, config: AppConfig): string | null {
   const value = request.headers.get("authorization");
@@ -36,13 +39,6 @@ function corrected(form: URLSearchParams, original: ExtractedBill): ExtractedBil
   return result;
 }
 const unavailableExtraction = (): ExtractedBill => ({ schemaVersion: "1", vendorName: null, invoiceNumber: null, invoiceDate: null, currency: null, subtotal: null, vat: null, total: null, description: null, handwritten: null, fields: {} });
-function safeError(value: string | null): string | null {
-  if (!value) return null;
-  if (/malformed|invalid structured|schema/i.test(value)) return "malformed_provider_output";
-  if (/timeout/i.test(value)) return "provider_timeout";
-  if (/rate|429/i.test(value)) return "provider_rate_limited";
-  return "provider_failure";
-}
 class FormError extends Error { constructor(readonly status: number) { super("invalid form"); } }
 async function parseForm(request: Request): Promise<URLSearchParams> {
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/x-www-form-urlencoded")) throw new FormError(415);
@@ -50,15 +46,27 @@ async function parseForm(request: Request): Promise<URLSearchParams> {
   for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > 32 * 1024) throw new FormError(413); chunks.push(next.value); }
   const raw = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
   if (/%(?![0-9A-Fa-f]{2})/.test(raw) || /[\x00-\x1f\x7f]/.test(raw)) throw new FormError(400);
-  const form = new URLSearchParams(raw); if ([...form].length > 32 || [...form].some(([key, value]) => key.length > 64 || value.length > (key === "reason" || key === "note" ? 4_096 : 1_024) || /[\x00-\x1f\x7f]/.test(value))) throw new FormError(413); return form;
+  const form = new URLSearchParams(raw); if ([...form].length > 32 || [...form].some(([key, value]) => key.length > 64 || value.length > (key === "reason" || key === "note" ? 4_096 : key === "description" ? 2_000 : 1_024) || /[\x00-\x1f\x7f]/.test(value))) throw new FormError(413); return form;
 }
 
-export async function handleReviewRequest(request: Request, database: BillDatabase, config: AppConfig): Promise<Response> {
+export async function handleReviewRequest(request: Request, database: BillDatabase, config: AppConfig, assetDir = join(import.meta.dir, "..", "dist", "review")): Promise<Response> {
   const user = authenticated(request, config); if (!user) return challenge();
   const url = new URL(request.url); const parts = url.pathname.split("/").filter(Boolean);
   if (request.method === "GET" && url.pathname === "/review") {
-    const rows = database.listReviewBills().map((bill) => `<li><a href="/review/bills/${encodeURIComponent(bill.id)}">${esc(bill.id)}</a> — ${esc(bill.status)} — ${esc(bill.originalFilename)}</li>`).join("");
-    return page("Review queue", `<h1>Review queue</h1><ul>${rows || "<li>No bills require review.</li>"}</ul>`);
+    return appShell();
+  }
+  if (url.pathname === "/review/api/bills") {
+    if (request.method !== "GET") return new Response("Method not allowed", { status: 405, headers: { ...headers, allow: "GET" } });
+    const bills = database.listReviewBills().map(({ id, status, originalFilename, receivedAt, updatedAt }) => ({ id, status, originalFilename, receivedAt, updatedAt }));
+    return Response.json(bills, { headers });
+  }
+  if (url.pathname === "/review/assets/client.js" || url.pathname === "/review/assets/client.css") {
+    if (request.method !== "GET") return new Response("Method not allowed", { status: 405, headers: { ...headers, allow: "GET" } });
+    const name = url.pathname.endsWith(".js") ? "client.js" : "client.css";
+    try {
+      const content = await readFile(join(assetDir, name));
+      return new Response(content, { headers: { ...headers, "content-type": name.endsWith(".js") ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8" } });
+    } catch { return new Response("Not found", { status: 404, headers }); }
   }
   const billId = parts[2]; if (parts[0] !== "review" || parts[1] !== "bills" || !billId || parts.length > 4) return page("Not found", "Not found", 404);
   const bill = database.getBill(billId); if (!bill) return page("Not found", "Not found", 404);
@@ -71,21 +79,21 @@ export async function handleReviewRequest(request: Request, database: BillDataba
     try {
       const form = await parseForm(request);
       if (!csrfValid(form.get("csrf"), config, user, billId)) return page("Review failed", "Review submission failed.", 400);
-      const action = form.get("action"); const reason = form.get("reason")?.trim(); const note = form.get("note")?.trim();
-      if ((action !== "approve" && action !== "reject") || !reason || !note) return page("Review failed", "Review submission failed.", 400);
+      const action = form.get("action");
+      if (action !== "approve" && action !== "reject") return page("Review failed", "Review submission failed.", 400);
       const original = database.getEffectiveExtraction(billId) ?? unavailableExtraction();
       const data = corrected(form, original);
       const content = Number(form.get("contentRevision")); const review = Number(form.get("reviewRevision"));
-      if (!Number.isInteger(content) || !Number.isInteger(review) || !database.submitReview({ billId, reviewerId: user, action, reason, note, expectedContentRevision: content, expectedReviewRevision: review, corrected: data }, [])) return page("Review conflict", "Review submission failed.", 409);
+      if (!Number.isInteger(content) || !Number.isInteger(review) || !database.submitReview({ billId, reviewerId: user, action, reason: null, note: null, expectedContentRevision: content, expectedReviewRevision: review, corrected: data }, [])) return page("Review conflict", "Review submission failed.", 409);
       return new Response(null, { status: 303, headers: { ...headers, location: "/review" } });
     } catch (error) { return page("Review failed", "Review submission failed.", error instanceof FormError ? error.status : 400); }
   }
   if (parts[3] && parts[3] !== "original" && parts[3] !== "review") return page("Not found", "Not found", 404);
   if (request.method !== "GET") return new Response("Method not allowed", { status: 405, headers: { ...headers, allow: parts[3] === "review" ? "POST" : "GET" } });
-  const extraction = database.getExtraction(billId); const attempt = database.getLatestExtractionAttempt(billId); const effective = database.getEffectiveExtraction(billId); const issues = database.getValidationIssues(billId); const events = database.getReviewEvents(billId);
+  const extraction = database.getExtraction(billId); const effective = database.getEffectiveExtraction(billId);
   const formData = effective ?? unavailableExtraction();
-  const fields = editable.map((field) => `<label>${field}<input name="${field}" value="${esc(formData[field] ?? "")}"></label>`).join("");
-  const confidence = Object.entries(extraction?.normalized?.fields ?? {}).map(([key, field]) => `<li>${esc(key)}: ${esc(field.confidence)} (${esc(field.sourceText)})</li>`).join("");
-  const provenance = attempt ?? (extraction ? { providerModel: extraction.providerModel, requestedAt: extraction.requestedAt, completedAt: extraction.completedAt, outcome: extraction.normalized ? "succeeded" : "failed", errorDetails: extraction.errorDetails } : null);
-  return page("Review bill", `<h1>${esc(bill.id)}</h1><p><a href="/review/bills/${encodeURIComponent(bill.id)}/original">View original</a> | <a href="/review/bills/${encodeURIComponent(bill.id)}/original?download=1">Download original</a></p><h2>Immutable model output</h2><pre>${esc(extraction?.normalized ? JSON.stringify(extraction.normalized, null, 2) : "Unavailable: normalized extraction was not persisted.")}</pre><h2>Confidence</h2><pre>${confidence ? `<ul>${confidence}</ul>` : "Unavailable"}</pre><h2>Validation issues</h2><pre>${esc(issues.length ? JSON.stringify(issues, null, 2) : "Unavailable")}</pre><h2>Provenance</h2><pre>${esc(JSON.stringify(provenance && { ...provenance, promptSchemaVersion: extraction?.promptSchemaVersion ?? null, errorDetails: safeError(provenance.errorDetails) }, null, 2))}</pre><h2>Audit events</h2><pre>${esc(JSON.stringify(events, null, 2))}</pre><form method="post" action="/review/bills/${encodeURIComponent(bill.id)}/review"><input type="hidden" name="csrf" value="${esc(csrf(config, user, bill.id))}"><input type="hidden" name="contentRevision" value="${bill.contentRevision}"><input type="hidden" name="reviewRevision" value="${bill.reviewRevision}">${fields}<label>Reason<input required name="reason"></label><label>Note<textarea required name="note"></textarea></label><button name="action" value="approve">Approve</button><button name="action" value="reject">Reject</button></form>`);
+  const fieldLabels: Record<Exclude<Editable, "description" | "handwritten">, string> = { vendorName: "Vendor name", invoiceNumber: "Invoice number", invoiceDate: "Invoice date", currency: "Currency", subtotal: "Subtotal", vat: "VAT", total: "Total" };
+  const fields = (Object.keys(fieldLabels) as Exclude<Editable, "description" | "handwritten">[]).map((field) => `<label class="review-field" for="${field}"><span>${fieldLabels[field]}</span><input id="${field}" name="${field}" value="${esc(formData[field] ?? "")}"></label>`).join("");
+  const extractionUnavailable = !extraction?.normalized;
+  return page("Review bill", `<main class="review-page review-detail"><header class="review-detail-header"><a class="queue-back" href="/review">← Review queue</a><div class="review-title"><h1>${esc(bill.id)}</h1><span class="status-badge">${esc(bill.status)}</span></div><nav class="original-actions" aria-label="Original attachment"><a class="button-link" href="/review/bills/${encodeURIComponent(bill.id)}/original">View original</a><a class="button-link button-link-secondary" href="/review/bills/${encodeURIComponent(bill.id)}/original?download=1">Download original</a></nav></header>${extractionUnavailable ? `<p class="notice error permanent-failure">Permanent extraction failure: normalized extraction was not persisted. Enter the corrected bill details below.</p>` : ""}<section class="review-section correction-section" aria-labelledby="correction-heading"><div class="section-heading"><h2 id="correction-heading">Correct bill details</h2><p>Review and correct the extracted values before choosing an outcome.</p></div><form class="correction-form" method="post" action="/review/bills/${encodeURIComponent(bill.id)}/review"><input type="hidden" name="csrf" value="${esc(csrf(config, user, bill.id))}"><input type="hidden" name="contentRevision" value="${bill.contentRevision}"><input type="hidden" name="reviewRevision" value="${bill.reviewRevision}"><div class="form-grid">${fields}<label class="review-field" for="handwritten"><span>Handwritten</span><select id="handwritten" name="handwritten"><option value=""${formData.handwritten === null ? " selected" : ""}>Not specified</option><option value="true"${formData.handwritten === true ? " selected" : ""}>Yes</option><option value="false"${formData.handwritten === false ? " selected" : ""}>No</option></select></label></div><label class="review-field review-field-full" for="description"><span>Description</span><textarea id="description" name="description" rows="4">${esc(formData.description ?? "")}</textarea></label><div class="review-actions"><button class="review-action approve-action" name="action" value="approve">Approve bill</button><button class="review-action reject-action" name="action" value="reject">Reject bill</button></div></form></section></main>`);
 }

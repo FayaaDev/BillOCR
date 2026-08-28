@@ -7,8 +7,8 @@
     "start": "bun run src/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "bun build src/server.ts src/ops.ts --target bun --outdir dist",
-    "verify-build": "bun run build && test -f dist/server.js && test -f dist/ops.js",
+    "build": "bun build src/server.ts src/ops.ts --target bun --outdir dist && rm -rf dist/review && bun build src/review-client.tsx --target browser --outdir dist/review && mv dist/review/review-client.js dist/review/client.js && mv dist/review/review-client.css dist/review/client.css",
+    "verify-build": "bun run build && test -f dist/server.js && test -f dist/ops.js && test -f dist/review/client.js && test -f dist/review/client.css",
     "ops": "bun run src/ops.ts",
     "migrate": "bun run src/ops.ts migrate",
     "whatsapp:qr": "bun run src/render-whatsapp-qr.ts",
@@ -16,11 +16,16 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
     "@types/ws": "^8.18.1",
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "@tanstack/react-table": "^8.21.3",
     "baileys": "^7.0.0-rc14",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   }
 }

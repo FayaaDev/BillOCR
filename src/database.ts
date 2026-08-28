@@ -45,7 +45,7 @@ function recordTransition(db: Database, jobId: string, fromState: JobState | nul
 
 export interface RetryPolicy { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number; }
 export interface CreateBillResult { bill: Bill; created: boolean; }
-export interface ReviewSubmission { billId: string; reviewerId: string; action: "approve" | "reject"; reason: string; note: string; expectedContentRevision: number; expectedReviewRevision: number; corrected: ExtractedBill; }
+export interface ReviewSubmission { billId: string; reviewerId: string; action: "approve" | "reject"; reason: string | null; note: string | null; expectedContentRevision: number; expectedReviewRevision: number; corrected: ExtractedBill; }
 
 function retryTransition(attempts: number, policy: RetryPolicy, now: Date): { state: "retryable_failure" | "permanent_failure"; availableAt: string } {
   if (attempts >= policy.maxAttempts) return { state: "permanent_failure", availableAt: now.toISOString() };
