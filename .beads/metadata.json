@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "billsOCR",
+  "project_id": "647b6ca0-98a2-4eef-b417-085a5d298262"
+}
