@@ -10,3 +10,4 @@ secrets/
 whatsapp-auth/
 *.sqlite
 *.sqlite-*
+.DS_Store
