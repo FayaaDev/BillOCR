@@ -2,7 +2,6 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { AppConfig } from "./config";
 import type { ExtractedBill } from "./contracts";
 import type { BillDatabase } from "./database";
-import { validateExtractedBill } from "./validation";
 import { readVerifiedOriginal } from "./originals";
 
 const editable = ["vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description", "handwritten"] as const;
@@ -76,11 +75,8 @@ export async function handleReviewRequest(request: Request, database: BillDataba
       if ((action !== "approve" && action !== "reject") || !reason || !note) return page("Review failed", "Review submission failed.", 400);
       const original = database.getEffectiveExtraction(billId) ?? unavailableExtraction();
       const data = corrected(form, original);
-      // Human review deliberately overrides confidence and handwriting routing, not factual checks.
-      const factual = validateExtractedBill(data, config.validation).issues.filter((issue) => !issue.code.includes("confidence"));
-      if (action === "approve" && factual.length) return page("Review failed", "Review submission failed.", 400);
       const content = Number(form.get("contentRevision")); const review = Number(form.get("reviewRevision"));
-      if (!Number.isInteger(content) || !Number.isInteger(review) || !database.submitReview({ billId, reviewerId: user, action, reason, note, expectedContentRevision: content, expectedReviewRevision: review, corrected: data }, factual)) return page("Review conflict", "Review submission failed.", 409);
+      if (!Number.isInteger(content) || !Number.isInteger(review) || !database.submitReview({ billId, reviewerId: user, action, reason, note, expectedContentRevision: content, expectedReviewRevision: review, corrected: data }, [])) return page("Review conflict", "Review submission failed.", 409);
       return new Response(null, { status: 303, headers: { ...headers, location: "/review" } });
     } catch (error) { return page("Review failed", "Review submission failed.", error instanceof FormError ? error.status : 400); }
   }

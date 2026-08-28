@@ -96,3 +96,11 @@ test("permanent extraction failure renders a corrective form and can be approved
   expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(303);
   expect(database.getBill(id)?.status).toBe("approved"); expect(database.getEffectiveExtraction(id)?.vendorName).toBe("Vendor");
 });
+
+test("manual approval bypasses automated factual validation", async () => {
+  const detail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
+  const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; if (!csrf) throw new Error("missing csrf");
+  const form = new URLSearchParams({ csrf, contentRevision: "1", reviewRevision: "0", action: "approve", reason: "verified", note: "manual correction", vendorName: "Vendor", invoiceNumber: "N", invoiceDate: "2026-08-01", currency: "NOT", subtotal: "9", vat: "1", total: "20", description: "ok", handwritten: "false" });
+  expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(303);
+  expect(database.getBill(id)?.status).toBe("approved");
+});

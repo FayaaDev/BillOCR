@@ -156,15 +156,15 @@ test("running old projection keeps its lease while reviewer approval creates one
   const extractJob = database.claimNextJob("extractor", policy)!;
   database.persistExtractionSuccess({ billId: bill.id, jobId: extractJob.id, leaseToken: extractJob.leaseToken, jobAttempt: extractJob.attempts, normalized: extracted(), rawProviderResponse: "raw", providerModel: "mock", promptSchemaVersion: "1", requestedAt: now.toISOString(), completedAt: now.toISOString() });
   createExtractionValidationCallback(database, config, () => now)(bill.id);
-  const old = database.claimNextJob("old-worker", policy, now, ["project_to_sheet"])!;
+  const old = database.claimNextJob("old-worker", policy, new Date(), ["project_to_sheet"])!;
   expect(old.expectedRevision).toBe(1);
   expect(database.supersedeForReview(bill.id, "reviewer")).toBe(true);
   expect(database.getJob(old.id)).toMatchObject({ state: "running", leaseToken: old.leaseToken, expectedRevision: 1 });
   const revision = database.getBill(bill.id)!;
   expect(database.approveReviewCorrection({ billId: bill.id, reviewerId: "reviewer", expectedContentRevision: revision.contentRevision, expectedReviewRevision: revision.reviewRevision })).toBe(true);
-  const next = database.claimNextJob("new-worker", policy, now, ["project_to_sheet"]);
+  const next = database.claimNextJob("new-worker", policy, new Date(), ["project_to_sheet"]);
   expect(next).toMatchObject({ expectedRevision: 2, idempotencyKey: `project:${bill.id}:2` });
-  expect(database.claimNextJob("other-worker", policy, now, ["project_to_sheet"])).toBeNull();
+  expect(database.claimNextJob("other-worker", policy, new Date(), ["project_to_sheet"])).toBeNull();
   expect(database.isApprovedAtRevision(bill.id, old.expectedRevision)).toBe(false);
   expect(database.isApprovedAtRevision(bill.id, next!.expectedRevision)).toBe(true);
 });
