@@ -48,6 +48,31 @@ describe("WhatsApp ingestion", () => {
     expect(result.bills[0]).toMatchObject({ mimeType: "application/pdf", originalFilename: "bill.pdf", caption: "PDF caption" });
   });
 
+  test("accepts JPEG, PNG, and WebP documents with canonical safe filenames and extensions", async () => {
+    const result = await service.ingest(message([
+      attachment("document", "image/jpeg", new Uint8Array([1]), "../handwritten.pdf"),
+      attachment("document", "IMAGE/PNG", new Uint8Array([2]), "handwritten.PDF"),
+      attachment("document", "image/webp", new Uint8Array([3]), "handwritten.jpg"),
+    ]));
+    expect(result.bills).toMatchObject([
+      { attachmentIndex: 0, mimeType: "image/jpeg", originalFilename: "handwritten.jpg", originalPath: expect.stringMatching(/\.jpg$/) },
+      { attachmentIndex: 1, mimeType: "image/png", originalFilename: "handwritten.png", originalPath: expect.stringMatching(/\.png$/) },
+      { attachmentIndex: 2, mimeType: "image/webp", originalFilename: "handwritten.webp", originalPath: expect.stringMatching(/\.webp$/) },
+    ]);
+  });
+
+  test("rejects unsupported image and document types", async () => {
+    const result = await service.ingest(message([
+      attachment("image", "image/gif", new Uint8Array([0]), "bill.gif"),
+      attachment("document", "image/gif", new Uint8Array([1]), "bill.gif"),
+      attachment("document", "image/*", new Uint8Array([2]), "bill.img"),
+      attachment("document", "application/msword", new Uint8Array([3]), "bill.doc"),
+      attachment("document", "__proto__", new Uint8Array([4]), "bill.proto"),
+      attachment("document", "constructor", new Uint8Array([5]), "bill.constructor"),
+    ]));
+    expect(result.bills).toEqual([]);
+  });
+
   test("stops consuming streamed attachments at the configured byte cap", async () => {
     const capped = new WhatsAppIngestionService({ groupId: "bill-group", originalsDir: join(directory, "capped-originals"), maxAttachmentBytes: 3, database, logger: silentLogger });
     let chunksRead = 0;

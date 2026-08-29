@@ -155,7 +155,21 @@ test("wrapped media normalizes ephemeral, view-once, and document-with-caption m
   expect(wrapped({ ephemeralMessage: { message: { imageMessage: { mimetype: "image/png", caption: "ephemeral" } } } }).attachments?.[0]).toMatchObject({ kind: "image", mimeType: "image/png", caption: "ephemeral" });
   expect(wrapped({ viewOnceMessageV2: { message: { imageMessage: { mimetype: "image/jpeg", caption: "once" } } } }).attachments?.[0]).toMatchObject({ kind: "image", mimeType: "image/jpeg", caption: "once" });
   expect(wrapped({ documentWithCaptionMessage: { message: { documentMessage: { mimetype: "application/pdf", fileName: "bill.pdf", caption: "document" } } } }).attachments?.[0]).toMatchObject({ kind: "document", mimeType: "application/pdf", filename: "bill.pdf", caption: "document" });
+  expect(wrapped({ documentWithCaptionMessage: { message: { documentMessage: { mimetype: "ImAgE/WeBp", fileName: "handwritten.webp", caption: "uncompressed" } } } }).attachments?.[0]).toMatchObject({ kind: "document", mimeType: "ImAgE/WeBp", filename: "handwritten.webp", caption: "uncompressed" });
   expect(wrapped({ viewOnceMessageV2: { message: { documentMessage: { mimetype: "text/plain" } } } }).attachments).toEqual([]);
+});
+
+test("normalizes JPEG, PNG, and WebP documents but rejects unsupported document media", () => {
+  const document = (mimetype: string) => normalize({ key: { id: "id", remoteJid: "group", participant: "sender" }, messageTimestamp: 1, message: { documentMessage: { mimetype, fileName: "handwritten.bill", caption: "bill" } } } as never);
+  for (const mimetype of ["image/jpeg", "image/png", "image/webp"]) {
+    expect(document(mimetype).attachments?.[0]).toMatchObject({ kind: "document", mimeType: mimetype, filename: "handwritten.bill", caption: "bill" });
+  }
+  expect(document("image/gif").attachments).toEqual([]);
+  expect(document("image/*").attachments).toEqual([]);
+  expect(document("application/msword").attachments).toEqual([]);
+  expect(document("__proto__").attachments).toEqual([]);
+  expect(document("constructor").attachments).toEqual([]);
+  expect(normalize({ key: { id: "id", remoteJid: "group" }, messageTimestamp: 1, message: { imageMessage: { mimetype: "image/gif" } } } as never).attachments).toEqual([]);
 });
 
 test("credential persistence rejection is handled with a generic secret-safe warning", async () => {

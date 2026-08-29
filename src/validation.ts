@@ -89,7 +89,7 @@ export function validateExtractedBill(extracted: ExtractedBill, config: Validati
       continue;
     }
     const confidenceEntry = extracted.fields[key];
-    const threshold = extracted.handwritten === true ? config.handwrittenConfidenceThreshold : config.confidenceThreshold;
+    const threshold = extracted.handwritten !== false ? config.handwrittenConfidenceThreshold : config.confidenceThreshold;
     if (!confidenceEntry) issues.push(issue(key, "required_field_confidence_missing", `${key} confidence is required for automatic approval.`, null));
     else if (!Number.isFinite(confidenceEntry.confidence) || confidenceEntry.confidence < threshold) issues.push(issue(key, "required_field_confidence_low", `${key} confidence is below the required threshold.`, { confidence: confidenceEntry.confidence, threshold }));
   }

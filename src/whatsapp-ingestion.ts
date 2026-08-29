@@ -6,6 +6,7 @@ import type { Bill, CreateBillInput } from "./contracts";
 import type { BillDatabase } from "./database";
 import type { Logger } from "./logger";
 import { canonicalOriginalsDir } from "./config";
+import { canonicalAttachmentExtension, isSupportedDocumentMimeType, isSupportedImageMimeType } from "./attachment-mime";
 
 export type AttachmentKind = "image" | "document";
 export interface IncomingAttachment { kind: AttachmentKind; mimeType: string | null | undefined; filename?: string | null; caption?: string | null; download(): Promise<Uint8Array | AsyncIterable<Uint8Array>> | AsyncIterable<Uint8Array>; }
@@ -22,8 +23,7 @@ function sha256(bytes: Uint8Array): string { return createHash("sha256").update(
 function alreadyExists(error: unknown): boolean { return (error as NodeJS.ErrnoException).code === "EEXIST" || (error as NodeJS.ErrnoException).code === "ENOTEMPTY"; }
 
 function accepted(attachment: IncomingAttachment): boolean {
-  const mime = attachment.mimeType?.toLowerCase();
-  return (attachment.kind === "image" && (mime === "image/jpeg" || mime === "image/png" || mime === "image/webp")) || (attachment.kind === "document" && mime === "application/pdf");
+  return attachment.kind === "image" ? isSupportedImageMimeType(attachment.mimeType) : isSupportedDocumentMimeType(attachment.mimeType);
 }
 function receivedAt(timestamp: IncomingWhatsAppMessage["timestamp"]): string | null {
   const date = timestamp instanceof Date ? timestamp : new Date(typeof timestamp === "number" ? timestamp * 1000 : timestamp ?? "");
@@ -32,7 +32,8 @@ function receivedAt(timestamp: IncomingWhatsAppMessage["timestamp"]): string | n
 function safeFilename(filename: string | null | undefined, mimeType: string): string | null {
   if (!filename) return null;
   const name = basename(filename).replace(/[^a-zA-Z0-9._-]/g, "_");
-  return name || (mimeType === "application/pdf" ? "attachment.pdf" : "attachment");
+  const base = name.lastIndexOf(".") > 0 ? name.slice(0, name.lastIndexOf(".")) : name;
+  return `${base || "attachment"}${canonicalAttachmentExtension(mimeType)!}`;
 }
 
 /** Converts normalized WhatsApp events into canonical records through a crash-recoverable staging manifest. */
@@ -105,7 +106,8 @@ export class WhatsAppIngestionService {
   private stagingDirectory(): string { return join(this.options.originalsDir, stagingName); }
   private originalsRoot(): string { return resolve(this.options.originalsDir); }
   private canonicalOriginalPath(messageId: string, attachmentIndex: number, mimeType: string): string {
-    const extension = mimeType === "application/pdf" ? ".pdf" : mimeType === "image/jpeg" ? ".jpg" : mimeType === "image/png" ? ".png" : mimeType === "image/webp" ? ".webp" : ".img";
+    const extension = canonicalAttachmentExtension(mimeType);
+    if (!extension) throw new Error("unsupported WhatsApp attachment MIME type");
     const sourceKey = createHash("sha256").update(messageId).digest("hex").slice(0, 32);
     return join(this.originalsRoot(), `${sourceKey}-${attachmentIndex}${extension}`);
   }
@@ -190,7 +192,7 @@ export class WhatsAppIngestionService {
 
   private validManifest(value: StagedAttachment): boolean {
     if (!(value.version === 1 && typeof value.id === "string" && typeof value.whatsappMessageId === "string" && typeof value.whatsappGroupId === "string" && typeof value.whatsappSenderId === "string" && Number.isInteger(value.attachmentIndex) && value.attachmentIndex >= 0 && typeof value.receivedAt === "string" && typeof value.mimeType === "string" && typeof value.originalPath === "string" && /^[a-f0-9]{64}$/.test(value.contentSha256))) return false;
-    if (!(value.mimeType === "image/jpeg" || value.mimeType === "image/png" || value.mimeType === "image/webp" || value.mimeType === "application/pdf")) return false;
+    if (!isSupportedDocumentMimeType(value.mimeType)) return false;
     return value.originalPath === this.canonicalOriginalPath(value.whatsappMessageId, value.attachmentIndex, value.mimeType);
   }
 }

@@ -27,6 +27,7 @@ test("blocks arithmetic, required fields, low confidence, and stricter handwriti
   expect(validateExtractedBill(extracted({ vendorName: null }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_missing", field: "vendorName" }));
   expect(validateExtractedBill(extracted({ fields: { vendor_name: { confidence: 0.84, sourceText: "Vendor" }, invoiceDate: { confidence: 0.9, sourceText: "date" }, total: { confidence: 0.9, sourceText: "11" } } }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_confidence_missing", field: "vendorName" }));
   expect(validateExtractedBill(extracted({ handwritten: true, fields: { vendorName: { confidence: 0.9, sourceText: "Vendor" }, invoiceDate: { confidence: 0.93, sourceText: "date" }, total: { confidence: 0.93, sourceText: "11" } } }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_confidence_low", field: "vendorName", observedValue: expect.stringContaining("0.92") }));
+  expect(validateExtractedBill(extracted({ handwritten: null, fields: { vendorName: { confidence: 0.9, sourceText: "Vendor" }, invoiceDate: { confidence: 0.93, sourceText: "date" }, total: { confidence: 0.93, sourceText: "11" } } }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_confidence_low", field: "vendorName", observedValue: expect.stringContaining("0.92") }));
 });
 
 test("blocks invalid dates, unknown currencies, and invalid monetary values defensively", () => {

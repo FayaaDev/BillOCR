@@ -14,6 +14,8 @@ bun run whatsapp:qr
 
 The service writes the current QR token only to `${WHATSAPP_AUTH_PATH}/pairing-qr.token` with mode `0600`; the command refuses unsafe permissions and renders it without printing the token. A replacement QR atomically replaces the old token; it is removed after pairing or shutdown. Retain `WHATSAPP_AUTH_PATH`. Baileys is a release-candidate dependency: do not use a personal production account without an operational recovery plan.
 
+For handwritten bills, send JPEG, PNG, or WebP images as WhatsApp documents/files when possible to avoid WhatsApp image recompression. Frame the bill clearly and minimize glare.
+
 Set `MISTRAL_API_KEY` and `MISTRAL_MODEL`. Google projections use exactly one `GOOGLE_AUTH_MODE`:
 
 - `service_account` is the default. Put its JSON at `secrets/google-service-account.json`, configure `GOOGLE_SERVICE_ACCOUNT_JSON`, and grant that service account access to the configured Drive folder and spreadsheet.

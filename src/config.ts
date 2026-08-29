@@ -18,7 +18,7 @@ export interface AppConfig {
   jobs: { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number };
 }
 
-type Env = Record<string, string | undefined>;
+export type Env = Record<string, string | undefined>;
 const levels = new Set(["debug", "info", "warn", "error"]);
 
 function required(env: Env, key: string): string {
@@ -47,6 +47,19 @@ function boolean(env: Env, key: string, fallback: boolean): boolean {
 /** Resolve this controlled directory once after it has been created; readers never realpath request/DB paths. */
 export function canonicalOriginalsDir(path: string): string { return realpathSync(resolve(path)); }
 
+/** Validation settings shared by the service and bounded live evaluator. */
+export function loadValidationConfig(env: Env = Bun.env): AppConfig["validation"] {
+  const confidenceThreshold = number(env, "CONFIDENCE_THRESHOLD", 0.85, 0, 1);
+  const handwrittenConfidenceThreshold = number(env, "HANDWRITTEN_CONFIDENCE_THRESHOLD", 0.92, 0, 1);
+  if (handwrittenConfidenceThreshold < confidenceThreshold) throw new Error("HANDWRITTEN_CONFIDENCE_THRESHOLD must be >= CONFIDENCE_THRESHOLD");
+  return {
+    confidenceThreshold,
+    handwrittenConfidenceThreshold,
+    currencyRoundingTolerance: number(env, "CURRENCY_ROUNDING_TOLERANCE", 0.01, 0, Number.MAX_SAFE_INTEGER),
+    maxFutureInvoiceDays: integer(env, "MAX_FUTURE_INVOICE_DAYS", 30, 0),
+  };
+}
+
 /** Validates all configuration, including settings consumed by later provider phases. */
 export function loadConfig(env: Env = Bun.env): AppConfig {
   const dataDir = resolve(required(env, "APP_DATA_DIR"));
@@ -74,12 +87,7 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
        return { enabled: true, authMode, credentialJson: resolve(required(env, authMode === "service_account" ? "GOOGLE_SERVICE_ACCOUNT_JSON" : "GOOGLE_OAUTH_CREDENTIAL_JSON")), driveFolderId: required(env, "GOOGLE_DRIVE_FOLDER_ID"), sheetId: required(env, "GOOGLE_SHEET_ID"), sheetName: env.GOOGLE_SHEET_NAME ?? "Ledger", requestTimeoutMs, maxResponseBytes };
     })(),
     review: { username: required(env, "REVIEW_USERNAME"), password: required(env, "REVIEW_PASSWORD") },
-    validation: {
-      confidenceThreshold,
-      handwrittenConfidenceThreshold,
-      currencyRoundingTolerance: number(env, "CURRENCY_ROUNDING_TOLERANCE", 0.01, 0, Number.MAX_SAFE_INTEGER),
-      maxFutureInvoiceDays: integer(env, "MAX_FUTURE_INVOICE_DAYS", 30, 0),
-    },
+    validation: loadValidationConfig(env),
     jobs: { maxAttempts: integer(env, "JOB_MAX_ATTEMPTS", 5, 1), retryBaseMs, retryMaxMs, leaseMs: integer(env, "JOB_LEASE_MS", 60_000, 1) },
   };
 }

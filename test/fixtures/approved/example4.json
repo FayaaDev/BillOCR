@@ -1,0 +1,14 @@
+{
+  "source": "../../../example4.png",
+  "expected": {
+    "vendorName": "Car electrical & A/C",
+    "invoiceNumber": "0062",
+    "invoiceDate": "2024-08-26",
+    "currency": null,
+    "subtotal": 200,
+    "vat": null,
+    "total": 200,
+    "description": "5184",
+    "handwritten": null
+  }
+}

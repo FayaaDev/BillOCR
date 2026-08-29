@@ -1,0 +1,14 @@
+{
+  "source": "../../../example3.png",
+  "expected": {
+    "vendorName": "Al-Anzi Lathe",
+    "invoiceNumber": "0427",
+    "invoiceDate": "2026-08-26",
+    "currency": null,
+    "subtotal": 70,
+    "vat": null,
+    "total": 70,
+    "description": null,
+    "handwritten": null
+  }
+}

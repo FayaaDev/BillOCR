@@ -1,5 +1,6 @@
 import { DisconnectReason, downloadMediaMessage, makeWASocket, normalizeMessageContent, useMultiFileAuthState, type WAMessage } from "baileys";
 import type { Logger } from "./logger";
+import { isSupportedDocumentMimeType, isSupportedImageMimeType } from "./attachment-mime";
 import type { IncomingWhatsAppMessage } from "./whatsapp-ingestion";
 import { PairingQrTokenStore } from "./whatsapp-pairing";
 
@@ -118,6 +119,6 @@ export function normalize(message: WAMessage): IncomingWhatsAppMessage {
   const image = content?.imageMessage;
   const document = content?.documentMessage;
   const media = image ?? document;
-  const accepted = Boolean(image?.mimetype?.toLowerCase().startsWith("image/") || document?.mimetype?.toLowerCase() === "application/pdf");
+  const accepted = Boolean(media && (image ? isSupportedImageMimeType(media.mimetype) : isSupportedDocumentMimeType(media.mimetype)));
   return { id: message.key.id, groupId: message.key.remoteJid, senderId: message.key.participant ?? message.key.remoteJid, timestamp: Number(message.messageTimestamp ?? 0), caption: image?.caption ?? document?.caption ?? null, attachments: media && accepted ? [{ kind: image ? "image" : "document", mimeType: media.mimetype, filename: document?.fileName ?? null, caption: image?.caption ?? document?.caption ?? null, download: async () => downloadMediaMessage(message, "stream", {}) as Promise<AsyncIterable<Uint8Array>> }] : [] };
 }
