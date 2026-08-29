@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { BillDatabase } from "../src/database";
 import type { Logger } from "../src/logger";
 import { WhatsAppIngestionService, type IncomingAttachment, type IncomingWhatsAppMessage } from "../src/whatsapp-ingestion";
+import { IMAGE_PREPROCESSING_VERSION } from "../src/image-preprocessing";
 
 const silentLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 let directory: string;
@@ -41,6 +42,19 @@ describe("WhatsApp ingestion", () => {
     expect(bill).toMatchObject({ whatsappMessageId: "message-1", whatsappGroupId: "bill-group", whatsappSenderId: "sender-1", attachmentIndex: 0, caption: "lunch", originalFilename: "receipt.jpg", mimeType: "image/jpeg", contentSha256: "3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56" });
     expect(readFileSync(bill.originalPath)).toEqual(Buffer.from(bytes));
     expect(database.countJobsForBill(bill.id)).toBe(2);
+    expect(database.sqlite.query<{ idempotency_key: string }, [string]>("SELECT idempotency_key FROM jobs WHERE bill_id = ? AND type = 'extract'").get(bill.id)?.idempotency_key).toBe(`extract:${bill.id}:original`);
+  });
+
+  test("uses the configured extraction input version for new jobs and never changes it during replay", async () => {
+    const enabled = new WhatsAppIngestionService({ groupId: "bill-group", originalsDir: join(directory, "enabled-originals"), database, logger: silentLogger, extractionInputVersion: IMAGE_PREPROCESSING_VERSION });
+    const incoming = message([attachment("image", "image/png", new Uint8Array([7]), "versioned.png")], { id: "versioned-message" });
+    const created = (await enabled.ingest(incoming)).bills[0]!;
+    const key = () => database.sqlite.query<{ idempotency_key: string }, [string]>("SELECT idempotency_key FROM jobs WHERE bill_id = ? AND type = 'extract'").get(created.id)?.idempotency_key;
+    expect(key()).toBe(`extract:${created.id}:${IMAGE_PREPROCESSING_VERSION}`);
+    const disabled = new WhatsAppIngestionService({ groupId: "bill-group", originalsDir: join(directory, "enabled-originals"), database, logger: silentLogger, extractionInputVersion: "original" });
+    expect((await disabled.ingest(incoming)).bills[0]?.id).toBe(created.id);
+    await disabled.reconcilePending();
+    expect(key()).toBe(`extract:${created.id}:${IMAGE_PREPROCESSING_VERSION}`);
   });
 
   test("accepts PDF documents and uses the document caption", async () => {

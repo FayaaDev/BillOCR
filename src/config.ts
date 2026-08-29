@@ -12,6 +12,7 @@ export interface AppConfig {
   logLevel: "debug" | "info" | "warn" | "error";
   whatsapp: { enabled: boolean; groupId: string; authPath: string; originalsDir: string; maxAttachmentBytes: number };
   mistral: { apiKey: string; model: string; maxResponseBytes: number; requestTimeoutMs: number };
+  imagePreprocessing: { enabled: boolean; timeoutMs: number };
   google: GoogleConfig;
   review: { username: string; password: string };
   validation: { confidenceThreshold: number; handwrittenConfidenceThreshold: number; currencyRoundingTolerance: number; maxFutureInvoiceDays: number };
@@ -78,6 +79,7 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
     logLevel: logLevel as AppConfig["logLevel"],
     whatsapp: { enabled: boolean(env, "WHATSAPP_ENABLED", true), groupId: required(env, "WHATSAPP_GROUP_ID"), authPath: resolve(required(env, "WHATSAPP_AUTH_PATH")), originalsDir: resolve(env.WHATSAPP_ORIGINALS_DIR ?? `${dataDir}/originals`), maxAttachmentBytes: integer(env, "MAX_ATTACHMENT_BYTES", 20 * 1024 * 1024, 1) },
     mistral: { apiKey: required(env, "MISTRAL_API_KEY"), model: required(env, "MISTRAL_MODEL"), maxResponseBytes: integer(env, "MISTRAL_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1), requestTimeoutMs: integer(env, "MISTRAL_REQUEST_TIMEOUT_MS", 60_000, 1) },
+    imagePreprocessing: { enabled: boolean(env, "IMAGE_PREPROCESSING_ENABLED", false), timeoutMs: integer(env, "IMAGE_PREPROCESSING_TIMEOUT_MS", 8_000, 1) },
     google: (() => {
       const enabled = boolean(env, "GOOGLE_ENABLED", false);
       const requestTimeoutMs = integer(env, "GOOGLE_REQUEST_TIMEOUT_MS", 60_000, 1); const maxResponseBytes = integer(env, "GOOGLE_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1);

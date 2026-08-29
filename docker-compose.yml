@@ -1,6 +1,7 @@
 services:
   bill-ledger:
     build: .
+    mem_limit: 512m
     env_file: .env
     ports:
       - "${APP_PORT:-3000}:3000"

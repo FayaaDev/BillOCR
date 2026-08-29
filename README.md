@@ -31,6 +31,22 @@ For either mode, restart the service after changing credentials, inspect failure
 
 The review queue is `http://127.0.0.1:3000/review`; it is Basic-auth protected. Put it behind a TLS-terminating authenticated reverse proxy in any non-local deployment.
 
+## Image preprocessing policy
+
+`sharp-opencv-v1` is release/job-policy metadata, not an environment setting. New-job preprocessing is disabled by default with `IMAGE_PREPROCESSING_ENABLED=false`; `IMAGE_PREPROCESSING_TIMEOUT_MS=8000` bounds each derivative attempt. Only JPEG, PNG, and WebP attachments may receive an in-memory derivative. PDFs pass through unchanged, and preprocessing never writes or replaces an original.
+
+The approved-example evaluator compares three modes: `original`, forced `sharp`, and forced `opencv`. Production has no selectable sharp-only mode: its fixed `auto` behavior is equivalent to the evaluator's `opencv` request, rectifying only when it finds a reliable quadrilateral and otherwise using Sharp-only processing.
+
+Enable production only when the `opencv`/auto candidate has zero false approvals, fewer than the baseline 12 aggregate exact-field differences, and at most 5 differences for `example3` and 7 for `example4`. Otherwise leave preprocessing disabled. The Sharp-only result is diagnostic and cannot be selected by configuration in this phase.
+
+### Rollout
+
+1. Keep `IMAGE_PREPROCESSING_ENABLED=false`; deploy and confirm `bun run verify-build` plus the container import/health smoke. Existing jobs retain their durable `:original` policy.
+2. With written authorization, run `APPROVED_EXAMPLE_EVALUATION_AUTHORIZED=true bun run evaluate:approved-examples`; retain only its six sanitized JSON decision lines in the release record.
+3. Enable only when the fixed `opencv`/auto candidate passes the gate. Newly ingested jobs receive `:sharp-opencv-v1`; existing `:original` jobs remain original-input jobs, so rollout does not change their request bytes.
+4. Monitor `needs_review` rate and extraction processing latency against the pre-enable interval.
+5. To roll back, first pause ingestion and the worker, record jobs already carrying `:sharp-opencv-v1`, set `IMAGE_PREPROCESSING_ENABLED=false`, and restart. Existing preprocessing-policy jobs remain deterministic derivative/fallback jobs and new jobs use `:original`; do not rewrite job keys. The input SHA-256 suffix prevents one provider key from being reused for different bytes.
+
 ## Docker
 
 `docker compose up --build` uses persistent named volumes for `/data`, originals, and WhatsApp auth; credentials are mounted read-only from `./secrets`. Compose maps both `/run/secrets/google-service-account.json` and `/run/secrets/google-authorized-user.json`; only the file selected by `GOOGLE_AUTH_MODE` is read. Run `bun run google:oauth` on the local host before starting Compose, not in the container. The image pre-creates and assigns `/data`, `/data/originals`, and `/data/whatsapp-auth` to `bun`, so fresh named volumes inherit usable ownership. Existing root-owned volumes are not repaired automatically: stop the service and run `docker compose run --rm --user root bill-ledger sh -c 'chown -R bun:bun /data /data/originals /data/whatsapp-auth'`. The container runs as `bun`, exposes `/health`, and writes no credentials into its image. Set `APP_PORT`, provider credentials, and IDs in `.env`. Do not publish the review port directly to the Internet.
@@ -55,9 +71,18 @@ bun run ops backup ./backups
 ## Verification and smoke test
 
 ```sh
-bun run typecheck
-bun test
-bun run build
+bun run typecheck && bun test && bun run verify-build
+bun -e 'import sharp from "sharp"; import { WorkerImagePreprocessor } from "./dist/image-preprocessing.js"; const bytes = new Uint8Array(await sharp({ create: { width: 64, height: 64, channels: 4, background: "white" } }).png().toBuffer()); const result = await new WorkerImagePreprocessor({ timeoutMs: 8000 }).preprocess({ bytes, mimeType: "image/png", mode: "sharp" }); if (!result || result.mode !== "sharp" || result.width !== 64 || result.height !== 64) process.exit(1);'
+```
+
+Validate the Compose file separately with `docker compose config --quiet`. For the container smoke, use an empty test database with WhatsApp and Google disabled, while still providing the required non-provider configuration. This direct `docker run` does not load compose `.env` or mount `secrets/`; it must return `/health` 200 and create no jobs or provider calls:
+
+```sh
+docker compose config --quiet
+docker build -t bill-ledger-health-smoke .
+set -e; container=; trap 'test -z "$container" || docker stop "$container" >/dev/null 2>&1 || true' EXIT
+container=$(docker run -d --rm -p 3100:3000 -e APP_HOST=0.0.0.0 -e APP_DATA_DIR=/tmp/health-smoke -e APP_DATABASE_PATH=/tmp/health-smoke/bill-ledger.sqlite -e WHATSAPP_ENABLED=false -e WHATSAPP_GROUP_ID=health-smoke@g.us -e WHATSAPP_AUTH_PATH=/tmp/health-smoke/whatsapp-auth -e WHATSAPP_ORIGINALS_DIR=/tmp/health-smoke/originals -e MISTRAL_API_KEY=test -e MISTRAL_MODEL=test -e GOOGLE_ENABLED=false -e REVIEW_USERNAME=test -e REVIEW_PASSWORD=test bill-ledger-health-smoke)
+curl --fail http://127.0.0.1:3100/health
 ```
 
 Live smoke checklist: pair the dedicated account; send one image and one PDF in the configured group; confirm original bytes on disk before provider work; check `ops inspect` for extraction provenance and job transitions; verify a byte-identical Drive original and one hidden-ID Sheet row; send a duplicate WhatsApp event; test one review correction and one rejection; temporarily deny each provider and confirm a visible retryable job before replaying it.

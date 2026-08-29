@@ -18,6 +18,13 @@ test("configuration allows WhatsApp to be disabled for test environments", () =>
   expect(loadConfig({ ...validEnvironment(), WHATSAPP_ENABLED: "false" }).whatsapp.enabled).toBe(false);
 });
 
+test("image preprocessing is disabled by default and validates its timeout", () => {
+  expect(loadConfig(validEnvironment()).imagePreprocessing).toEqual({ enabled: false, timeoutMs: 8_000 });
+  expect(loadConfig({ ...validEnvironment(), IMAGE_PREPROCESSING_ENABLED: "true", IMAGE_PREPROCESSING_TIMEOUT_MS: "9" }).imagePreprocessing).toEqual({ enabled: true, timeoutMs: 9 });
+  expect(() => loadConfig({ ...validEnvironment(), IMAGE_PREPROCESSING_ENABLED: "yes" })).toThrow("IMAGE_PREPROCESSING_ENABLED");
+  expect(() => loadConfig({ ...validEnvironment(), IMAGE_PREPROCESSING_TIMEOUT_MS: "0" })).toThrow("IMAGE_PREPROCESSING_TIMEOUT_MS");
+});
+
 test("Google projections are opt-in and service-account credentials are shape-validated without exposing values", () => {
   expect(loadConfig({ ...validEnvironment(), GOOGLE_ENABLED: "false" }).google).toMatchObject({ enabled: false, credentialJson: null });
   expect(() => loadConfig({ APP_DATA_DIR: "./data", WHATSAPP_GROUP_ID: "group", WHATSAPP_AUTH_PATH: "./auth", MISTRAL_API_KEY: "key", MISTRAL_MODEL: "model", REVIEW_USERNAME: "reviewer", REVIEW_PASSWORD: "token", GOOGLE_ENABLED: "true" })).toThrow("GOOGLE_SERVICE_ACCOUNT_JSON");

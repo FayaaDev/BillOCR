@@ -8,6 +8,7 @@ import { createExtractJobHandler, extractedBillJsonSchema, extractionPrompt, gro
 import { createLogger } from "../src/logger";
 import { JobWorker } from "../src/worker";
 import { PermanentJobError } from "../src/worker";
+import { IMAGE_PREPROCESSING_VERSION, type ImagePreprocessor } from "../src/image-preprocessing";
 
 const policy: RetryPolicy = { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 };
 let directory: string;
@@ -21,6 +22,8 @@ function enqueue(mimeType = "image/png", caption: string | null = "caption", byt
 }
 const originals = (maxBytes = 20 * 1024 * 1024) => ({ root: join(directory, "originals"), maxBytes });
 function worker(provider: MistralOcrProvider) { return new JobWorker(database, { extract: createExtractJobHandler(database, provider, policy.maxAttempts, () => undefined, originals()) }, policy, "extract-test", createLogger("error")); }
+function workerWithPreprocessor(provider: MistralOcrProvider, preprocessor: ImagePreprocessor) { return new JobWorker(database, { extract: createExtractJobHandler(database, provider, policy.maxAttempts, () => undefined, originals(), preprocessor) }, policy, "extract-test", createLogger("error")); }
+function setExtractKey(billId: string, idempotencyKey: string): void { database.sqlite.query("UPDATE jobs SET idempotency_key = ? WHERE bill_id = ? AND type = 'extract'").run(idempotencyKey, billId); }
 
 beforeEach(() => { directory = realpathSync(mkdtempSync(join(tmpdir(), "bill-extract-"))); mkdirSync(join(directory, "originals")); database = new BillDatabase(join(directory, "ledger.sqlite")); });
 afterEach(() => { database.close(); rmSync(directory, { recursive: true, force: true }); });
@@ -133,6 +136,63 @@ test("replay after a simulated pre-persistence crash reuses the durable provider
   expect(keys[1]).toBe(keys[0]);
   expect(keys[0]).toStartWith("extract-");
   expect(database.getExtraction(bill.bill.id)?.normalized).not.toBeNull();
+});
+
+test("tagged image jobs send a derivative and assert the lease immediately before the provider", async () => {
+  const original = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const derivative = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 42]);
+  const bill = enqueue("image/png", "caption", original);
+  const durableKey = `extract:${bill.bill.id}:${IMAGE_PREPROCESSING_VERSION}`;
+  setExtractKey(bill.bill.id, durableKey);
+  const job = database.claimNextJob("preprocess", policy)!;
+  const events: string[] = []; let input: Parameters<MistralOcrProvider["extract"]>[0] | undefined;
+  const handler = createExtractJobHandler(database, { extract: async (received) => { events.push("provider"); input = received; return { annotation: valid(), rawResponse: "raw", model: "mock" }; } }, policy.maxAttempts, () => undefined, originals(), { preprocess: async (received) => { events.push("preprocess"); expect(received).toEqual({ bytes: original, mimeType: "image/png" }); return { bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 }; } });
+  await handler(job, { idempotencyKey: durableKey, assertLease: () => events.push("lease"), assertCurrentApprovalRevision: () => undefined });
+  expect(events[events.indexOf("provider") - 1]).toBe("lease");
+  expect(input).toMatchObject({ bytes: derivative, mimeType: "image/png", caption: "caption" });
+  expect(input!.idempotencyKey).toBe(`${durableKey}:input:${createHash("sha256").update(derivative).digest("hex")}`);
+  expect(input!.idempotencyKey).not.toContain(Buffer.from(derivative).toString("base64"));
+  expect(readFileSync(bill.bill.originalPath)).toEqual(Buffer.from(original));
+  expect(createHash("sha256").update(readFileSync(bill.bill.originalPath)).digest("hex")).toBe(bill.bill.contentSha256);
+});
+
+test("tagged image preprocessing null or errors and PDFs use the exact verified original", async () => {
+  const original = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const keys: string[] = [];
+  for (const preprocessor of [{ preprocess: async () => null }, { preprocess: async () => { throw new Error("unavailable"); } }] satisfies ImagePreprocessor[]) {
+    const bill = enqueue("image/png", null, original);
+    setExtractKey(bill.bill.id, `extract:${bill.bill.id}:${IMAGE_PREPROCESSING_VERSION}`);
+    await workerWithPreprocessor({ extract: async (input) => { expect(input.bytes).toEqual(original); expect(input.mimeType).toBe("image/png"); keys.push(input.idempotencyKey); return { annotation: valid(), rawResponse: "raw", model: "mock" }; } }, preprocessor).runOnce();
+  }
+  const pdf = enqueue("application/pdf");
+  setExtractKey(pdf.bill.id, `extract:${pdf.bill.id}:${IMAGE_PREPROCESSING_VERSION}`);
+  let preprocessCalls = 0;
+  await workerWithPreprocessor({ extract: async (input) => { expect(input.mimeType).toBe("application/pdf"); return { annotation: valid(), rawResponse: "raw", model: "mock" }; } }, { preprocess: async () => { preprocessCalls += 1; return null; } }).runOnce();
+  expect(preprocessCalls).toBe(0);
+  expect(keys).toHaveLength(2);
+  expect(keys[0]).not.toBe(keys[1]);
+});
+
+test("replay keeps an identical selected-input key, but fallback after a preprocessing failure gets a new key", async () => {
+  const first = enqueue();
+  setExtractKey(first.bill.id, `extract:${first.bill.id}:${IMAGE_PREPROCESSING_VERSION}`);
+  const derivative = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const repeatedKeys: string[] = [];
+  await workerWithPreprocessor({ extract: async (input) => { repeatedKeys.push(input.idempotencyKey); throw new RetryableExtractionError("crash"); } }, { preprocess: async () => ({ bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 }) }).runOnce();
+  await Bun.sleep(2);
+  await workerWithPreprocessor({ extract: async (input) => { repeatedKeys.push(input.idempotencyKey); return { annotation: valid(), rawResponse: "raw", model: "mock" }; } }, { preprocess: async () => ({ bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 }) }).runOnce();
+  expect(repeatedKeys[1]).toBe(repeatedKeys[0]);
+
+  const fallback = enqueue();
+  setExtractKey(fallback.bill.id, `extract:${fallback.bill.id}:${IMAGE_PREPROCESSING_VERSION}`);
+  const fallbackKeys: string[] = []; let attempts = 0;
+  const preprocessor: ImagePreprocessor = { preprocess: async () => ++attempts === 1 ? { bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 } : null };
+  const provider: MistralOcrProvider = { extract: async (input) => { fallbackKeys.push(input.idempotencyKey); if (fallbackKeys.length === 1) throw new RetryableExtractionError("crash"); return { annotation: valid(), rawResponse: "raw", model: "mock" }; } };
+  await workerWithPreprocessor(provider, preprocessor).runOnce();
+  await Bun.sleep(2);
+  await workerWithPreprocessor(provider, preprocessor).runOnce();
+  expect(fallbackKeys).toHaveLength(2);
+  expect(fallbackKeys[1]).not.toBe(fallbackKeys[0]);
 });
 
 test("HTTP adapter sends original data URL, caption, compatible schema, and does not expose its API key", async () => {

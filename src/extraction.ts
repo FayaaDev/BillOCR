@@ -1,6 +1,8 @@
 import type { ClaimedJob, ExtractedBill, JobHandler, JobHandlerContext } from "./contracts";
+import { createHash } from "node:crypto";
 import { isSupportedDocumentMimeType, isSupportedImageMimeType } from "./attachment-mime";
 import type { BillDatabase } from "./database";
+import { IMAGE_PREPROCESSING_VERSION, isPreprocessableMimeType, type ImagePreprocessor } from "./image-preprocessing";
 import { OriginalVerificationError, readVerifiedOriginal } from "./originals";
 import { PermanentJobError } from "./worker";
 
@@ -52,6 +54,7 @@ export interface MistralOcrProvider {
   extract(input: { bytes: Uint8Array; mimeType: string; caption: string | null; idempotencyKey: string }): Promise<{ annotation: unknown; rawResponse: string; model: string; evidence?: OcrEvidence }>;
 }
 export interface OcrEvidence { regions: Array<{ text: string; words: Array<{ text: string; confidence: number; startIndex: number }> }> }
+const noImagePreprocessor: ImagePreprocessor = { preprocess: async () => null };
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 function sanitizeProviderError(status: number, text: string): string {
@@ -268,7 +271,7 @@ function validIsoDate(value: string): boolean {
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 
-export function createExtractJobHandler(database: BillDatabase, provider: MistralOcrProvider, maxAttempts: number, onExtracted: (billId: string) => Promise<void> | void = () => undefined, originals: { root: string; maxBytes: number }): JobHandler {
+export function createExtractJobHandler(database: BillDatabase, provider: MistralOcrProvider, maxAttempts: number, onExtracted: (billId: string) => Promise<void> | void = () => undefined, originals: { root: string; maxBytes: number }, preprocessor: ImagePreprocessor = noImagePreprocessor): JobHandler {
   return async (job: ClaimedJob, context: JobHandlerContext): Promise<void> => {
     const bill = database.getBill(job.billId);
     if (!bill) throw new PermanentJobError("Extract job references a missing bill");
@@ -286,15 +289,29 @@ export function createExtractJobHandler(database: BillDatabase, provider: Mistra
     const failure = (error: unknown, status?: "needs_review" | "failed") => database.persistExtractionFailure({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, rawProviderResponse, providerModel, promptSchemaVersion: EXTRACTION_PROMPT_VERSION, requestedAt, completedAt: completedAt(), errorDetails: sanitizeErrorDetails(error instanceof Error ? error.message : String(error)), status });
     try {
       context.assertLease();
-      let bytes: Uint8Array;
+      let originalBytes: Uint8Array;
       try {
-        bytes = (await readVerifiedOriginal({ path: bill.originalPath, root: originals.root, maxBytes: originals.maxBytes, sha256: bill.contentSha256, mimeType: bill.mimeType, requireMagic: true })).bytes;
+        originalBytes = (await readVerifiedOriginal({ path: bill.originalPath, root: originals.root, maxBytes: originals.maxBytes, sha256: bill.contentSha256, mimeType: bill.mimeType, requireMagic: true })).bytes;
       } catch (error) {
         if (error instanceof OriginalVerificationError) throw new PermanentExtractionInputError("Persisted original verification failed");
         throw error;
       }
+      let bytes = originalBytes;
+      let mimeType = bill.mimeType;
+      if (context.idempotencyKey.endsWith(`:${IMAGE_PREPROCESSING_VERSION}`) && isPreprocessableMimeType(mimeType)) {
+        try {
+          const derivative = await preprocessor.preprocess({ bytes: originalBytes, mimeType });
+          if (derivative) {
+            bytes = derivative.bytes;
+            mimeType = derivative.mimeType;
+          }
+        } catch {
+          // Preprocessing is an optional, ephemeral input optimization.
+        }
+      }
+      const inputHash = createHash("sha256").update(bytes).digest("hex");
       context.assertLease();
-      const result = await provider.extract({ bytes, mimeType: bill.mimeType, caption: bill.caption, idempotencyKey: context.idempotencyKey });
+      const result = await provider.extract({ bytes, mimeType, caption: bill.caption, idempotencyKey: `${context.idempotencyKey}:input:${inputHash}` });
       rawProviderResponse = result.rawResponse;
       providerModel = result.model;
       let normalized: ExtractedBill;

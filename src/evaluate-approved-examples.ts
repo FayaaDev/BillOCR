@@ -1,7 +1,8 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { EXTRACTION_PROMPT_VERSION, groundRequiredFieldConfidence, MistralHttpOcrProvider, type OcrEvidence, parseProviderExtractedBill } from "./extraction";
+import { EXTRACTION_PROMPT_VERSION, groundRequiredFieldConfidence, MistralHttpOcrProvider, type MistralOcrProvider, type OcrEvidence, parseProviderExtractedBill } from "./extraction";
+import { WorkerImagePreprocessor, type ImagePreprocessor } from "./image-preprocessing";
 import { validateExtractedBill } from "./validation";
 import { loadValidationConfig } from "./config";
 
@@ -9,9 +10,10 @@ const fixtureDirectory = resolve(import.meta.dir, "../test/fixtures/approved");
 const workspaceRoot = resolve(import.meta.dir, "..");
 const fixtureNames = ["example3.json", "example4.json"] as const;
 const maxAttachmentBytes = 20 * 1024 * 1024;
-const runToken = randomUUID();
 const fields = ["vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description", "handwritten"] as const;
+const variants = ["original", "sharp", "opencv"] as const;
 type Field = typeof fields[number];
+type Variant = typeof variants[number];
 export type ApprovedExpected = Record<Field, string | number | boolean | null>;
 
 function fixture(value: unknown): { source: string; expected: ApprovedExpected } {
@@ -52,38 +54,83 @@ export function evaluateApprovedAnnotation(annotation: unknown, expected: Approv
   const differences = fields.flatMap((field) => Object.is(grounded[field], expected[field]) ? [] : [{ field, expected: expected[field], actual: grounded[field] }]);
   return { differences, decision: validation.decision, issues: validation.issues.map(({ code, field }) => ({ code, field })), passed: differences.length === 0 && validation.decision === "approved" };
 }
-function printFailure(name: string, category: "fixture" | "provider" | "schema", reason?: string): void {
-  console.log(JSON.stringify({ fixture: name, differences: [], decision: "needs_review", issues: [{ code: category === "schema" ? `evaluator_schema_${reason ?? "schema"}` : `evaluator_${category}_failure`, field: null }] }));
+export type ApprovedExampleEvaluationRecord = {
+  fixture: string;
+  variant: Variant;
+  differences: EvaluatorResult["differences"];
+  decision: EvaluatorResult["decision"];
+  issues: EvaluatorResult["issues"];
+  mode: "original" | "sharp" | "opencv";
+  dimensions: { width: number; height: number } | null;
+};
+
+export type ApprovedExampleEvaluationDependencies = {
+  provider: Pick<MistralOcrProvider, "extract">;
+  preprocessor: ImagePreprocessor;
+  runToken?: string;
+};
+
+function failureRecord(name: string, variant: Variant, code: string): ApprovedExampleEvaluationRecord {
+  return { fixture: name, variant, differences: [], decision: "needs_review", issues: [{ code, field: null }], mode: variant, dimensions: null };
+}
+
+export async function runApprovedExampleEvaluation(dependencies: ApprovedExampleEvaluationDependencies): Promise<ApprovedExampleEvaluationRecord[]> {
+  const runToken = dependencies.runToken ?? randomUUID();
+  const records: ApprovedExampleEvaluationRecord[] = [];
+  for (const name of fixtureNames) {
+    let approved: { source: string; expected: ApprovedExpected }; let originalBytes: Uint8Array;
+    try {
+      approved = fixture(JSON.parse(await readFile(resolve(fixtureDirectory, name), "utf8")));
+      originalBytes = await readApprovedFixturePng(approved.source);
+    } catch {
+      records.push(...variants.map((variant) => failureRecord(name, variant, "evaluator_fixture_failure")));
+      continue;
+    }
+
+    for (const variant of variants) {
+      let bytes = originalBytes;
+      let mode: ApprovedExampleEvaluationRecord["mode"] = "original";
+      let dimensions: ApprovedExampleEvaluationRecord["dimensions"] = null;
+      if (variant !== "original") {
+        let derivative: Awaited<ReturnType<ImagePreprocessor["preprocess"]>>;
+        try { derivative = await dependencies.preprocessor.preprocess({ bytes: originalBytes, mimeType: "image/png", mode: variant }); } catch { derivative = null; }
+        if (!derivative) {
+          records.push(failureRecord(name, variant, "evaluator_preprocessing_failure"));
+          continue;
+        }
+        bytes = derivative.bytes;
+        mode = derivative.mode;
+        dimensions = { width: derivative.width, height: derivative.height };
+      }
+
+      let result: Awaited<ReturnType<MistralOcrProvider["extract"]>>;
+      try {
+        const idempotencyKey = `approved-evaluation:${EXTRACTION_PROMPT_VERSION}:${runToken}:${name}:${variant}`;
+        result = await dependencies.provider.extract({ bytes, mimeType: "image/png", caption: null, idempotencyKey });
+      } catch {
+        records.push(failureRecord(name, variant, "evaluator_provider_failure"));
+        continue;
+      }
+      try {
+        const evaluation = evaluateApprovedAnnotation(result.annotation, approved.expected, result.evidence);
+        records.push({ fixture: name, variant, differences: evaluation.differences, decision: evaluation.decision, issues: evaluation.issues, mode, dimensions });
+      } catch (error) {
+        records.push(failureRecord(name, variant, `evaluator_schema_${schemaReason(error)}`));
+      }
+    }
+  }
+  return records;
 }
 
 async function main(): Promise<void> {
   const apiKey = Bun.env.MISTRAL_API_KEY?.trim(); const model = Bun.env.MISTRAL_MODEL?.trim();
   if (!apiKey || !model) throw new Error("MISTRAL_API_KEY and MISTRAL_MODEL are required");
-  const provider = new MistralHttpOcrProvider(apiKey, model);
-  let failed = false;
-  for (const name of fixtureNames) {
-    let approved: { source: string; expected: ApprovedExpected }; let bytes: Uint8Array;
-    try {
-      approved = fixture(JSON.parse(await readFile(resolve(fixtureDirectory, name), "utf8"))); bytes = await readApprovedFixturePng(approved.source);
-    } catch {
-      failed = true; printFailure(name, "fixture"); continue;
-    }
-    let result: Awaited<ReturnType<MistralHttpOcrProvider["extract"]>>;
-    try {
-      result = await provider.extract({ bytes, mimeType: "image/png", caption: null, idempotencyKey: `approved-evaluation:${EXTRACTION_PROMPT_VERSION}:${runToken}:${name}` });
-    } catch {
-      failed = true; printFailure(name, "provider"); continue;
-    }
-    try {
-      const evaluation = evaluateApprovedAnnotation(result.annotation, approved.expected, result.evidence);
-      failed ||= !evaluation.passed;
-      console.log(JSON.stringify({ fixture: name, differences: evaluation.differences, decision: evaluation.decision, issues: evaluation.issues }));
-    } catch (error) {
-      failed = true;
-      printFailure(name, "schema", schemaReason(error));
-    }
-  }
-  if (failed) process.exitCode = 1;
+  const records = await runApprovedExampleEvaluation({ provider: new MistralHttpOcrProvider(apiKey, model), preprocessor: new WorkerImagePreprocessor({ timeoutMs: 8_000 }) });
+  for (const record of records) console.log(JSON.stringify(record));
+  if (records.some((record) => record.decision !== "approved" || record.differences.length > 0)) process.exitCode = 1;
 }
 
-if (import.meta.main) void main();
+if (import.meta.main) {
+  if (Bun.env.APPROVED_EXAMPLE_EVALUATION_AUTHORIZED !== "true") throw new Error("Set APPROVED_EXAMPLE_EVALUATION_AUTHORIZED=true to run live approved-example evaluation");
+  void main();
+}

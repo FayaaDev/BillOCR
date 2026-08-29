@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppConfig } from "../src/config";
@@ -9,6 +10,7 @@ import type { IncomingWhatsAppMessage } from "../src/whatsapp-ingestion";
 import type { MistralOcrProvider } from "../src/extraction";
 import type { DriveAdapter, DriveFile, SheetsAdapter } from "../src/google-projections";
 import { BillDatabase } from "../src/database";
+import { IMAGE_PREPROCESSING_VERSION, type ImagePreprocessor } from "../src/image-preprocessing";
 
 let directory: string;
 let service: RunningService;
@@ -17,7 +19,7 @@ beforeEach(() => {
   directory = realpathSync(mkdtempSync(join(tmpdir(), "bill-server-")));
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "ledger.sqlite"), logLevel: "error",
-    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 },
+    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" },
     validation: { confidenceThreshold: 0.85, handwrittenConfidenceThreshold: 0.92, currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 },
     jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
@@ -37,7 +39,7 @@ test("startup closes its database when HTTP construction fails", async () => {
   let closes = 0;
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "failed.sqlite"), logLevel: "error",
-    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 },
+    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" },
     validation: { confidenceThreshold: 0.85, handwrittenConfidenceThreshold: 0.92, currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 },
     jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
@@ -53,7 +55,7 @@ test("service starts and stops an injected WhatsApp transport when enabled", asy
   const transport: WhatsAppTransport = { start: async () => { started += 1; }, stop: async () => { stopped += 1; } };
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "transport.sqlite"), logLevel: "error",
-    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 },
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" },
     validation: { confidenceThreshold: 0.85, handwrittenConfidenceThreshold: 0.92, currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 },
     jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
@@ -72,7 +74,7 @@ test("shutdown drains an in-flight WhatsApp ingestion before closing the databas
   const transport: WhatsAppTransport = { start: async (handler) => { receive = handler; }, stop: async () => undefined };
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "drain.sqlite"), logLevel: "error",
-    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 },
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" },
     validation: { confidenceThreshold: 0.85, handwrittenConfidenceThreshold: 0.92, currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
   };
@@ -113,7 +115,7 @@ test("startService wires production ingestion, extraction, validation, Drive, an
   } };
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "wired.sqlite"), logLevel: "error",
-    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 3 * 1024 * 1024 }, mistral: { apiKey: "test", model: "test", maxResponseBytes: 1024, requestTimeoutMs: 1_000 },
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 3 * 1024 * 1024 }, mistral: { apiKey: "test", model: "test", maxResponseBytes: 1024, requestTimeoutMs: 1_000 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: true, authMode: "user_oauth", credentialJson: join(directory, "unused.json"), driveFolderId: "root", sheetId: "sheet", sheetName: "Ledger", requestTimeoutMs: 1_000, maxResponseBytes: 1_024 }, review: { username: "reviewer", password: "secret" },
     validation: { confidenceThreshold: .85, handwrittenConfidenceThreshold: .92, currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 },
   };
@@ -132,4 +134,52 @@ test("startService wires production ingestion, extraction, validation, Drive, an
   expect(archived.get("drive-file")).toEqual(fixture); expect(database!.getExtraction(bill.id)).toMatchObject({ providerModel: "mistral-test", normalized: expect.objectContaining({ vendorName: "Wired Store" }) });
   expect([...rows.values()].filter((row) => row[13] === bill.id)).toHaveLength(1);
   await service.shutdown(); expect(stopped).toBe(true);
+});
+
+test("enabled ingestion tags image jobs and injects preprocessing into extraction", async () => {
+  await service.shutdown();
+  let receive: ((message: IncomingWhatsAppMessage) => Promise<void>) | undefined;
+  const original = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const derivative = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const preprocessor: ImagePreprocessor = { preprocess: async () => ({ bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 }) };
+  const received: Uint8Array[] = []; let database: BillDatabase | undefined;
+  const config: AppConfig = {
+    host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "preprocess.sqlite"), logLevel: "error",
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, imagePreprocessing: { enabled: true, timeoutMs: 8_000 },
+    google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { confidenceThreshold: .85, handwrittenConfidenceThreshold: .92, currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 },
+  };
+  service = startService(config, {}, { createDatabase: (path) => (database = new BillDatabase(path)), whatsappTransport: { start: async (handler) => { receive = handler; }, stop: async () => undefined }, imagePreprocessor: preprocessor, mistralProvider: { extract: async (input) => { received.push(input.bytes); return { annotation: { schemaVersion: "1", vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-28", currency: null, subtotal: null, vat: null, total: 1, description: null, handwritten: false, fields: { vendorName: { confidence: 1, sourceText: "Vendor" }, invoiceDate: { confidence: 1, sourceText: "2026-08-28" }, total: { confidence: 1, sourceText: "1" } } }, rawResponse: "raw", model: "mock" }; } } });
+  for (let attempts = 0; !receive && attempts < 20; attempts += 1) await Bun.sleep(1);
+  await receive!({ id: "tagged", groupId: "group", senderId: "sender", timestamp: "2026-08-28T00:00:00.000Z", attachments: [{ kind: "image", mimeType: "image/png", download: async () => original }] });
+  for (let attempts = 0; received.length === 0 && attempts < 600; attempts += 1) await Bun.sleep(2);
+  const bill = database!.findBillsByIdentifier("tagged")[0]!;
+  expect(received).toEqual([derivative]);
+  expect(database!.sqlite.query<{ idempotency_key: string }, [string]>("SELECT idempotency_key FROM jobs WHERE bill_id = ? AND type = 'extract'").get(bill.id)?.idempotency_key).toBe(`extract:${bill.id}:${IMAGE_PREPROCESSING_VERSION}`);
+});
+
+test("disabled ingestion leaves new jobs original while existing tagged jobs still preprocess", async () => {
+  await service.shutdown();
+  const original = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const derivative = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 2]);
+  const database = new BillDatabase(join(directory, "disabled.sqlite"));
+  const taggedPath = join(directory, "originals", "existing.png");
+  writeFileSync(taggedPath, original);
+  const tagged = database.createBillWithInitialJobs({ whatsappMessageId: "existing", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: "2026-08-28T00:00:00.000Z", mimeType: "image/png", originalPath: taggedPath, contentSha256: createHash("sha256").update(original).digest("hex") }, [{ type: "extract", idempotencyKey: `extract:existing:${IMAGE_PREPROCESSING_VERSION}` }]).bill;
+  let receive: ((message: IncomingWhatsAppMessage) => Promise<void>) | undefined; const received: Uint8Array[] = []; let preprocessCalls = 0;
+  const config: AppConfig = {
+    host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "disabled.sqlite"), logLevel: "error",
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
+    google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { confidenceThreshold: .85, handwrittenConfidenceThreshold: .92, currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 },
+  };
+  const annotation = { schemaVersion: "1" as const, vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-28", currency: null, subtotal: null, vat: null, total: 1, description: null, handwritten: false, fields: { vendorName: { confidence: 1, sourceText: "Vendor" }, invoiceDate: { confidence: 1, sourceText: "2026-08-28" }, total: { confidence: 1, sourceText: "1" } } };
+  service = startService(config, {}, { createDatabase: () => database, whatsappTransport: { start: async (handler) => { receive = handler; }, stop: async () => undefined }, imagePreprocessor: { preprocess: async () => { preprocessCalls += 1; return { bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 }; } }, mistralProvider: { extract: async (input) => { received.push(input.bytes); return { annotation, rawResponse: "raw", model: "mock" }; } } });
+  for (let attempts = 0; !receive && attempts < 20; attempts += 1) await Bun.sleep(1);
+  await receive!({ id: "new", groupId: "group", senderId: "sender", timestamp: "2026-08-28T00:00:00.000Z", attachments: [{ kind: "image", mimeType: "image/png", download: async () => original }] });
+  for (let attempts = 0; received.length < 2 && attempts < 700; attempts += 1) await Bun.sleep(2);
+  expect(preprocessCalls).toBe(1);
+  expect(received).toContainEqual(derivative);
+  expect(received).toContainEqual(original);
+  const newBill = database.findBillsByIdentifier("new")[0]!;
+  expect(database.getBill(tagged.id)?.status).toBe("approved");
+  expect(database.sqlite.query<{ idempotency_key: string }, [string]>("SELECT idempotency_key FROM jobs WHERE bill_id = ? AND type = 'extract'").get(newBill.id)?.idempotency_key).toBe(`extract:${newBill.id}:original`);
 });

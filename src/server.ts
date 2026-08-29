@@ -9,6 +9,7 @@ import { BackgroundWorkerLoop, JobWorker } from "./worker";
 import { BaileysTransport, type WhatsAppTransport } from "./baileys-transport";
 import { WhatsAppIngestionService } from "./whatsapp-ingestion";
 import { createExtractJobHandler, MistralHttpOcrProvider, type MistralOcrProvider } from "./extraction";
+import { IMAGE_PREPROCESSING_VERSION, WorkerImagePreprocessor, type ImagePreprocessor } from "./image-preprocessing";
 import { createExtractionValidationCallback } from "./validation";
 import { createDriveArchiveHandler, createGoogleAdapters, createReviewCorrectionSyncHandler, createSheetsProjectionHandler, type DriveAdapter, type SheetsAdapter } from "./google-projections";
 
@@ -19,6 +20,7 @@ export interface ServiceDependencies {
   whatsappTransport?: WhatsAppTransport;
   enableWhatsApp?: boolean;
   mistralProvider?: MistralOcrProvider;
+  imagePreprocessor?: ImagePreprocessor;
   onExtractionPersisted?: (billId: string) => Promise<void> | void;
   driveAdapter?: DriveAdapter;
   sheetsAdapter?: SheetsAdapter;
@@ -36,7 +38,8 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
     validatePersistedExtraction(billId);
     await dependencies.onExtractionPersisted?.(billId);
   };
-  const extractHandler = jobHandlers.extract ?? createExtractJobHandler(database, dependencies.mistralProvider ?? new MistralHttpOcrProvider(config.mistral.apiKey, config.mistral.model, config.mistral.maxResponseBytes, config.mistral.requestTimeoutMs), config.jobs.maxAttempts, onExtracted, { root: config.whatsapp.originalsDir, maxBytes: config.whatsapp.maxAttachmentBytes });
+  const imagePreprocessor = dependencies.imagePreprocessor ?? new WorkerImagePreprocessor({ timeoutMs: config.imagePreprocessing.timeoutMs });
+  const extractHandler = jobHandlers.extract ?? createExtractJobHandler(database, dependencies.mistralProvider ?? new MistralHttpOcrProvider(config.mistral.apiKey, config.mistral.model, config.mistral.maxResponseBytes, config.mistral.requestTimeoutMs), config.jobs.maxAttempts, onExtracted, { root: config.whatsapp.originalsDir, maxBytes: config.whatsapp.maxAttachmentBytes }, imagePreprocessor);
   let googleHandlers: JobHandlers = {};
   if (config.google.enabled) {
     const adapters = dependencies.driveAdapter && dependencies.sheetsAdapter ? { drive: dependencies.driveAdapter, sheets: dependencies.sheetsAdapter } : createGoogleAdapters(readFileSync(config.google.credentialJson, "utf8"), { driveRootId: config.google.driveFolderId, sheetId: config.google.sheetId, sheetName: config.google.sheetName, requestTimeoutMs: config.google.requestTimeoutMs, maxResponseBytes: config.google.maxResponseBytes });
@@ -49,7 +52,7 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
   const worker = new JobWorker(database, { ...googleHandlers, ...jobHandlers, extract: extractHandler }, config.jobs, `service-${process.pid}`, logger);
   const workerLoop = new BackgroundWorkerLoop(worker, logger);
   const transport = dependencies.whatsappTransport ?? new BaileysTransport(config.whatsapp.authPath, logger);
-  const ingestion = new WhatsAppIngestionService({ groupId: config.whatsapp.groupId, originalsDir: config.whatsapp.originalsDir, maxAttachmentBytes: config.whatsapp.maxAttachmentBytes, database, logger });
+  const ingestion = new WhatsAppIngestionService({ groupId: config.whatsapp.groupId, originalsDir: config.whatsapp.originalsDir, maxAttachmentBytes: config.whatsapp.maxAttachmentBytes, extractionInputVersion: config.imagePreprocessing.enabled ? IMAGE_PREPROCESSING_VERSION : "original", database, logger });
   let server: ReturnType<typeof Bun.serve>;
   try {
     server = (dependencies.serve ?? Bun.serve)({ hostname: config.host, port: config.port, fetch: (request) => handleRequest(request, database, config) });

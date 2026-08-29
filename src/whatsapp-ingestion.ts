@@ -7,11 +7,12 @@ import type { BillDatabase } from "./database";
 import type { Logger } from "./logger";
 import { canonicalOriginalsDir } from "./config";
 import { canonicalAttachmentExtension, isSupportedDocumentMimeType, isSupportedImageMimeType } from "./attachment-mime";
+import { IMAGE_PREPROCESSING_VERSION } from "./image-preprocessing";
 
 export type AttachmentKind = "image" | "document";
 export interface IncomingAttachment { kind: AttachmentKind; mimeType: string | null | undefined; filename?: string | null; caption?: string | null; download(): Promise<Uint8Array | AsyncIterable<Uint8Array>> | AsyncIterable<Uint8Array>; }
 export interface IncomingWhatsAppMessage { id: string | null | undefined; groupId: string | null | undefined; senderId: string | null | undefined; timestamp: Date | string | number | null | undefined; caption?: string | null; attachments?: IncomingAttachment[] | null; }
-export interface WhatsAppIngestionOptions { groupId: string; originalsDir: string; database: BillDatabase; logger: Logger; maxAttachmentBytes?: number; beforeCommit?: () => Promise<void>; beforeStagingPublish?: () => Promise<void>; afterOriginalPublished?: () => Promise<void>; }
+export interface WhatsAppIngestionOptions { groupId: string; originalsDir: string; database: BillDatabase; logger: Logger; extractionInputVersion?: "original" | typeof IMAGE_PREPROCESSING_VERSION; maxAttachmentBytes?: number; beforeCommit?: () => Promise<void>; beforeStagingPublish?: () => Promise<void>; afterOriginalPublished?: () => Promise<void>; }
 export interface IngestionResult { bills: Bill[]; }
 
 type StagedAttachment = CreateBillInput & { version: 1; };
@@ -41,7 +42,7 @@ export class WhatsAppIngestionService {
   private readonly options: WhatsAppIngestionOptions;
   constructor(options: WhatsAppIngestionOptions) {
     mkdirSync(options.originalsDir, { recursive: true });
-    this.options = { ...options, originalsDir: canonicalOriginalsDir(options.originalsDir) };
+    this.options = { ...options, extractionInputVersion: options.extractionInputVersion ?? "original", originalsDir: canonicalOriginalsDir(options.originalsDir) };
   }
 
   async ingest(message: IncomingWhatsAppMessage): Promise<IngestionResult> {
@@ -174,7 +175,7 @@ export class WhatsAppIngestionService {
     let result;
     try {
       result = this.options.database.createBillWithInitialJobs({ ...manifest, originalPath }, [
-        { type: "extract", idempotencyKey: `extract:${manifest.id}` },
+        { type: "extract", idempotencyKey: `extract:${manifest.id}:${this.options.extractionInputVersion}` },
         { type: "archive_to_drive", idempotencyKey: `archive_to_drive:${manifest.id}` },
       ]);
     } catch (error) {
