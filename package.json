@@ -7,8 +7,8 @@
     "start": "bun run src/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "bun build src/server.ts src/ops.ts src/image-preprocessing.ts src/image-preprocessing-worker.ts --target bun --outdir dist --external sharp --external @techstark/opencv-js && rm -rf dist/review && bun build src/review-client.tsx --target browser --outdir dist/review && mv dist/review/review-client.js dist/review/client.js && mv dist/review/review-client.css dist/review/client.css",
-    "verify-build": "bun run build && test -f dist/server.js && test -f dist/ops.js && test -f dist/image-preprocessing.js && test -f dist/image-preprocessing-worker.js && test -f dist/review/client.js && test -f dist/review/client.css",
+    "build": "bun build src/server.ts src/ops.ts src/image-preprocessing.ts src/image-preprocessing-worker.ts --target bun --outdir dist --external sharp --external @techstark/opencv-js && rm -rf dist/review && bun build src/review-client.tsx src/review-theme.ts --target browser --outdir dist/review && mv dist/review/review-client.js dist/review/client.js && mv dist/review/review-theme.js dist/review/theme.js && bunx @tailwindcss/cli -i src/review-client.css -o dist/review/client.css && mkdir dist/review/files && cp node_modules/@fontsource/noto-sans-arabic/files/noto-sans-arabic-arabic-400-normal.woff2 node_modules/@fontsource/noto-sans-arabic/files/noto-sans-arabic-arabic-700-normal.woff2 dist/review/files",
+    "verify-build": "bun run build && test -f dist/server.js && test -f dist/ops.js && test -f dist/image-preprocessing.js && test -f dist/image-preprocessing-worker.js && test -f dist/review/client.js && test -f dist/review/theme.js && test -f dist/review/client.css && test -f dist/review/files/noto-sans-arabic-arabic-400-normal.woff2 && test -f dist/review/files/noto-sans-arabic-arabic-700-normal.woff2",
     "ops": "bun run src/ops.ts",
     "migrate": "bun run src/ops.ts migrate",
     "whatsapp:qr": "bun run src/render-whatsapp-qr.ts",
@@ -16,19 +16,29 @@
     "evaluate:approved-examples": "bun run src/evaluate-approved-examples.ts"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
     "@types/bun": "latest",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "@types/ws": "^8.18.1",
+    "shadcn": "^4.19.0",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "@base-ui/react": "^1.7.0",
+    "@fontsource/noto-sans-arabic": "^5.3.0",
+    "@tanstack/react-table": "^9.2.4",
     "@techstark/opencv-js": "5.0.0-release.1",
-    "@tanstack/react-table": "^8.21.3",
     "baileys": "^7.0.0-rc14",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.37.0",
     "qrcode-terminal": "^0.12.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "sharp": "0.35.4"
+    "sharp": "0.35.4",
+    "tailwind-merge": "^3.6.0"
   }
 }
