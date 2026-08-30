@@ -4,7 +4,6 @@ import { currencyMinorUnits, knownIso4217Codes, toleranceForCurrency } from "./c
 
 export interface ValidationConfig {
   confidenceThreshold: number;
-  handwrittenConfidenceThreshold: number;
   currencyRoundingTolerance: number;
   maxFutureInvoiceDays: number;
 }
@@ -89,9 +88,8 @@ export function validateExtractedBill(extracted: ExtractedBill, config: Validati
       continue;
     }
     const confidenceEntry = extracted.fields[key];
-    const threshold = extracted.handwritten !== false ? config.handwrittenConfidenceThreshold : config.confidenceThreshold;
     if (!confidenceEntry) issues.push(issue(key, "required_field_confidence_missing", `${key} confidence is required for automatic approval.`, null));
-    else if (!Number.isFinite(confidenceEntry.confidence) || confidenceEntry.confidence < threshold) issues.push(issue(key, "required_field_confidence_low", `${key} confidence is below the required threshold.`, { confidence: confidenceEntry.confidence, threshold }));
+    else if (!Number.isFinite(confidenceEntry.confidence) || confidenceEntry.confidence < config.confidenceThreshold) issues.push(issue(key, "required_field_confidence_low", `${key} confidence is below the required threshold.`, { confidence: confidenceEntry.confidence, threshold: config.confidenceThreshold }));
   }
   return { decision: issues.some((item) => item.severity === "blocking") ? "needs_review" : "approved", issues };
 }

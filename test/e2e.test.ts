@@ -13,7 +13,7 @@ import { JobWorker } from "../src/worker";
 
 const policy: RetryPolicy = { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 };
 const logger = createLogger("error");
-const valid = { schemaVersion: "1" as const, vendorName: "Fixture Store", invoiceNumber: "E2E-1", invoiceDate: "2026-08-27", currency: "USD", subtotal: 10, vat: 1, total: 11, description: "fixture", handwritten: false, fields: { vendorName: { confidence: .99, sourceText: "Fixture Store" }, invoiceDate: { confidence: .99, sourceText: "2026-08-27" }, total: { confidence: .99, sourceText: "11.00" } } };
+const valid = { schemaVersion: "1" as const, vendorName: "Fixture Store", invoiceNumber: "E2E-1", invoiceDate: "2026-08-27", currency: "USD", subtotal: 10, vat: 1, total: 11, description: "fixture", fields: { vendorName: { confidence: .99, sourceText: "Fixture Store" }, invoiceDate: { confidence: .99, sourceText: "2026-08-27" }, total: { confidence: .99, sourceText: "11.00" } } };
 let directory: string; let database: BillDatabase;
 
 class MemoryDrive implements DriveAdapter {
@@ -42,11 +42,11 @@ function ingest(bytes: Uint8Array, mimeType = "image/png") {
   return { service, event };
 }
 function worker(provider: MistralOcrProvider, drive: DriveAdapter, sheets: SheetsAdapter) {
-  const validate = createExtractionValidationCallback(database, { confidenceThreshold: .85, handwrittenConfidenceThreshold: .92, currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
+  const validate = createExtractionValidationCallback(database, { confidenceThreshold: .85, currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
   return new JobWorker(database, { extract: createExtractJobHandler(database, provider, policy.maxAttempts, validate, { root: join(directory, "originals"), maxBytes: 20 * 1024 * 1024 }), archive_to_drive: createDriveArchiveHandler(database, drive, { driveRootId: "root", originalsRoot: join(directory, "originals") }), project_to_sheet: createSheetsProjectionHandler(database, sheets) }, policy, "e2e", logger);
 }
 function extractWorker(provider: MistralOcrProvider) {
-  const validate = createExtractionValidationCallback(database, { confidenceThreshold: .85, handwrittenConfidenceThreshold: .92, currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
+  const validate = createExtractionValidationCallback(database, { confidenceThreshold: .85, currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
   return new JobWorker(database, { extract: createExtractJobHandler(database, provider, policy.maxAttempts, validate, { root: join(directory, "originals"), maxBytes: 20 * 1024 * 1024 }) }, policy, "e2e-extract", logger);
 }
 async function drain(item: JobWorker): Promise<void> { while (await item.runOnce()) {} }

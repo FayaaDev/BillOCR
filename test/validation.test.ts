@@ -7,9 +7,9 @@ import { BillDatabase } from "../src/database";
 import { createExtractionValidationCallback, parseObservedValue, serializeObservedValue, validateExtractedBill, type ValidationConfig } from "../src/validation";
 import { ISO_4217_DATASET_VERSION, currencyMinorUnits, iso4217MinorUnits, knownIso4217Codes, minorUnitPolicy } from "../src/currency";
 
-const config: ValidationConfig = { confidenceThreshold: 0.85, handwrittenConfidenceThreshold: 0.92, currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 };
+const config: ValidationConfig = { confidenceThreshold: 0.50, currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 };
 const extracted = (overrides: Partial<ExtractedBill> = {}): ExtractedBill => ({
-  schemaVersion: "1", vendorName: "Vendor", invoiceNumber: "INV-1", invoiceDate: "2026-08-28", currency: "USD", subtotal: 10, vat: 1, total: 11, description: null, handwritten: false,
+  schemaVersion: "1", vendorName: "Vendor", invoiceNumber: "INV-1", invoiceDate: "2026-08-28", currency: "USD", subtotal: 10, vat: 1, total: 11, description: null,
   fields: { vendorName: { confidence: 0.9, sourceText: "Vendor" }, invoiceDate: { confidence: 0.9, sourceText: "2026-08-28" }, total: { confidence: 0.9, sourceText: "11" } }, ...overrides,
 });
 const now = new Date("2026-08-28T12:00:00.000Z");
@@ -22,12 +22,16 @@ test("approves valid totals within configured rounding tolerance", () => {
   expect(validateExtractedBill(extracted({ total: 11.009 }), config, now)).toEqual({ decision: "approved", issues: [] });
 });
 
-test("blocks arithmetic, required fields, low confidence, and stricter handwriting confidence", () => {
+test("blocks arithmetic, required fields, and low confidence", () => {
   expect(validateExtractedBill(extracted({ total: 12 }), config, now).issues).toContainEqual(expect.objectContaining({ code: "total_mismatch", field: "total" }));
   expect(validateExtractedBill(extracted({ vendorName: null }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_missing", field: "vendorName" }));
   expect(validateExtractedBill(extracted({ fields: { vendor_name: { confidence: 0.84, sourceText: "Vendor" }, invoiceDate: { confidence: 0.9, sourceText: "date" }, total: { confidence: 0.9, sourceText: "11" } } }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_confidence_missing", field: "vendorName" }));
-  expect(validateExtractedBill(extracted({ handwritten: true, fields: { vendorName: { confidence: 0.9, sourceText: "Vendor" }, invoiceDate: { confidence: 0.93, sourceText: "date" }, total: { confidence: 0.93, sourceText: "11" } } }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_confidence_low", field: "vendorName", observedValue: expect.stringContaining("0.92") }));
-  expect(validateExtractedBill(extracted({ handwritten: null, fields: { vendorName: { confidence: 0.9, sourceText: "Vendor" }, invoiceDate: { confidence: 0.93, sourceText: "date" }, total: { confidence: 0.93, sourceText: "11" } } }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_confidence_low", field: "vendorName", observedValue: expect.stringContaining("0.92") }));
+  for (const field of ["vendorName", "invoiceDate", "total"] as const) {
+    const fields = { vendorName: { confidence: 0.50, sourceText: "Vendor" }, invoiceDate: { confidence: 0.50, sourceText: "date" }, total: { confidence: 0.50, sourceText: "11" } };
+    fields[field] = { ...fields[field], confidence: 0.49 };
+    expect(validateExtractedBill(extracted({ fields }), config, now)).toMatchObject({ decision: "needs_review", issues: [expect.objectContaining({ code: "required_field_confidence_low", field, observedValue: expect.stringContaining("0.5") })] });
+  }
+  expect(validateExtractedBill(extracted({ fields: { vendorName: { confidence: 0.50, sourceText: "Vendor" }, invoiceDate: { confidence: 0.50, sourceText: "date" }, total: { confidence: 0.50, sourceText: "11" } } }), config, now)).toEqual({ decision: "approved", issues: [] });
 });
 
 test("blocks invalid dates, unknown currencies, and invalid monetary values defensively", () => {

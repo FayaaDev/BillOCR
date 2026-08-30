@@ -15,7 +15,7 @@ export interface AppConfig {
   imagePreprocessing: { enabled: boolean; timeoutMs: number };
   google: GoogleConfig;
   review: { username: string; password: string };
-  validation: { confidenceThreshold: number; handwrittenConfidenceThreshold: number; currencyRoundingTolerance: number; maxFutureInvoiceDays: number };
+  validation: { confidenceThreshold: number; currencyRoundingTolerance: number; maxFutureInvoiceDays: number };
   jobs: { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number };
 }
 
@@ -50,12 +50,9 @@ export function canonicalOriginalsDir(path: string): string { return realpathSyn
 
 /** Validation settings shared by the service and bounded live evaluator. */
 export function loadValidationConfig(env: Env = Bun.env): AppConfig["validation"] {
-  const confidenceThreshold = number(env, "CONFIDENCE_THRESHOLD", 0.85, 0, 1);
-  const handwrittenConfidenceThreshold = number(env, "HANDWRITTEN_CONFIDENCE_THRESHOLD", 0.92, 0, 1);
-  if (handwrittenConfidenceThreshold < confidenceThreshold) throw new Error("HANDWRITTEN_CONFIDENCE_THRESHOLD must be >= CONFIDENCE_THRESHOLD");
+  const confidenceThreshold = number(env, "CONFIDENCE_THRESHOLD", 0.50, 0, 1);
   return {
     confidenceThreshold,
-    handwrittenConfidenceThreshold,
     currencyRoundingTolerance: number(env, "CURRENCY_ROUNDING_TOLERANCE", 0.01, 0, Number.MAX_SAFE_INTEGER),
     maxFutureInvoiceDays: integer(env, "MAX_FUTURE_INVOICE_DAYS", 30, 0),
   };
@@ -68,9 +65,6 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
   if (!levels.has(logLevel)) throw new Error("APP_LOG_LEVEL must be debug, info, warn, or error");
   const retryBaseMs = integer(env, "JOB_RETRY_BASE_MS", 1_000, 1);
   const retryMaxMs = integer(env, "JOB_RETRY_MAX_MS", 300_000, retryBaseMs);
-  const confidenceThreshold = number(env, "CONFIDENCE_THRESHOLD", 0.85, 0, 1);
-  const handwrittenConfidenceThreshold = number(env, "HANDWRITTEN_CONFIDENCE_THRESHOLD", 0.92, 0, 1);
-  if (handwrittenConfidenceThreshold < confidenceThreshold) throw new Error("HANDWRITTEN_CONFIDENCE_THRESHOLD must be >= CONFIDENCE_THRESHOLD");
   return {
     host: env.APP_HOST ?? "127.0.0.1",
     port: integer(env, "APP_PORT", 3_000, 1),

@@ -37,7 +37,6 @@ export interface ExtractedBill {
   vat: number | null;
   total: number | null;
   description: string | null;
-  handwritten: boolean | null;
   fields: Record<string, { confidence: number; sourceText: string | null }>;
 }
 

@@ -4,8 +4,8 @@ import { join, resolve } from "node:path";
 
 const directory = join(import.meta.dir, "fixtures", "approved");
 const expected = {
-  "example3.json": { vendorName: "Al-Anzi Lathe", invoiceNumber: "0427", invoiceDate: "2026-08-26", currency: null, subtotal: 70, vat: null, total: 70, description: null, handwritten: null },
-  "example4.json": { vendorName: "Car electrical & A/C", invoiceNumber: "0062", invoiceDate: "2024-08-26", currency: null, subtotal: 200, vat: null, total: 200, description: "5184", handwritten: null },
+  "example3.json": { vendorName: "Al-Anzi Lathe", invoiceNumber: "0427", invoiceDate: "2026-08-26", currency: null, subtotal: 70, vat: null, total: 70, description: null },
+  "example4.json": { vendorName: "Car electrical & A/C", invoiceNumber: "0062", invoiceDate: "2024-08-26", currency: null, subtotal: 200, vat: null, total: 200, description: "5184" },
 };
 
 test("approved fixture manifests contain complete ground truth and existing image sources", () => {

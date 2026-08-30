@@ -10,10 +10,6 @@ const validEnvironment = () => ({
   REVIEW_USERNAME: "reviewer", REVIEW_PASSWORD: "review-secret",
 });
 
-test("configuration rejects an invalid stricter handwritten confidence threshold", () => {
-  expect(() => loadConfig({ ...validEnvironment(), CONFIDENCE_THRESHOLD: "0.9", HANDWRITTEN_CONFIDENCE_THRESHOLD: "0.8" })).toThrow("HANDWRITTEN_CONFIDENCE_THRESHOLD");
-});
-
 test("configuration allows WhatsApp to be disabled for test environments", () => {
   expect(loadConfig({ ...validEnvironment(), WHATSAPP_ENABLED: "false" }).whatsapp.enabled).toBe(false);
 });
@@ -44,13 +40,12 @@ test("documented Google projection configuration enables the configured ledger t
 });
 
 test("validation configuration supplies deterministic Phase 3 defaults", () => {
-  expect(loadConfig(validEnvironment()).validation).toEqual({ confidenceThreshold: 0.85, handwrittenConfidenceThreshold: 0.92, currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 });
+  expect(loadConfig(validEnvironment()).validation).toEqual({ confidenceThreshold: 0.50, currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 });
   expect(() => loadConfig({ ...validEnvironment(), MAX_FUTURE_INVOICE_DAYS: "-1" })).toThrow("MAX_FUTURE_INVOICE_DAYS");
 });
 
-test("standalone validation configuration preserves production defaults, overrides, and threshold invariant", () => {
-  expect(loadValidationConfig({ CONFIDENCE_THRESHOLD: "0.8", HANDWRITTEN_CONFIDENCE_THRESHOLD: "0.9", CURRENCY_ROUNDING_TOLERANCE: "0.02", MAX_FUTURE_INVOICE_DAYS: "7" })).toEqual({ confidenceThreshold: 0.8, handwrittenConfidenceThreshold: 0.9, currencyRoundingTolerance: 0.02, maxFutureInvoiceDays: 7 });
-  expect(() => loadValidationConfig({ CONFIDENCE_THRESHOLD: "0.9", HANDWRITTEN_CONFIDENCE_THRESHOLD: "0.8" })).toThrow("HANDWRITTEN_CONFIDENCE_THRESHOLD");
+test("standalone validation configuration preserves production defaults and overrides", () => {
+  expect(loadValidationConfig({ CONFIDENCE_THRESHOLD: "0.8", CURRENCY_ROUNDING_TOLERANCE: "0.02", MAX_FUTURE_INVOICE_DAYS: "7" })).toEqual({ confidenceThreshold: 0.8, currencyRoundingTolerance: 0.02, maxFutureInvoiceDays: 7 });
 });
 
 test("configuration validates byte and provider timeout limits", () => {

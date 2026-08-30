@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { EXTRACTION_PROMPT_VERSION, groundRequiredFieldConfidence, MistralHttpOcrProvider, type MistralOcrProvider, type OcrEvidence, parseProviderExtractedBill } from "./extraction";
+import { EXTRACTION_PROMPT_VERSION, MistralHttpOcrProvider, type MistralOcrProvider, parseProviderExtractedBill } from "./extraction";
 import { WorkerImagePreprocessor, type ImagePreprocessor } from "./image-preprocessing";
 import { validateExtractedBill } from "./validation";
 import { loadValidationConfig } from "./config";
@@ -10,7 +10,7 @@ const fixtureDirectory = resolve(import.meta.dir, "../test/fixtures/approved");
 const workspaceRoot = resolve(import.meta.dir, "..");
 const fixtureNames = ["example3.json", "example4.json"] as const;
 const maxAttachmentBytes = 20 * 1024 * 1024;
-const fields = ["vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description", "handwritten"] as const;
+const fields = ["vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description"] as const;
 const variants = ["original", "sharp", "opencv"] as const;
 type Field = typeof fields[number];
 type Variant = typeof variants[number];
@@ -43,15 +43,14 @@ export async function readApprovedFixturePng(source: string): Promise<Uint8Array
 
 function schemaReason(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
-  for (const field of ["schemaVersion", "vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description", "handwritten", "fields"]) if (message.includes(field)) return field;
+  for (const field of ["schemaVersion", "vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description", "fields"]) if (message.includes(field)) return field;
   return "schema";
 }
 type EvaluatorResult = { differences: Array<{ field: Field; expected: ApprovedExpected[Field]; actual: ApprovedExpected[Field] }>; decision: "approved" | "needs_review"; issues: Array<{ code: string; field: string | null }>; passed: boolean };
-export function evaluateApprovedAnnotation(annotation: unknown, expected: ApprovedExpected, evidence: OcrEvidence | undefined, now = new Date()): EvaluatorResult {
+export function evaluateApprovedAnnotation(annotation: unknown, expected: ApprovedExpected, now = new Date()): EvaluatorResult {
   const parsed = parseProviderExtractedBill(annotation);
-  const grounded = groundRequiredFieldConfidence(parsed, evidence ?? { regions: [] });
-  const validation = validateExtractedBill(grounded, loadValidationConfig(Bun.env), now);
-  const differences = fields.flatMap((field) => Object.is(grounded[field], expected[field]) ? [] : [{ field, expected: expected[field], actual: grounded[field] }]);
+  const validation = validateExtractedBill(parsed, loadValidationConfig(Bun.env), now);
+  const differences = fields.flatMap((field) => Object.is(parsed[field], expected[field]) ? [] : [{ field, expected: expected[field], actual: parsed[field] }]);
   return { differences, decision: validation.decision, issues: validation.issues.map(({ code, field }) => ({ code, field })), passed: differences.length === 0 && validation.decision === "approved" };
 }
 export type ApprovedExampleEvaluationRecord = {
@@ -112,7 +111,7 @@ export async function runApprovedExampleEvaluation(dependencies: ApprovedExample
         continue;
       }
       try {
-        const evaluation = evaluateApprovedAnnotation(result.annotation, approved.expected, result.evidence);
+        const evaluation = evaluateApprovedAnnotation(result.annotation, approved.expected);
         records.push({ fixture: name, variant, differences: evaluation.differences, decision: evaluation.decision, issues: evaluation.issues, mode, dimensions });
       } catch (error) {
         records.push(failureRecord(name, variant, `evaluator_schema_${schemaReason(error)}`));

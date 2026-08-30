@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BillDatabase, type RetryPolicy } from "../src/database";
-import { createExtractJobHandler, extractedBillJsonSchema, extractionPrompt, groundRequiredFieldConfidence, MistralHttpOcrProvider, type MistralOcrProvider, parseExtractedBill, parseProviderExtractedBill, RetryableExtractionError } from "../src/extraction";
+import { createExtractJobHandler, extractedBillJsonSchema, extractionPrompt, MistralHttpOcrProvider, type MistralOcrProvider, parseExtractedBill, parseProviderExtractedBill, RetryableExtractionError } from "../src/extraction";
 import { createLogger } from "../src/logger";
 import { JobWorker } from "../src/worker";
 import { PermanentJobError } from "../src/worker";
@@ -14,7 +14,7 @@ const policy: RetryPolicy = { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 2, lea
 let directory: string;
 let database: BillDatabase;
 
-const valid = (overrides: Record<string, unknown> = {}) => ({ schemaVersion: "1", vendorName: "Vendor", invoiceNumber: "INV-1", invoiceDate: "2026-08-28", currency: "USD", subtotal: 10, vat: 1, total: 11, description: "items", handwritten: false, fields: { total: { confidence: 0.99, sourceText: "11.00" } }, ...overrides });
+const valid = (overrides: Record<string, unknown> = {}) => ({ schemaVersion: "1", vendorName: "Vendor", invoiceNumber: "INV-1", invoiceDate: "2026-08-28", currency: "USD", subtotal: 10, vat: 1, total: 11, description: "items", fields: { total: { confidence: 0.99, sourceText: "11.00" } }, ...overrides });
 function enqueue(mimeType = "image/png", caption: string | null = "caption", bytes = mimeType === "application/pdf" ? new TextEncoder().encode("%PDF-1.7") : new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])) {
   const originalPath = join(directory, "originals", mimeType === "application/pdf" ? "bill.pdf" : "bill.png");
   writeFileSync(originalPath, bytes);
@@ -31,7 +31,7 @@ afterEach(() => { database.close(); rmSync(directory, { recursive: true, force: 
 test.each([
   ["printed English", "image/png", "english.png", valid({ vendorName: "English Store" })],
   ["printed Arabic", "image/png", "arabic.png", valid({ vendorName: "متجر عربي", description: "فاتورة" })],
-  ["handwriting", "image/png", "handwriting.png", valid({ handwritten: true, fields: { total: { confidence: 0.9, sourceText: "١١" } } })],
+  ["handwriting", "image/png", "handwriting.png", valid({ fields: { total: { confidence: 0.9, sourceText: "١١" } } })],
   ["angled photo", "image/png", "angled-photo.png", valid({ invoiceNumber: "ANGLE-1" })],
   ["PDF", "application/pdf", "bill.pdf", valid({ description: "PDF table" })],
 ])("persists schema-valid %s extraction using the representative fixture bytes", async (_name, mimeType, fixture, annotation) => {
@@ -42,14 +42,16 @@ test.each([
   await worker(provider).runOnce();
   expect(received).toMatchObject({ mimeType, caption: "caption" });
   expect(received?.bytes).toEqual(bytes);
-  expect(database.getExtraction(bill.bill.id)).toMatchObject({ normalized: annotation, providerModel: "mock-ocr", promptSchemaVersion: "extracted-bill-v2" });
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ normalized: annotation, providerModel: "mock-ocr", promptSchemaVersion: "extracted-bill-v3" });
   expect(database.getJob(database.sqlite.query<{ id: string }, [string]>("SELECT id FROM jobs WHERE bill_id = ?").get(bill.bill.id)!.id)?.state).toBe("succeeded");
 });
 
 test("rejects invalid JSON/schema and preserves null unknowns", async () => {
-  expect(parseExtractedBill(valid({ vendorName: null, invoiceNumber: null, invoiceDate: null, currency: null, subtotal: null, vat: null, total: null, description: null, handwritten: null }))).toMatchObject({ total: null, handwritten: null });
+  expect(parseExtractedBill(valid({ vendorName: null, invoiceNumber: null, invoiceDate: null, currency: null, subtotal: null, vat: null, total: null, description: null }))).toMatchObject({ total: null });
   expect(() => parseExtractedBill({ ...valid(), currency: "usd" })).toThrow("currency");
   expect(() => parseExtractedBill({ ...valid(), unexpected: true })).toThrow("unknown");
+  expect(() => parseExtractedBill({ ...valid(), handwritten: true })).toThrow("unknown");
+  expect(() => parseExtractedBill({ ...valid(), fields: { total: { confidence: 0.99, sourceText: "11.00" }, handwritten: { confidence: 0.99, sourceText: "yes" } } })).toThrow("invalid key");
   expect(() => parseExtractedBill({ ...valid(), invoiceDate: "2026-02-30" })).toThrow("invoiceDate");
   expect(() => parseExtractedBill({ ...valid(), vendorName: "x".repeat(513) })).toThrow("vendorName");
   expect(() => parseExtractedBill({ ...valid(), fields: { ["x".repeat(65)]: { confidence: 1, sourceText: "text" } } })).toThrow("invalid key");
@@ -77,38 +79,15 @@ test("normalizes explicit legacy confidence aliases but never maps generic date"
   expect(generic.fields.invoiceDate).toBeUndefined();
 });
 
-test("grounds required confidence in position-verified OCR regions without mutating annotation", () => {
-  const annotation = parseExtractedBill(valid({ vendorName: "متجر ١٢", fields: {
-    vendorName: { confidence: 0.99, sourceText: "متجر ١٢" },
-    invoiceDate: { confidence: 0.99, sourceText: "2026-08-28" },
-    total: { confidence: 0.99, sourceText: "11.00" },
-  } }));
-  const text = "متجر 12 Invoice Date: 2026-08-28 Total: 11.00";
-  const grounded = groundRequiredFieldConfidence(annotation, { regions: [{ text, words: ["متجر", "12", "2026-08-28", "11.00"].map((word, index) => ({ text: word, confidence: [0.8, 0.7, 0.6, 0.5][index]!, startIndex: text.indexOf(word) })) }] });
-  expect(grounded).not.toBe(annotation);
-  expect(annotation.fields.vendorName?.confidence).toBe(0.99);
-  expect(grounded.fields).toMatchObject({ vendorName: { confidence: 0.7 }, invoiceDate: { confidence: 0.6 }, total: { confidence: 0.5 } });
-});
-
-test("sets required confidence to zero when supplied OCR evidence cannot substantiate source text", () => {
-  const annotation = parseExtractedBill(valid({ fields: {
-    vendorName: { confidence: 0.99, sourceText: "Vendor" },
-    invoiceDate: { confidence: 0.99, sourceText: "2026-08-28" },
-    total: { confidence: 0.99, sourceText: "11" },
-  } }));
-  expect(groundRequiredFieldConfidence(annotation, { regions: [{ text: "unrelated", words: [] }] }).fields).toMatchObject({ vendorName: { confidence: 0 }, invoiceDate: { confidence: 0 }, total: { confidence: 0 } });
-  expect(groundRequiredFieldConfidence(annotation, { regions: [{ text: "Vendor 2026-08-28 11", words: [] }] }).fields).toMatchObject({ vendorName: { confidence: 0 }, invoiceDate: { confidence: 0 }, total: { confidence: 0 } });
-});
-
-test("persists evidence-grounded required confidence while leaving optional mock evidence backward-compatible", async () => {
+test("persists provider-supplied required confidence unchanged without native OCR evidence", async () => {
   const bill = enqueue();
   const annotation = valid({ fields: {
     vendorName: { confidence: 0.99, sourceText: "Vendor" },
     invoiceDate: { confidence: 0.99, sourceText: "2026-08-28" },
     total: { confidence: 0.99, sourceText: "11" },
   } });
-  await worker({ extract: async () => ({ annotation, rawResponse: "raw", model: "mock", evidence: { regions: [{ text: "Vendor Invoice Date 2026-08-28 Total 11", words: [{ text: "Vendor", confidence: 0.8, startIndex: 0 }, { text: "2026-08-28", confidence: 0.7, startIndex: 20 }, { text: "11", confidence: 0.6, startIndex: 37 }] }] } }) }).runOnce();
-  expect(database.getExtraction(bill.bill.id)?.normalized?.fields).toMatchObject({ vendorName: { confidence: 0.8 }, invoiceDate: { confidence: 0.7 }, total: { confidence: 0.6 } });
+  await worker({ extract: async () => ({ annotation, rawResponse: "raw", model: "mock" }) }).runOnce();
+  expect(database.getExtraction(bill.bill.id)?.normalized?.fields).toMatchObject({ vendorName: { confidence: 0.99 }, invoiceDate: { confidence: 0.99 }, total: { confidence: 0.99 } });
 });
 
 test("classifies transient provider failures for retry and malformed exhaustion for review", async () => {
@@ -146,7 +125,7 @@ test("tagged image jobs send a derivative and assert the lease immediately befor
   setExtractKey(bill.bill.id, durableKey);
   const job = database.claimNextJob("preprocess", policy)!;
   const events: string[] = []; let input: Parameters<MistralOcrProvider["extract"]>[0] | undefined;
-  const handler = createExtractJobHandler(database, { extract: async (received) => { events.push("provider"); input = received; return { annotation: valid(), rawResponse: "raw", model: "mock" }; } }, policy.maxAttempts, () => undefined, originals(), { preprocess: async (received) => { events.push("preprocess"); expect(received).toEqual({ bytes: original, mimeType: "image/png" }); return { bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 }; } });
+  const handler = createExtractJobHandler(database, { extract: async (received) => { events.push("provider"); input = received; return { annotation: valid(), rawResponse: "raw", model: "mock" }; } }, policy.maxAttempts, () => undefined, originals(), { preprocess: async (received) => { events.push("preprocess"); expect(received).toEqual({ bytes: original, mimeType: "image/png", mode: "sharp" }); return { bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 }; } });
   await handler(job, { idempotencyKey: durableKey, assertLease: () => events.push("lease"), assertCurrentApprovalRevision: () => undefined });
   expect(events[events.indexOf("provider") - 1]).toBe("lease");
   expect(input).toMatchObject({ bytes: derivative, mimeType: "image/png", caption: "caption" });
@@ -211,10 +190,9 @@ test("HTTP adapter sends original data URL, caption, compatible schema, and does
   expect(extractionPrompt).toContain("schemaVersion 1");
   expect(body.table_format).toBe("html");
   expect(body.include_blocks).toBe(false);
-  expect(body.confidence_scores_granularity).toBe("word");
+  expect(body).not.toHaveProperty("confidence_scores_granularity");
   expect(response.annotation).toEqual(valid());
   expect(response.model).toBe("mistral-ocr-response-model");
-  expect(response.evidence).toEqual({ regions: [{ text: "Vendor", words: [{ text: "Vendor", confidence: 0.8, startIndex: 0 }] }, { text: "Total 11", words: [{ text: "Total", confidence: 0.6, startIndex: 0 }, { text: "11", confidence: 0.5, startIndex: 6 }] }] });
 });
 
 test("HTTP adapter accepts only supported original MIME types", async () => {
@@ -230,43 +208,6 @@ test("HTTP adapter accepts only supported original MIME types", async () => {
   for (const mimeType of ["image/gif", "__proto__", "constructor"]) {
     await expect(adapter.extract({ bytes: new Uint8Array([1]), mimeType, caption: null, idempotencyKey: mimeType })).rejects.toBeInstanceOf(PermanentJobError);
   }
-});
-
-test("rejects undocumented per-word aliases and grounds their matching source at zero", async () => {
-  const adapter = new MistralHttpOcrProvider("key", "model", 1024, 1000, async () => new Response(JSON.stringify({ model: "actual", document_annotation: JSON.stringify(valid()), pages: [{ markdown: "Vendor", confidence_scores: { word_confidence_scores: [{ word: "Vendor", confidence_score: 0.9, start_index: 0 }] } }] })));
-  const response = await adapter.extract({ bytes: new Uint8Array([1]), mimeType: "image/png", caption: null, idempotencyKey: "aliases" });
-  const annotation = parseExtractedBill(valid({ fields: { vendorName: { confidence: 0.99, sourceText: "Vendor" }, invoiceDate: { confidence: 0.99, sourceText: "missing date" }, total: { confidence: 0.99, sourceText: "missing total" } } }));
-  expect(response.evidence).toEqual({ regions: [{ text: "Vendor", words: [] }] });
-  expect(groundRequiredFieldConfidence(annotation, response.evidence!).fields.vendorName?.confidence).toBe(0);
-});
-
-test("requires semantic source support, preserves monetary punctuation, and grounds table-only totals", () => {
-  const base = parseExtractedBill(valid({ fields: { vendorName: { confidence: 0.99, sourceText: "Vendor" }, invoiceDate: { confidence: 0.99, sourceText: "٢٨/٠٨/٢٠٢٦" }, total: { confidence: 0.99, sourceText: "Total: 11.00" } } }));
-  const evidence = { regions: [
-    { text: "Vendor التاريخ: ٢٨/٠٨/٢٠٢٦", words: [{ text: "Vendor", confidence: 0.8, startIndex: 0 }, { text: "٢٨/٠٨/٢٠٢٦", confidence: 0.7, startIndex: 16 }] },
-    { text: "Total: 11.00", words: [{ text: "Total:", confidence: 0.9, startIndex: 0 }, { text: "11.00", confidence: 0.6, startIndex: 7 }] },
-  ] };
-  expect(groundRequiredFieldConfidence(base, evidence).fields).toMatchObject({ vendorName: { confidence: 0.8 }, invoiceDate: { confidence: 0.7 }, total: { confidence: 0.6 } });
-  expect(groundRequiredFieldConfidence(parseExtractedBill(valid({ total: 12, fields: { ...base.fields, total: { confidence: 0.99, sourceText: "Total: 11.00" } } })), evidence).fields.total?.confidence).toBe(0);
-  expect(groundRequiredFieldConfidence(parseExtractedBill(valid({ fields: { ...base.fields, total: { confidence: 0.99, sourceText: "Total: 11,00" } } })), evidence).fields.total?.confidence).toBe(0);
-  expect(groundRequiredFieldConfidence(parseExtractedBill(valid({ fields: { ...base.fields, total: { confidence: 0.99, sourceText: "1" } } })), { regions: [{ text: "Invoice 1 Total 11.00", words: [{ text: "1", confidence: 0.9, startIndex: 8 }, { text: "1", confidence: 0.2, startIndex: 16 }] }] }).fields.total?.confidence).toBe(0);
-  expect(groundRequiredFieldConfidence(parseExtractedBill(valid({ fields: { ...base.fields, total: { confidence: 0.99, sourceText: "11" } } })), { regions: [{ text: "Total: 11 11", words: [{ text: "11", confidence: 0.9, startIndex: 7 }, { text: "11", confidence: 0.2, startIndex: 10 }] }] }).fields.total?.confidence).toBe(0.2);
-  expect(groundRequiredFieldConfidence(base, { regions: [{ text: "Total: 11.00", words: [{ text: "11.00", confidence: 0.6, startIndex: 7 }, { text: "Total:", confidence: 0.9, startIndex: 0 }] }] }).fields.total?.confidence).toBe(0.6);
-  expect(groundRequiredFieldConfidence(base, { regions: [{ text: "Total: 11.00", words: [{ text: "Total:", confidence: 0.9, startIndex: 1 }, { text: "11.00", confidence: 0.6, startIndex: 7 }] }] }).fields.total?.confidence).toBe(0);
-});
-
-test("requires invoice-date and total labels in nearby plain and HTML table context", () => {
-  const fields = { vendorName: { confidence: 0.99, sourceText: "Vendor" }, invoiceDate: { confidence: 0.99, sourceText: "28/08/2026" }, total: { confidence: 0.99, sourceText: "11" } };
-  const annotation = parseExtractedBill(valid({ fields }));
-  const word = (text: string, confidence = 0.95) => ({ text, confidence, startIndex: textRegion.indexOf(text) });
-  let textRegion = "Vendor Invoice Date: 28/08/2026 Total: 11";
-  expect(groundRequiredFieldConfidence(annotation, { regions: [{ text: textRegion, words: [word("Vendor"), word("28/08/2026"), word("11")] }] }).fields).toMatchObject({ invoiceDate: { confidence: 0.95 }, total: { confidence: 0.95 } });
-  textRegion = "Due Date: 28/08/2026 Unit Price: 11";
-  expect(groundRequiredFieldConfidence(annotation, { regions: [{ text: textRegion, words: [word("28/08/2026"), word("11")] }] }).fields).toMatchObject({ invoiceDate: { confidence: 0 }, total: { confidence: 0 } });
-  textRegion = "Invoice No: 11 Line Total: 11";
-  expect(groundRequiredFieldConfidence(annotation, { regions: [{ text: textRegion, words: [{ text: "11", confidence: 0.99, startIndex: 12 }, { text: "11", confidence: 0.99, startIndex: 27 }] }] }).fields.total?.confidence).toBe(0);
-  textRegion = "<tr><td>التاريخ</td><td>28/08/2026</td><td>الإجمالي</td><td>11</td></tr>";
-  expect(groundRequiredFieldConfidence(annotation, { regions: [{ text: textRegion, words: [word("28/08/2026"), word("11")] }] }).fields).toMatchObject({ invoiceDate: { confidence: 0.95 }, total: { confidence: 0.95 } });
 });
 
 test("provider schema uses only closed objects instead of an unsupported dynamic field map", () => {
