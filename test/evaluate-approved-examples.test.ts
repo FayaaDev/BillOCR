@@ -59,12 +59,12 @@ test("evaluator emits six sanitized records for original, sharp, and opencv vari
   expect(preprocessCalls.map(({ mode }) => mode)).toEqual(["sharp", "opencv", "sharp", "opencv"]);
   expect(providerCalls).toHaveLength(6);
   expect(providerCalls.map(({ idempotencyKey }) => idempotencyKey)).toEqual([
-    "approved-evaluation:extracted-bill-v3:test-run:example3.json:original",
-    "approved-evaluation:extracted-bill-v3:test-run:example3.json:sharp",
-    "approved-evaluation:extracted-bill-v3:test-run:example3.json:opencv",
-    "approved-evaluation:extracted-bill-v3:test-run:example4.json:original",
-    "approved-evaluation:extracted-bill-v3:test-run:example4.json:sharp",
-    "approved-evaluation:extracted-bill-v3:test-run:example4.json:opencv",
+    "approved-evaluation:extracted-bill-v4:test-run:example3.json:original",
+    "approved-evaluation:extracted-bill-v4:test-run:example3.json:sharp",
+    "approved-evaluation:extracted-bill-v4:test-run:example3.json:opencv",
+    "approved-evaluation:extracted-bill-v4:test-run:example4.json:original",
+    "approved-evaluation:extracted-bill-v4:test-run:example4.json:sharp",
+    "approved-evaluation:extracted-bill-v4:test-run:example4.json:opencv",
   ]);
   await expect(readApprovedFixturePng("../../../example3.png")).resolves.toEqual(providerCalls[0]!.bytes);
   await expect(readApprovedFixturePng("../../../example4.png")).resolves.toEqual(providerCalls[3]!.bytes);

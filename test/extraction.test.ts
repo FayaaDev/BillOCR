@@ -42,7 +42,7 @@ test.each([
   await worker(provider).runOnce();
   expect(received).toMatchObject({ mimeType, caption: "caption" });
   expect(received?.bytes).toEqual(bytes);
-  expect(database.getExtraction(bill.bill.id)).toMatchObject({ normalized: annotation, providerModel: "mock-ocr", promptSchemaVersion: "extracted-bill-v3" });
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ normalized: annotation, providerModel: "mock-ocr", promptSchemaVersion: "extracted-bill-v4" });
   expect(database.getJob(database.sqlite.query<{ id: string }, [string]>("SELECT id FROM jobs WHERE bill_id = ?").get(bill.bill.id)!.id)?.state).toBe("succeeded");
 });
 
@@ -193,6 +193,21 @@ test("HTTP adapter sends original data URL, caption, compatible schema, and does
   expect(body).not.toHaveProperty("confidence_scores_granularity");
   expect(response.annotation).toEqual(valid());
   expect(response.model).toBe("mistral-ocr-response-model");
+});
+
+test("structured extraction instructions cover independent bilingual photographed fields", () => {
+  expect(extractionPrompt).toContain("Extract each field independently");
+  expect(extractionPrompt).toContain("YYYY/M/D");
+  expect(extractionPrompt).toContain("D/M/YYYY");
+  expect(extractionPrompt).toContain("٧٠");
+  expect(extractionPrompt).toContain("bottom Total/الإجمالي");
+  expect(extractedBillJsonSchema).toMatchObject({
+    properties: {
+      invoiceDate: {
+        anyOf: [{ description: expect.stringContaining("YYYY/M/D") }, { type: "null" }],
+      },
+    },
+  });
 });
 
 test("HTTP adapter accepts only supported original MIME types", async () => {
