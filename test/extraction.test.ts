@@ -4,11 +4,13 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BillDatabase, type RetryPolicy } from "../src/database";
-import { createExtractJobHandler, extractedBillJsonSchema, extractionPrompt, MistralHttpOcrProvider, type MistralOcrProvider, parseExtractedBill, parseProviderExtractedBill, RetryableExtractionError } from "../src/extraction";
+import { attachMistralNativeConfidence, createExtractJobHandler, extractedBillJsonSchema, extractionPrompt, MistralHttpOcrProvider, type MistralOcrProvider, parseExtractedBill, parseMistralNativeConfidence, parseProviderExtractedBill, RetryableExtractionError } from "../src/extraction";
 import { createLogger } from "../src/logger";
 import { JobWorker } from "../src/worker";
 import { PermanentJobError } from "../src/worker";
 import { IMAGE_PREPROCESSING_VERSION, type ImagePreprocessor } from "../src/image-preprocessing";
+import type { AzureInvoiceProvider } from "../src/azure-invoice";
+import { createExtractionValidationCallback } from "../src/validation";
 
 const policy: RetryPolicy = { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 };
 let directory: string;
@@ -42,12 +44,14 @@ test.each([
   await worker(provider).runOnce();
   expect(received).toMatchObject({ mimeType, caption: "caption" });
   expect(received?.bytes).toEqual(bytes);
-  expect(database.getExtraction(bill.bill.id)).toMatchObject({ normalized: annotation, providerModel: "mock-ocr", promptSchemaVersion: "extracted-bill-v4" });
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ normalized: expect.objectContaining({ fields: expect.objectContaining({ total: { confidence: null, sourceText: annotation.fields.total.sourceText } }) }), providerModel: "mock-ocr", promptSchemaVersion: "extracted-bill-v4" });
   expect(database.getJob(database.sqlite.query<{ id: string }, [string]>("SELECT id FROM jobs WHERE bill_id = ?").get(bill.bill.id)!.id)?.state).toBe("succeeded");
 });
 
 test("rejects invalid JSON/schema and preserves null unknowns", async () => {
   expect(parseExtractedBill(valid({ vendorName: null, invoiceNumber: null, invoiceDate: null, currency: null, subtotal: null, vat: null, total: null, description: null }))).toMatchObject({ total: null });
+  expect(parseExtractedBill(valid({ fields: { total: { sourceText: "11.00" } } }))).toMatchObject({ fields: { total: { confidence: null, sourceText: "11.00" } } });
+  expect(parseExtractedBill(valid({ fields: {} })).fields).toMatchObject({ vendorName: { confidence: null, sourceText: null }, invoiceDate: { confidence: null, sourceText: null }, total: { confidence: null, sourceText: null } });
   expect(() => parseExtractedBill({ ...valid(), currency: "usd" })).toThrow("currency");
   expect(() => parseExtractedBill({ ...valid(), unexpected: true })).toThrow("unknown");
   expect(() => parseExtractedBill({ ...valid(), handwritten: true })).toThrow("unknown");
@@ -72,14 +76,14 @@ test("accepts only numeric provider schemaVersion 1 without normalizing accounti
   expect(() => parseProviderExtractedBill({ ...valid(), schemaVersion: null })).toThrow("schemaVersion");
 });
 
-test("normalizes explicit legacy confidence aliases but never maps generic date", () => {
+test("normalizes explicit legacy source-text aliases but never maps generic date", () => {
   const normalized = parseExtractedBill(valid({ fields: { vendor_name: { confidence: 0.9, sourceText: "Vendor" }, invoice_date: { confidence: 0.9, sourceText: "2026-08-28" }, grand_total: { confidence: 0.9, sourceText: "11" } } }));
-  expect(normalized.fields).toMatchObject({ vendorName: { confidence: 0.9 }, invoiceDate: { confidence: 0.9 }, total: { confidence: 0.9 } });
+  expect(normalized.fields).toMatchObject({ vendorName: { confidence: null, sourceText: "Vendor" }, invoiceDate: { confidence: null, sourceText: "2026-08-28" }, total: { confidence: null, sourceText: "11" } });
   const generic = parseExtractedBill(valid({ fields: { vendorName: { confidence: 0.9, sourceText: "Vendor" }, date: { confidence: 0.99, sourceText: "2026-08-28" }, total: { confidence: 0.9, sourceText: "11" } } }));
-  expect(generic.fields.invoiceDate).toBeUndefined();
+  expect(generic.fields.invoiceDate).toEqual({ confidence: null, sourceText: null });
 });
 
-test("persists provider-supplied required confidence unchanged without native OCR evidence", async () => {
+test("discards model-supplied confidence while preserving source text", async () => {
   const bill = enqueue();
   const annotation = valid({ fields: {
     vendorName: { confidence: 0.99, sourceText: "Vendor" },
@@ -87,7 +91,15 @@ test("persists provider-supplied required confidence unchanged without native OC
     total: { confidence: 0.99, sourceText: "11" },
   } });
   await worker({ extract: async () => ({ annotation, rawResponse: "raw", model: "mock" }) }).runOnce();
-  expect(database.getExtraction(bill.bill.id)?.normalized?.fields).toMatchObject({ vendorName: { confidence: 0.99 }, invoiceDate: { confidence: 0.99 }, total: { confidence: 0.99 } });
+  expect(database.getExtraction(bill.bill.id)?.normalized?.fields).toMatchObject({ vendorName: { confidence: null, sourceText: "Vendor" }, invoiceDate: { confidence: null, sourceText: "2026-08-28" }, total: { confidence: null, sourceText: "11" } });
+});
+
+test("persists only native confidence supplied through the provider boundary", async () => {
+  const bill = enqueue();
+  const annotation = valid({ fields: { total: { confidence: 1, sourceText: "11.00" } } });
+  const nativeConfidence = parseMistralNativeConfidence({ pages: [{ markdown: "Total 11.00", confidence_scores: { word_confidence_scores: [{ text: "11.00", confidence: 0.74, start_index: 6 }] } }] });
+  await worker({ extract: async () => ({ annotation, rawResponse: "raw", model: "mock", nativeConfidence }) }).runOnce();
+  expect(database.getExtraction(bill.bill.id)?.normalized?.fields.total).toEqual({ confidence: 0.74, sourceText: "11.00" });
 });
 
 test("classifies transient provider failures for retry and malformed exhaustion for review", async () => {
@@ -117,6 +129,25 @@ test("replay after a simulated pre-persistence crash reuses the durable provider
   expect(database.getExtraction(bill.bill.id)?.normalized).not.toBeNull();
 });
 
+test("replay selects the handler-persisted Mistral invocation without recalling Mistral", async () => {
+  const bill = enqueue();
+  let providerCalls = 0;
+  const rawResponse = JSON.stringify({ model: "mistral-ocr", document_annotation: JSON.stringify(valid()), pages: [] });
+  const persistCanonical = database.persistCanonicalExtractionSuccess.bind(database);
+  let interrupted = true;
+  database.persistCanonicalExtractionSuccess = (input) => interrupted ? (interrupted = false, false) : persistCanonical(input);
+  const replayWorker = worker({ extract: async () => { providerCalls += 1; return { annotation: valid(), rawResponse, model: "mistral-ocr" }; } });
+  await replayWorker.runOnce();
+  const invocation = database.getExtractionInvocations(bill.bill.id).find((item) => item.provider === "mistral");
+  expect(invocation).toMatchObject({ outcome: "succeeded", rawProviderResponse: rawResponse });
+  expect(database.getExtraction(bill.bill.id)?.normalized).toBeNull();
+  await Bun.sleep(2);
+  await replayWorker.runOnce();
+  expect(providerCalls).toBe(1);
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ selectedProvider: "mistral", normalized: { vendorName: "Vendor" } });
+  expect(database.getExtractionInvocations(bill.bill.id)).toMatchObject([{ id: invocation?.id, outcome: "succeeded" }]);
+});
+
 test("tagged image jobs send a derivative and assert the lease immediately before the provider", async () => {
   const original = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   const derivative = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 42]);
@@ -129,7 +160,7 @@ test("tagged image jobs send a derivative and assert the lease immediately befor
   await handler(job, { idempotencyKey: durableKey, assertLease: () => events.push("lease"), assertCurrentApprovalRevision: () => undefined });
   expect(events[events.indexOf("provider") - 1]).toBe("lease");
   expect(input).toMatchObject({ bytes: derivative, mimeType: "image/png", caption: "caption" });
-  expect(input!.idempotencyKey).toBe(`${durableKey}:input:${createHash("sha256").update(derivative).digest("hex")}`);
+  expect(input!.idempotencyKey).toBe(`${durableKey}:mistral:input:${createHash("sha256").update(derivative).digest("hex")}`);
   expect(input!.idempotencyKey).not.toContain(Buffer.from(derivative).toString("base64"));
   expect(readFileSync(bill.bill.originalPath)).toEqual(Buffer.from(original));
   expect(createHash("sha256").update(readFileSync(bill.bill.originalPath)).digest("hex")).toBe(bill.bill.contentSha256);
@@ -190,9 +221,37 @@ test("HTTP adapter sends original data URL, caption, compatible schema, and does
   expect(extractionPrompt).toContain("schemaVersion 1");
   expect(body.table_format).toBe("html");
   expect(body.include_blocks).toBe(false);
-  expect(body).not.toHaveProperty("confidence_scores_granularity");
+  expect(body.confidence_scores_granularity).toBe("word");
   expect(response.annotation).toEqual(valid());
   expect(response.model).toBe("mistral-ocr-response-model");
+  expect(response.nativeConfidence).toMatchObject({ segments: [expect.objectContaining({ text: "Vendor" }), expect.objectContaining({ text: "Total 11" })] });
+});
+
+test("derives required field confidence only from bounded native OCR word scores and source-text offsets", () => {
+  const markdown = "Vendor\nDate 2026-08-28\nTotal 11.00";
+  const evidence = parseMistralNativeConfidence({ pages: [{ markdown, confidence_scores: { word_confidence_scores: [
+    { text: "Vendor", confidence: 0.97, start_index: 0 },
+    { text: "2026-08-28", confidence: 0.83, start_index: markdown.indexOf("2026-08-28") },
+  ] }, tables: [{ content: "Total 11.00", confidence_scores: { word_confidence_scores: [
+    { text: "Total", confidence: 0.91, start_index: 0 },
+    { text: "11.00", confidence: 0.72, start_index: 6 },
+  ] } }] }] });
+  const normalized = attachMistralNativeConfidence(parseProviderExtractedBill(valid({ fields: {
+    vendorName: { confidence: 1, sourceText: "Vendor" }, invoiceDate: { confidence: 1, sourceText: "2026-08-28" }, total: { confidence: 1, sourceText: "11.00" },
+  } })), evidence);
+  expect(normalized.fields).toMatchObject({
+    vendorName: { confidence: 0.97, sourceText: "Vendor" },
+    invoiceDate: { confidence: 0.83, sourceText: "2026-08-28" },
+    total: { confidence: 0.72, sourceText: "11.00" },
+  });
+});
+
+test("ignores malformed, unbounded, and non-matching native OCR evidence without synthesizing confidence", () => {
+  const annotation = parseProviderExtractedBill(valid({ fields: { total: { confidence: 1, sourceText: "11.00" } } }));
+  const malformed = parseMistralNativeConfidence({ pages: [{ markdown: "Total 11.00", confidence_scores: { word_confidence_scores: [{ text: "11.00", confidence: 2, start_index: 6 }] } }] });
+  const mismatched = parseMistralNativeConfidence({ pages: [{ markdown: "Total 11.00", confidence_scores: { word_confidence_scores: [{ text: "invented", confidence: 0.99, start_index: 6 }] } }] });
+  const oversized = parseMistralNativeConfidence({ pages: Array.from({ length: 101 }, () => ({ markdown: "Total 11.00", confidence_scores: { word_confidence_scores: [] } })) });
+  for (const evidence of [malformed, mismatched, oversized, null]) expect(attachMistralNativeConfidence(annotation, evidence).fields.total).toEqual({ confidence: null, sourceText: "11.00" });
 });
 
 test("structured extraction instructions cover independent bilingual photographed fields", () => {
@@ -227,6 +286,7 @@ test("HTTP adapter accepts only supported original MIME types", async () => {
 
 test("provider schema uses only closed objects instead of an unsupported dynamic field map", () => {
   const serialized = JSON.stringify(extractedBillJsonSchema);
+  expect(serialized).not.toContain('"confidence"');
   expect(serialized).not.toContain('"propertyNames"');
   expect(serialized).not.toContain('"maxProperties"');
   expect(extractedBillJsonSchema).toMatchObject({
@@ -306,7 +366,13 @@ test("replay retries a failed idempotent downstream callback without another pro
   const bill = enqueue();
   let providerCalls = 0;
   let callbackCalls = 0;
-  const provider: MistralOcrProvider = { extract: async () => { providerCalls += 1; return { annotation: valid(), rawResponse: "raw", model: "model" }; } };
+  const annotation = valid({ fields: {
+    vendorName: { sourceText: "Vendor" }, invoiceDate: { sourceText: "2026-08-28" }, total: { sourceText: "11" },
+  } });
+  const nativeConfidence = parseMistralNativeConfidence({ pages: [{ markdown: "Vendor 2026-08-28 11", confidence_scores: { word_confidence_scores: [
+    { text: "Vendor", confidence: 0.9, start_index: 0 }, { text: "2026-08-28", confidence: 0.9, start_index: 7 }, { text: "11", confidence: 0.9, start_index: 18 },
+  ] } }] });
+  const provider: MistralOcrProvider = { extract: async () => { providerCalls += 1; return { annotation, rawResponse: "raw", model: "model", nativeConfidence }; } };
   const handler = createExtractJobHandler(database, provider, policy.maxAttempts, async () => { callbackCalls += 1; if (callbackCalls === 1) throw new Error("validation unavailable"); }, originals());
   const replayWorker = new JobWorker(database, { extract: handler }, policy, "callback", createLogger("error"));
   await replayWorker.runOnce();
@@ -315,6 +381,195 @@ test("replay retries a failed idempotent downstream callback without another pro
   expect(providerCalls).toBe(1);
   expect(callbackCalls).toBe(2);
   expect(database.getJob(database.sqlite.query<{ id: string }, [string]>("SELECT id FROM jobs WHERE bill_id = ?").get(bill.bill.id)!.id)?.state).toBe("succeeded");
+});
+
+test("skips Azure when all required Mistral native evidence meets the fallback threshold", async () => {
+  const bill = enqueue();
+  let azureCalls = 0;
+  const annotation = valid({ fields: {
+    vendorName: { sourceText: "Vendor" }, invoiceDate: { sourceText: "2026-08-28" }, total: { sourceText: "11" },
+  } });
+  const nativeConfidence = parseMistralNativeConfidence({ pages: [{ markdown: "Vendor 2026-08-28 11", confidence_scores: { word_confidence_scores: [
+    { text: "Vendor", confidence: 0.8, start_index: 0 }, { text: "2026-08-28", confidence: 0.8, start_index: 7 }, { text: "11", confidence: 0.8, start_index: 18 },
+  ] } }] });
+  const azure: AzureInvoiceProvider = { submit: async () => { azureCalls += 1; return { operationLocation: "https://azure.example/result" }; }, poll: async () => { azureCalls += 1; return { bill: parseExtractedBill(valid()), rawResponse: "azure", model: "azure" }; } };
+  const handler = createExtractJobHandler(database, { extract: async () => ({ annotation, rawResponse: "mistral", model: "mistral", nativeConfidence }) }, policy.maxAttempts, () => undefined, originals(), undefined, azure);
+  await new JobWorker(database, { extract: handler }, policy, "fallback", createLogger("error")).runOnce();
+  expect(azureCalls).toBe(0);
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ selectedProvider: "mistral", fallbackStatus: "not_needed" });
+  expect(database.getExtractionInvocations(bill.bill.id)).toMatchObject([{ provider: "mistral", outcome: "succeeded" }]);
+});
+
+test("Azure fallback exhaustion records a blocking validation issue and preserves sticky review", async () => {
+  const bill = enqueue();
+  const validate = createExtractionValidationCallback(database, { currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
+  const handler = createExtractJobHandler(database, { extract: async () => ({ annotation: valid(), rawResponse: "mistral", model: "mistral" }) }, policy.maxAttempts, validate, originals());
+  const fallbackWorker = new JobWorker(database, { extract: handler }, policy, "fallback", createLogger("error"));
+  await fallbackWorker.runOnce();
+  const extractJob = database.listJobsForBill(bill.bill.id).find((job) => job.type === "extract")!;
+  expect(database.getBill(bill.bill.id)).toMatchObject({ status: "needs_review" });
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ selectedProvider: "mistral", fallbackStatus: "failed", normalized: { vendorName: "Vendor" } });
+  expect(database.getValidationIssues(bill.bill.id)).toContainEqual(expect.objectContaining({ code: "azure_fallback_failed", severity: "blocking" }));
+  expect(database.requeueJob(extractJob.id, true)).toBe(false);
+});
+
+test("persists an Azure operation before polling, selects Azure, and replays only the callback", async () => {
+  const bill = enqueue();
+  const inputs: Array<{ bytes: Uint8Array; mimeType: string }> = [];
+  let polls = 0;
+  let callbacks = 0;
+  const azure: AzureInvoiceProvider = {
+    submit: async (input) => { inputs.push(input); return { operationLocation: "https://azure.example/operations/1" }; },
+    poll: async () => { polls += 1; return { bill: parseExtractedBill(valid({ vendorName: "Azure vendor" })), rawResponse: "azure", model: "prebuilt-invoice" }; },
+  };
+  const handler = createExtractJobHandler(database, { extract: async () => ({ annotation: valid(), rawResponse: "mistral", model: "mistral" }) }, policy.maxAttempts, async () => { callbacks += 1; if (callbacks === 1) throw new Error("callback unavailable"); }, originals(), undefined, azure);
+  const fallbackWorker = new JobWorker(database, { extract: handler }, policy, "fallback", createLogger("error"));
+  await fallbackWorker.runOnce();
+  await Bun.sleep(2);
+  await fallbackWorker.runOnce();
+  expect(inputs).toHaveLength(1);
+  expect(polls).toBe(1);
+  expect(callbacks).toBe(2);
+  expect(inputs[0]!.bytes).toEqual(readFileSync(bill.bill.originalPath));
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ selectedProvider: "azure", fallbackStatus: "succeeded", normalized: { vendorName: "Azure vendor" } });
+  expect(database.getExtractionInvocations(bill.bill.id)).toMatchObject([{ provider: "mistral", outcome: "succeeded" }, { provider: "azure", outcome: "succeeded" }]);
+  expect(database.getAzureExtractionOperation(database.getExtractionInvocations(bill.bill.id)[1]!.id)).toMatchObject({ state: "succeeded", operationLocation: "https://azure.example/operations/1" });
+});
+
+test("replay after Azure submission without a persisted operation URL never resubmits", async () => {
+  const bill = enqueue();
+  let submissions = 0;
+  let polls = 0;
+  const azure: AzureInvoiceProvider = {
+    submit: async () => { submissions += 1; return { operationLocation: "https://azure.example/operations/submission-window" }; },
+    poll: async () => { polls += 1; return { bill: parseExtractedBill(valid()), rawResponse: "azure", model: "prebuilt-invoice" }; },
+  };
+  const persistOperation = database.persistAzureExtractionOperation.bind(database);
+  let interrupted = true;
+  database.persistAzureExtractionOperation = (input) => interrupted ? (interrupted = false, null) : persistOperation(input);
+  const handler = createExtractJobHandler(database, { extract: async () => ({ annotation: valid(), rawResponse: "mistral", model: "mistral" }) }, policy.maxAttempts, () => undefined, originals(), undefined, azure);
+  const fallbackWorker = new JobWorker(database, { extract: handler }, policy, "fallback", createLogger("error"));
+  await fallbackWorker.runOnce();
+  const azureInvocation = database.getExtractionInvocations(bill.bill.id).find((item) => item.provider === "azure")!;
+  expect(database.getAzureExtractionOperation(azureInvocation.id)).toMatchObject({ state: "submitting", operationLocation: null });
+  await Bun.sleep(2);
+  await fallbackWorker.runOnce();
+  expect({ submissions, polls }).toEqual({ submissions: 1, polls: 0 });
+  expect(database.getBill(bill.bill.id)).toMatchObject({ status: "needs_review" });
+  expect(database.getAzureExtractionOperation(azureInvocation.id)).toMatchObject({ state: "failed", operationLocation: null });
+});
+
+test("replay completes an invocation from its succeeded Azure operation without provider calls", async () => {
+  const bill = enqueue();
+  let mistralCalls = 0;
+  let submissions = 0;
+  let polls = 0;
+  const azure: AzureInvoiceProvider = {
+    submit: async () => { submissions += 1; return { operationLocation: "https://azure.example/operations/invocation-window" }; },
+    poll: async () => { polls += 1; return { bill: parseExtractedBill(valid({ vendorName: "Azure vendor" })), rawResponse: "azure", model: "prebuilt-invoice" }; },
+  };
+  const finishInvocation = database.finishExtractionInvocation.bind(database);
+  let interrupted = true;
+  database.finishExtractionInvocation = (input) => {
+    const invocation = database.getExtractionInvocations(bill.bill.id).find((item) => item.id === input.invocationId);
+    return interrupted && invocation?.provider === "azure" ? (interrupted = false, false) : finishInvocation(input);
+  };
+  const handler = createExtractJobHandler(database, { extract: async () => { mistralCalls += 1; return { annotation: valid(), rawResponse: "mistral", model: "mistral" }; } }, policy.maxAttempts, () => undefined, originals(), undefined, azure);
+  const fallbackWorker = new JobWorker(database, { extract: handler }, policy, "fallback", createLogger("error"));
+  await fallbackWorker.runOnce();
+  const azureInvocation = database.getExtractionInvocations(bill.bill.id).find((item) => item.provider === "azure")!;
+  expect(database.getAzureExtractionOperation(azureInvocation.id)).toMatchObject({ state: "succeeded", normalized: { vendorName: "Azure vendor" } });
+  expect(azureInvocation.outcome).toBe("requested");
+  await Bun.sleep(2);
+  await fallbackWorker.runOnce();
+  expect({ mistralCalls, submissions, polls }).toEqual({ mistralCalls: 1, submissions: 1, polls: 1 });
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ selectedProvider: "azure", normalized: { vendorName: "Azure vendor" } });
+  expect(database.getExtractionInvocations(bill.bill.id).find((item) => item.provider === "azure")).toMatchObject({ outcome: "succeeded" });
+});
+
+test("replay selects canonical output from a succeeded Azure invocation without provider calls", async () => {
+  const bill = enqueue();
+  let mistralCalls = 0;
+  let submissions = 0;
+  let polls = 0;
+  const azure: AzureInvoiceProvider = {
+    submit: async () => { submissions += 1; return { operationLocation: "https://azure.example/operations/canonical-window" }; },
+    poll: async () => { polls += 1; return { bill: parseExtractedBill(valid({ vendorName: "Azure vendor" })), rawResponse: "azure", model: "prebuilt-invoice" }; },
+  };
+  const persistCanonical = database.persistCanonicalExtractionSuccess.bind(database);
+  let interrupted = true;
+  database.persistCanonicalExtractionSuccess = (input) => input.provider === "azure" && interrupted ? (interrupted = false, false) : persistCanonical(input);
+  const handler = createExtractJobHandler(database, { extract: async () => { mistralCalls += 1; return { annotation: valid(), rawResponse: "mistral", model: "mistral" }; } }, policy.maxAttempts, () => undefined, originals(), undefined, azure);
+  const fallbackWorker = new JobWorker(database, { extract: handler }, policy, "fallback", createLogger("error"));
+  await fallbackWorker.runOnce();
+  const azureInvocation = database.getExtractionInvocations(bill.bill.id).find((item) => item.provider === "azure")!;
+  expect(azureInvocation.outcome).toBe("succeeded");
+  expect(database.getExtraction(bill.bill.id)?.normalized?.vendorName).toBe("Vendor");
+  await Bun.sleep(2);
+  await fallbackWorker.runOnce();
+  expect({ mistralCalls, submissions, polls }).toEqual({ mistralCalls: 1, submissions: 1, polls: 1 });
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ selectedProvider: "azure", normalized: { vendorName: "Azure vendor" } });
+});
+
+test("retains Mistral output and blocks review after Azure retry exhaustion without resubmitting", async () => {
+  const bill = enqueue();
+  let submissions = 0;
+  let polls = 0;
+  const azure: AzureInvoiceProvider = {
+    submit: async () => { submissions += 1; return { operationLocation: "https://azure.example/operations/exhausted" }; },
+    poll: async () => { polls += 1; throw new RetryableExtractionError("Azure timeout"); },
+  };
+  const handler = createExtractJobHandler(database, { extract: async () => ({ annotation: valid(), rawResponse: "mistral", model: "mistral" }) }, policy.maxAttempts, () => undefined, originals(), undefined, azure);
+  const fallbackWorker = new JobWorker(database, { extract: handler }, policy, "fallback", createLogger("error"));
+  await fallbackWorker.runOnce();
+  await Bun.sleep(2);
+  await fallbackWorker.runOnce();
+  expect(submissions).toBe(1);
+  expect(polls).toBe(2);
+  expect(database.getBill(bill.bill.id)?.status).toBe("needs_review");
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ selectedProvider: "mistral", fallbackStatus: "failed", normalized: { vendorName: "Vendor" } });
+  expect(database.getExtractionInvocations(bill.bill.id).find((item) => item.provider === "azure")).toMatchObject({ outcome: "failed" });
+});
+
+test("rejects invalid injected Azure output before it becomes canonical", async () => {
+  const bill = enqueue();
+  const azure: AzureInvoiceProvider = {
+    submit: async () => ({ operationLocation: "https://azure.example/operations/invalid" }),
+    poll: async () => ({ bill: { ...parseExtractedBill(valid()), total: Number.POSITIVE_INFINITY } as unknown as ReturnType<typeof parseExtractedBill>, rawResponse: "invalid azure", model: "prebuilt-invoice" }),
+  };
+  const singleAttempt = { ...policy, maxAttempts: 1 };
+  const handler = createExtractJobHandler(database, { extract: async () => ({ annotation: valid(), rawResponse: "mistral", model: "mistral" }) }, singleAttempt.maxAttempts, () => undefined, originals(), undefined, azure);
+  await new JobWorker(database, { extract: handler }, singleAttempt, "fallback", createLogger("error")).runOnce();
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ selectedProvider: "mistral", fallbackStatus: "failed", normalized: { total: 11 } });
+  expect(database.getExtractionInvocations(bill.bill.id).find((item) => item.provider === "azure")).toMatchObject({ outcome: "failed" });
+});
+
+test("replaying a terminal Azure fallback failure keeps manual review sticky without provider calls", async () => {
+  const bill = enqueue();
+  let mistralCalls = 0;
+  let azureCalls = 0;
+  const annotation = valid({ fields: {
+    vendorName: { sourceText: "Vendor" }, invoiceDate: { sourceText: "2026-08-28" }, total: { sourceText: "11" },
+  } });
+  const nativeConfidence = parseMistralNativeConfidence({ pages: [{ markdown: "Vendor 2026-08-28 11", confidence_scores: { word_confidence_scores: [
+    { text: "Vendor", confidence: 0.9, start_index: 0 }, { text: "2026-08-28", confidence: 0.9, start_index: 7 }, { text: "11", confidence: 0.9, start_index: 18 },
+  ] } }] });
+  const azure: AzureInvoiceProvider = {
+    submit: async () => { azureCalls += 1; return { operationLocation: "https://azure.example/operations/failure" }; },
+    poll: async () => { azureCalls += 1; throw new RetryableExtractionError("Azure timeout"); },
+  };
+  const singleAttempt = { ...policy, maxAttempts: 1 };
+  const validate = createExtractionValidationCallback(database, { currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
+  const handler = createExtractJobHandler(database, { extract: async () => { mistralCalls += 1; return { annotation, rawResponse: "mistral", model: "mistral", nativeConfidence }; } }, singleAttempt.maxAttempts, validate, originals(), undefined, azure, 0.95);
+  const fallbackWorker = new JobWorker(database, { extract: handler }, singleAttempt, "fallback", createLogger("error"));
+  await fallbackWorker.runOnce();
+  const extractJob = database.listJobsForBill(bill.bill.id).find((job) => job.type === "extract")!;
+  expect(database.getBill(bill.bill.id)).toMatchObject({ status: "needs_review" });
+  expect(database.requeueJob(extractJob.id, true)).toBe(true);
+  await fallbackWorker.runOnce();
+  expect({ mistralCalls, azureCalls }).toEqual({ mistralCalls: 1, azureCalls: 2 });
+  expect(database.getBill(bill.bill.id)).toMatchObject({ status: "needs_review" });
+  expect(database.listJobsForBill(bill.bill.id).filter((job) => job.type === "project_to_sheet")).toHaveLength(0);
 });
 
 test("HTTP adapter classifies transient and auth errors and redacts provider error secrets", async () => {
@@ -350,7 +605,7 @@ test("records sanitized failure attempts for read, network, auth, malformed, and
   expect(database.getBill(auth.bill.id)?.status).toBe("failed");
 });
 
-test("a stale worker records an audit but cannot overwrite canonical extraction success", async () => {
+test("a stale worker cannot overwrite canonical extraction or extraction-attempt state", async () => {
   const bill = enqueue();
   const stale = database.claimNextJob("stale", policy)!;
   let releaseStale: (() => void) | undefined;
@@ -372,7 +627,7 @@ test("a stale worker records an audit but cannot overwrite canonical extraction 
   releaseStale?.();
   await expect(staleRun).rejects.toThrow("lost job lease");
   expect(database.getExtraction(bill.bill.id)?.normalized?.vendorName).toBe("canonical");
-  expect(database.sqlite.query<{ count: number }, [string]>("SELECT count(*) AS count FROM extraction_attempts WHERE bill_id = ?").get(bill.bill.id)?.count).toBe(3);
+  expect(database.sqlite.query<{ count: number }, [string]>("SELECT count(*) AS count FROM extraction_attempts WHERE bill_id = ?").get(bill.bill.id)?.count).toBe(1);
 });
 
 test("an expired but unreaped lease cannot persist canonical extraction or review status", () => {
@@ -385,4 +640,5 @@ test("an expired but unreaped lease cannot persist canonical extraction or revie
   expect(database.persistExtractionFailure({ ...common, rawProviderResponse: "bad", providerModel: "model", errorDetails: "bad", status: "needs_review" })).toBe(false);
   expect(database.getExtraction(bill.bill.id)).toBeNull();
   expect(database.getBill(bill.bill.id)?.status).toBe("extracting");
+  expect(database.sqlite.query<{ count: number }, [string]>("SELECT count(*) AS count FROM extraction_attempts WHERE bill_id = ?").get(bill.bill.id)?.count).toBe(0);
 });

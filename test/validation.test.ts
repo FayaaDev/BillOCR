@@ -7,7 +7,7 @@ import { BillDatabase } from "../src/database";
 import { createExtractionValidationCallback, parseObservedValue, serializeObservedValue, validateExtractedBill, type ValidationConfig } from "../src/validation";
 import { ISO_4217_DATASET_VERSION, currencyMinorUnits, iso4217MinorUnits, knownIso4217Codes, minorUnitPolicy } from "../src/currency";
 
-const config: ValidationConfig = { confidenceThreshold: 0.50, currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 };
+const config: ValidationConfig = { currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 };
 const extracted = (overrides: Partial<ExtractedBill> = {}): ExtractedBill => ({
   schemaVersion: "1", vendorName: "Vendor", invoiceNumber: "INV-1", invoiceDate: "2026-08-28", currency: "USD", subtotal: 10, vat: 1, total: 11, description: null,
   fields: { vendorName: { confidence: 0.9, sourceText: "Vendor" }, invoiceDate: { confidence: 0.9, sourceText: "2026-08-28" }, total: { confidence: 0.9, sourceText: "11" } }, ...overrides,
@@ -22,16 +22,17 @@ test("approves valid totals within configured rounding tolerance", () => {
   expect(validateExtractedBill(extracted({ total: 11.009 }), config, now)).toEqual({ decision: "approved", issues: [] });
 });
 
-test("blocks arithmetic, required fields, and low confidence", () => {
+test("blocks arithmetic and required fields without using native confidence for approval", () => {
   expect(validateExtractedBill(extracted({ total: 12 }), config, now).issues).toContainEqual(expect.objectContaining({ code: "total_mismatch", field: "total" }));
   expect(validateExtractedBill(extracted({ vendorName: null }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_missing", field: "vendorName" }));
-  expect(validateExtractedBill(extracted({ fields: { vendor_name: { confidence: 0.84, sourceText: "Vendor" }, invoiceDate: { confidence: 0.9, sourceText: "date" }, total: { confidence: 0.9, sourceText: "11" } } }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_confidence_missing", field: "vendorName" }));
-  for (const field of ["vendorName", "invoiceDate", "total"] as const) {
-    const fields = { vendorName: { confidence: 0.50, sourceText: "Vendor" }, invoiceDate: { confidence: 0.50, sourceText: "date" }, total: { confidence: 0.50, sourceText: "11" } };
-    fields[field] = { ...fields[field], confidence: 0.49 };
-    expect(validateExtractedBill(extracted({ fields }), config, now)).toMatchObject({ decision: "needs_review", issues: [expect.objectContaining({ code: "required_field_confidence_low", field, observedValue: expect.stringContaining("0.5") })] });
+  for (const confidence of [null, 0, 0.01, 1]) {
+    expect(validateExtractedBill(extracted({ fields: { vendorName: { confidence, sourceText: "Vendor" }, invoiceDate: { confidence, sourceText: "date" }, total: { confidence, sourceText: "11" } } }), config, now)).toEqual({ decision: "approved", issues: [] });
   }
-  expect(validateExtractedBill(extracted({ fields: { vendorName: { confidence: 0.50, sourceText: "Vendor" }, invoiceDate: { confidence: 0.50, sourceText: "date" }, total: { confidence: 0.50, sourceText: "11" } } }), config, now)).toEqual({ decision: "approved", issues: [] });
+});
+
+test("blocks a failed Azure fallback even when the Mistral extraction is otherwise valid", () => {
+  const result = validateExtractedBill(extracted(), config, now, { fallbackStatus: "failed" });
+  expect(result).toMatchObject({ decision: "needs_review", issues: [expect.objectContaining({ field: null, code: "azure_fallback_failed", severity: "blocking" })] });
 });
 
 test("blocks invalid dates, unknown currencies, and invalid monetary values defensively", () => {

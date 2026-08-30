@@ -42,28 +42,28 @@ function ingest(bytes: Uint8Array, mimeType = "image/png") {
   return { service, event };
 }
 function worker(provider: MistralOcrProvider, drive: DriveAdapter, sheets: SheetsAdapter) {
-  const validate = createExtractionValidationCallback(database, { confidenceThreshold: .85, currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
+  const validate = createExtractionValidationCallback(database, { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
   return new JobWorker(database, { extract: createExtractJobHandler(database, provider, policy.maxAttempts, validate, { root: join(directory, "originals"), maxBytes: 20 * 1024 * 1024 }), archive_to_drive: createDriveArchiveHandler(database, drive, { driveRootId: "root", originalsRoot: join(directory, "originals") }), project_to_sheet: createSheetsProjectionHandler(database, sheets) }, policy, "e2e", logger);
 }
 function extractWorker(provider: MistralOcrProvider) {
-  const validate = createExtractionValidationCallback(database, { confidenceThreshold: .85, currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
+  const validate = createExtractionValidationCallback(database, { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
   return new JobWorker(database, { extract: createExtractJobHandler(database, provider, policy.maxAttempts, validate, { root: join(directory, "originals"), maxBytes: 20 * 1024 * 1024 }) }, policy, "e2e-extract", logger);
 }
 async function drain(item: JobWorker): Promise<void> { while (await item.runOnce()) {} }
 beforeEach(() => { directory = realpathSync(mkdtempSync(join(tmpdir(), "bill-e2e-"))); database = new BillDatabase(join(directory, "ledger.sqlite")); });
 afterEach(() => { database.close(); rmSync(directory, { recursive: true, force: true }); });
 
-test("public ingest, worker, SQLite, and mocked providers complete an auditable byte-identical projection exactly once", async () => {
+test("public ingest, worker, SQLite, and mocked providers archive a reviewable byte-identical original exactly once", async () => {
   const bytes = readFileSync(join(import.meta.dir, "fixtures", "english.png")); const { service, event } = ingest(bytes);
   const first = await service.ingest(event); const duplicate = await service.ingest(event); const bill = first.bills[0]!;
   expect(duplicate.bills[0]?.id).toBe(bill.id); expect(database.countJobsForBill(bill.id)).toBe(2);
   let requests = 0; const provider: MistralOcrProvider = { extract: async (input) => { requests += 1; expect(input.bytes).toEqual(bytes); return { annotation: valid, rawResponse: JSON.stringify({ document_annotation: valid }), model: "mistral-mock" }; } };
   const drive = new MemoryDrive(); const sheets = new MemorySheets(); await drain(worker(provider, drive, sheets));
   const stored = database.getBill(bill.id)!; const extraction = database.getExtraction(bill.id)!;
-  expect(stored).toMatchObject({ id: bill.id, whatsappMessageId: "wa-e2e-1", status: "approved", driveFileId: "drive-3", sheetRowKey: "2" });
-  expect(extraction).toMatchObject({ providerModel: "mistral-mock", normalized: valid, rawProviderResponse: expect.stringContaining("Fixture Store") });
+  expect(stored).toMatchObject({ id: bill.id, whatsappMessageId: "wa-e2e-1", status: "needs_review", driveFileId: "drive-3", sheetRowKey: null });
+  expect(extraction).toMatchObject({ providerModel: "mistral-mock", normalized: expect.objectContaining({ fields: expect.objectContaining({ total: { confidence: null, sourceText: "11.00" } }) }), rawProviderResponse: expect.stringContaining("Fixture Store") });
   expect(drive.bytes.get(stored.driveFileId!)).toEqual(bytes); expect(createHash("sha256").update(bytes).digest("hex")).toBe(stored.contentSha256);
-  expect([...sheets.rows.values()].filter((row) => row[13] === bill.id)).toHaveLength(1); expect(requests).toBe(1);
+  expect([...sheets.rows.values()].filter((row) => row[13] === bill.id)).toHaveLength(0); expect(requests).toBe(1);
   for (const job of database.listJobsForBill(bill.id)) { expect(job.state).toBe("succeeded"); expect(database.getJobTransitions(job.id).map((transition) => transition.toState)).toContain("succeeded"); }
 });
 

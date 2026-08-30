@@ -12,6 +12,7 @@ import { createExtractJobHandler, MistralHttpOcrProvider, type MistralOcrProvide
 import { IMAGE_PREPROCESSING_VERSION, WorkerImagePreprocessor, type ImagePreprocessor } from "./image-preprocessing";
 import { createExtractionValidationCallback } from "./validation";
 import { createDriveArchiveHandler, createGoogleAdapters, createReviewCorrectionSyncHandler, createSheetsProjectionHandler, type DriveAdapter, type SheetsAdapter } from "./google-projections";
+import { AzureDocumentIntelligenceInvoiceProvider, type AzureInvoiceProvider } from "./azure-invoice";
 
 export interface RunningService { url: string; shutdown(): Promise<void>; }
 export interface ServiceDependencies {
@@ -20,6 +21,7 @@ export interface ServiceDependencies {
   whatsappTransport?: WhatsAppTransport;
   enableWhatsApp?: boolean;
   mistralProvider?: MistralOcrProvider;
+  azureProvider?: AzureInvoiceProvider;
   imagePreprocessor?: ImagePreprocessor;
   onExtractionPersisted?: (billId: string) => Promise<void> | void;
   driveAdapter?: DriveAdapter;
@@ -39,7 +41,8 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
     await dependencies.onExtractionPersisted?.(billId);
   };
   const imagePreprocessor = dependencies.imagePreprocessor ?? new WorkerImagePreprocessor({ timeoutMs: config.imagePreprocessing.timeoutMs });
-  const extractHandler = jobHandlers.extract ?? createExtractJobHandler(database, dependencies.mistralProvider ?? new MistralHttpOcrProvider(config.mistral.apiKey, config.mistral.model, config.mistral.maxResponseBytes, config.mistral.requestTimeoutMs), config.jobs.maxAttempts, onExtracted, { root: config.whatsapp.originalsDir, maxBytes: config.whatsapp.maxAttachmentBytes }, imagePreprocessor);
+  const azureProvider = dependencies.azureProvider ?? (config.azure.enabled ? new AzureDocumentIntelligenceInvoiceProvider({ endpoint: config.azure.endpoint, apiKey: config.azure.apiKey, maxResponseBytes: config.azure.maxResponseBytes, timeoutMs: config.azure.requestTimeoutMs, pollIntervalMs: config.azure.pollIntervalMs }) : undefined);
+  const extractHandler = jobHandlers.extract ?? createExtractJobHandler(database, dependencies.mistralProvider ?? new MistralHttpOcrProvider(config.mistral.apiKey, config.mistral.model, config.mistral.maxResponseBytes, config.mistral.requestTimeoutMs), config.jobs.maxAttempts, onExtracted, { root: config.whatsapp.originalsDir, maxBytes: config.whatsapp.maxAttachmentBytes }, imagePreprocessor, azureProvider, config.azure.fallbackConfidenceThreshold);
   let googleHandlers: JobHandlers = {};
   if (config.google.enabled) {
     const adapters = dependencies.driveAdapter && dependencies.sheetsAdapter ? { drive: dependencies.driveAdapter, sheets: dependencies.sheetsAdapter } : createGoogleAdapters(readFileSync(config.google.credentialJson, "utf8"), { driveRootId: config.google.driveFolderId, sheetId: config.google.sheetId, sheetName: config.google.sheetName, requestTimeoutMs: config.google.requestTimeoutMs, maxResponseBytes: config.google.maxResponseBytes });

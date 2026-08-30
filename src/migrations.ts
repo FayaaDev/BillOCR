@@ -80,7 +80,43 @@ const migrations = [
    );
    ALTER TABLE review_events ADD COLUMN reason TEXT;
    ALTER TABLE review_events ADD COLUMN note TEXT;
-   CREATE INDEX IF NOT EXISTS review_events_bill_idx ON review_events(bill_id, created_at);`,
+    CREATE INDEX IF NOT EXISTS review_events_bill_idx ON review_events(bill_id, created_at);`,
+  `ALTER TABLE extractions ADD COLUMN selected_provider TEXT CHECK (selected_provider IN ('mistral','azure'));
+   ALTER TABLE extractions ADD COLUMN fallback_status TEXT CHECK (fallback_status IN ('not_needed','pending','succeeded','failed'));
+   ALTER TABLE extraction_attempts ADD COLUMN provider TEXT NOT NULL DEFAULT 'mistral' CHECK (provider IN ('mistral','azure'));
+   CREATE TABLE IF NOT EXISTS extraction_invocations (
+     id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), job_id TEXT NOT NULL REFERENCES jobs(id),
+     job_attempt INTEGER NOT NULL CHECK (job_attempt >= 1), provider TEXT NOT NULL CHECK (provider IN ('mistral','azure')),
+     idempotency_key TEXT NOT NULL, provider_model TEXT, prompt_schema_version TEXT, requested_at TEXT NOT NULL,
+     completed_at TEXT, outcome TEXT NOT NULL CHECK (outcome IN ('requested','succeeded','failed')),
+     raw_provider_response TEXT, error_details TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+     UNIQUE (job_id, job_attempt, provider)
+   );
+   CREATE INDEX IF NOT EXISTS extraction_invocations_bill_idx ON extraction_invocations(bill_id, created_at);
+   CREATE TABLE IF NOT EXISTS azure_extraction_operations (
+     id TEXT PRIMARY KEY, invocation_id TEXT NOT NULL UNIQUE REFERENCES extraction_invocations(id),
+     bill_id TEXT NOT NULL REFERENCES bills(id), job_id TEXT NOT NULL REFERENCES jobs(id), operation_location TEXT NOT NULL UNIQUE,
+     state TEXT NOT NULL CHECK (state IN ('submitted','running','succeeded','failed')), last_error TEXT,
+     completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS azure_extraction_operations_resume_idx ON azure_extraction_operations(state, updated_at);`,
+  `ALTER TABLE extractions ADD COLUMN selected_invocation_id TEXT REFERENCES extraction_invocations(id);
+    CREATE INDEX IF NOT EXISTS extractions_selected_invocation_idx ON extractions(selected_invocation_id);`,
+  `ALTER TABLE azure_extraction_operations ADD COLUMN normalized_json TEXT;
+   ALTER TABLE azure_extraction_operations ADD COLUMN raw_provider_response TEXT;
+   ALTER TABLE azure_extraction_operations ADD COLUMN provider_model TEXT;`,
+  `ALTER TABLE azure_extraction_operations RENAME TO azure_extraction_operations_previous;
+   CREATE TABLE azure_extraction_operations (
+     id TEXT PRIMARY KEY, invocation_id TEXT NOT NULL UNIQUE REFERENCES extraction_invocations(id),
+     bill_id TEXT NOT NULL REFERENCES bills(id), job_id TEXT NOT NULL REFERENCES jobs(id), operation_location TEXT UNIQUE,
+     state TEXT NOT NULL CHECK (state IN ('submitting','submitted','running','succeeded','failed')),
+     normalized_json TEXT, raw_provider_response TEXT, provider_model TEXT, last_error TEXT,
+     completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+   );
+   INSERT INTO azure_extraction_operations (id, invocation_id, bill_id, job_id, operation_location, state, normalized_json, raw_provider_response, provider_model, last_error, completed_at, created_at, updated_at)
+     SELECT id, invocation_id, bill_id, job_id, operation_location, state, normalized_json, raw_provider_response, provider_model, last_error, completed_at, created_at, updated_at FROM azure_extraction_operations_previous;
+   DROP TABLE azure_extraction_operations_previous;
+   CREATE INDEX IF NOT EXISTS azure_extraction_operations_resume_idx ON azure_extraction_operations(state, updated_at);`,
 ];
 
 export function applyMigrations(db: Database): void {

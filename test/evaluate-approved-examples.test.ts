@@ -16,13 +16,12 @@ test("evaluator rejects a symlink even when its target is a safe workspace image
   finally { rmSync(path, { force: true }); }
 });
 
-test("evaluator requires both exact values and an approved production validation decision", () => {
+test("evaluator does not use native confidence for an approved production validation decision", () => {
   const expected = { vendorName: "Al-Anzi Lathe", invoiceNumber: "0427", invoiceDate: "2026-08-26", currency: null, subtotal: 70, vat: null, total: 70, description: null };
   const annotation = { schemaVersion: "1", ...expected, fields: { vendorName: { confidence: 0.99, sourceText: "Al-Anzi Lathe" }, invoiceDate: { confidence: 0.99, sourceText: "26/08/2026" }, total: { confidence: 0.99, sourceText: "Total: 70" } } };
   expect(evaluateApprovedAnnotation(annotation, expected, new Date("2026-08-29T00:00:00.000Z"))).toMatchObject({ differences: [], decision: "approved", issues: [], passed: true });
-  const review = evaluateApprovedAnnotation({ ...annotation, fields: { ...annotation.fields, total: { confidence: 0, sourceText: "Total: 70" } } }, expected, new Date("2026-08-29T00:00:00.000Z"));
-  expect(review).toMatchObject({ decision: "needs_review", passed: false });
-  expect(review.issues).toEqual(expect.arrayContaining([{ code: "required_field_confidence_low", field: "total" }]));
+  const lowConfidence = evaluateApprovedAnnotation({ ...annotation, fields: { ...annotation.fields, total: { confidence: 0, sourceText: "Total: 70" } } }, expected, new Date("2026-08-29T00:00:00.000Z"));
+  expect(lowConfidence).toMatchObject({ decision: "approved", passed: true });
 });
 
 test("evaluator emits six sanitized records for original, sharp, and opencv variants", async () => {

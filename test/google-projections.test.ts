@@ -230,6 +230,13 @@ test("stale revisions are fenced before Sheets side effects and ledger values re
   expect(values[1]).toBe("=DANGEROUS()"); expect(values[13]).toBe(item.id);
 });
 
+test("Sheet confidence summary displays unknown when native confidences are null", () => {
+  const item = approvedBill();
+  const extraction = database.getExtraction(item.id)!.normalized!;
+  extraction.fields = { vendorName: { confidence: null, sourceText: "Vendor" }, invoiceDate: { confidence: null, sourceText: "2026-08-15" }, total: { confidence: null, sourceText: "11" } };
+  expect(ledgerValues(database.getBill(item.id)!, extraction, "https://drive.example/file")[10]).toBe("unknown");
+});
+
 test("concurrent Sheet append misses reconcile to one immutable bill row", async () => {
   const item = approvedBill();
   database.sqlite.query("INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, expected_revision, created_at, updated_at) VALUES ('second-project', ?, 'project_to_sheet', 'pending', 'project:bill-immutable:1:second', 0, ?, 1, ?, ?)").run(item.id, new Date().toISOString(), new Date().toISOString(), new Date().toISOString());

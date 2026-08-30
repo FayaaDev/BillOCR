@@ -1,6 +1,6 @@
 # Bill Ledger
 
-SQLite is canonical. WhatsApp, Mistral, Google Drive, and Google Sheets are retryable projections.
+SQLite is canonical. WhatsApp, Mistral, Azure Document Intelligence, Google Drive, and Google Sheets are retryable projections.
 
 ## Local setup
 
@@ -16,7 +16,9 @@ The service writes the current QR token only to `${WHATSAPP_AUTH_PATH}/pairing-q
 
 For handwritten bills, send JPEG, PNG, or WebP images as WhatsApp documents/files when possible to avoid WhatsApp image recompression. Frame the bill clearly and minimize glare.
 
-Set `MISTRAL_API_KEY` and `MISTRAL_MODEL`. Google projections use exactly one `GOOGLE_AUTH_MODE`:
+Set `MISTRAL_API_KEY` and `MISTRAL_MODEL`. Azure fallback is enabled by default: set `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` to the HTTPS origin of the Document Intelligence resource and set `AZURE_DOCUMENT_INTELLIGENCE_API_KEY` privately. It submits the same verified input bytes only when Mistral lacks evidence for `vendorName`, `invoiceDate`, or `total`, or that evidence is below `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default `0.80`). Set `AZURE_ENABLED=false` only for offline/local environments where the fallback is intentionally unavailable; a low-confidence result then remains in the review queue rather than being approved.
+
+Google projections use exactly one `GOOGLE_AUTH_MODE`:
 
 - `service_account` is the default. Put its JSON at `secrets/google-service-account.json`, configure `GOOGLE_SERVICE_ACCOUNT_JSON`, and grant that service account access to the configured Drive folder and spreadsheet.
 - `user_oauth` uses a personal Gmail account. In Google Cloud, configure the consent screen, add the Gmail account as a **test user** while the app is in testing, enable Drive and Sheets APIs, and create an OAuth **Desktop app** client. Save that downloaded client JSON outside source control (for example `secrets/google-oauth-client.json`). Set `GOOGLE_OAUTH_CLIENT_JSON` to it and `GOOGLE_OAUTH_CREDENTIAL_JSON` to a new, nonexistent private destination, then run this one-time local command:
@@ -81,7 +83,7 @@ Validate the Compose file separately with `docker compose config --quiet`. For t
 docker compose config --quiet
 docker build -t bill-ledger-health-smoke .
 set -e; container=; trap 'test -z "$container" || docker stop "$container" >/dev/null 2>&1 || true' EXIT
-container=$(docker run -d --rm -p 3100:3000 -e APP_HOST=0.0.0.0 -e APP_DATA_DIR=/tmp/health-smoke -e APP_DATABASE_PATH=/tmp/health-smoke/bill-ledger.sqlite -e WHATSAPP_ENABLED=false -e WHATSAPP_GROUP_ID=health-smoke@g.us -e WHATSAPP_AUTH_PATH=/tmp/health-smoke/whatsapp-auth -e WHATSAPP_ORIGINALS_DIR=/tmp/health-smoke/originals -e MISTRAL_API_KEY=test -e MISTRAL_MODEL=test -e GOOGLE_ENABLED=false -e REVIEW_USERNAME=test -e REVIEW_PASSWORD=test bill-ledger-health-smoke)
+container=$(docker run -d --rm -p 3100:3000 -e APP_HOST=0.0.0.0 -e APP_DATA_DIR=/tmp/health-smoke -e APP_DATABASE_PATH=/tmp/health-smoke/bill-ledger.sqlite -e WHATSAPP_ENABLED=false -e WHATSAPP_GROUP_ID=health-smoke@g.us -e WHATSAPP_AUTH_PATH=/tmp/health-smoke/whatsapp-auth -e WHATSAPP_ORIGINALS_DIR=/tmp/health-smoke/originals -e MISTRAL_API_KEY=test -e MISTRAL_MODEL=test -e AZURE_ENABLED=false -e GOOGLE_ENABLED=false -e REVIEW_USERNAME=test -e REVIEW_PASSWORD=test bill-ledger-health-smoke)
 curl --fail http://127.0.0.1:3100/health
 ```
 

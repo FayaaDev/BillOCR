@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import type { Bill, ClaimedJob, CreateBillInput, EffectiveBillData, ExtractedBill, Extraction, InitialJobInput, Job, JobState, JobTransition, JobType, ProviderProjectionMetadata, ReviewEvent, ValidationIssue } from "./contracts";
+import type { AzureExtractionOperation, BeginExtractionInvocationResult, Bill, ClaimedJob, CreateBillInput, EffectiveBillData, ExtractedBill, Extraction, ExtractionFallbackStatus, ExtractionInvocation, ExtractionProvider, InitialJobInput, Job, JobState, JobTransition, JobType, ProviderProjectionMetadata, ReviewEvent, ValidationIssue } from "./contracts";
 import { applyMigrations } from "./migrations";
 import { jobTypes } from "./contracts";
 
@@ -15,7 +15,9 @@ type BillRow = {
   content_sha256: string; status: Bill["status"]; drive_file_id: string | null; sheet_row_key: string | null; created_at: string; updated_at: string; content_revision: number; review_revision: number; manual_review_required: number;
 };
 type JobTransitionRow = { id: string; job_id: string; from_state: JobState | null; to_state: JobState; reason: string; created_at: string };
-type ExtractionRow = { id: string; bill_id: string; schema_version: string; normalized_json: string | null; raw_provider_response: string | null; provider_model: string | null; prompt_schema_version: string | null; requested_at: string | null; completed_at: string | null; error_details: string | null; created_at: string; updated_at: string };
+type ExtractionRow = { id: string; bill_id: string; schema_version: string; selected_provider: ExtractionProvider | null; fallback_status: ExtractionFallbackStatus | null; selected_invocation_id: string | null; normalized_json: string | null; raw_provider_response: string | null; provider_model: string | null; prompt_schema_version: string | null; requested_at: string | null; completed_at: string | null; error_details: string | null; created_at: string; updated_at: string };
+type ExtractionInvocationRow = { id: string; bill_id: string; job_id: string; job_attempt: number; provider: ExtractionProvider; idempotency_key: string; provider_model: string | null; prompt_schema_version: string | null; requested_at: string; completed_at: string | null; outcome: ExtractionInvocation["outcome"]; raw_provider_response: string | null; error_details: string | null; created_at: string; updated_at: string };
+type AzureExtractionOperationRow = { id: string; invocation_id: string; bill_id: string; job_id: string; operation_location: string | null; state: AzureExtractionOperation["state"]; normalized_json: string | null; raw_provider_response: string | null; provider_model: string | null; last_error: string | null; completed_at: string | null; created_at: string; updated_at: string };
 type ValidationIssueRow = { id: string; bill_id: string; field: string | null; code: string; message: string; severity: ValidationIssue["severity"]; observed_value: string | null; created_at: string };
 type ProjectionRow = { id: string; bill_id: string; provider: string; projection_key: string; external_id: string | null; external_url: string | null; metadata_json: string | null; created_at: string; updated_at: string };
 type DriveReservationRow = { reservation_key: string; kind: "file" | "folder"; parent_id: string | null; logical_path: string; drive_id: string; state: "reserved" | "confirmed"; bill_id: string | null; content_sha256: string | null; created_at: string; updated_at: string };
@@ -31,7 +33,13 @@ function toJobTransition(row: JobTransitionRow): JobTransition {
   return { id: row.id, jobId: row.job_id, fromState: row.from_state, toState: row.to_state, reason: row.reason, createdAt: row.created_at };
 }
 function toExtraction(row: ExtractionRow): Extraction {
-  return { id: row.id, billId: row.bill_id, schemaVersion: row.schema_version, normalized: row.normalized_json ? JSON.parse(row.normalized_json) as ExtractedBill : null, rawProviderResponse: row.raw_provider_response, providerModel: row.provider_model, promptSchemaVersion: row.prompt_schema_version, requestedAt: row.requested_at, completedAt: row.completed_at, errorDetails: row.error_details, createdAt: row.created_at, updatedAt: row.updated_at };
+  return { id: row.id, billId: row.bill_id, schemaVersion: row.schema_version, selectedProvider: row.selected_provider, fallbackStatus: row.fallback_status, selectedInvocationId: row.selected_invocation_id, normalized: row.normalized_json ? JSON.parse(row.normalized_json) as ExtractedBill : null, rawProviderResponse: row.raw_provider_response, providerModel: row.provider_model, promptSchemaVersion: row.prompt_schema_version, requestedAt: row.requested_at, completedAt: row.completed_at, errorDetails: row.error_details, createdAt: row.created_at, updatedAt: row.updated_at };
+}
+function toExtractionInvocation(row: ExtractionInvocationRow): ExtractionInvocation {
+  return { id: row.id, billId: row.bill_id, jobId: row.job_id, jobAttempt: row.job_attempt, provider: row.provider, idempotencyKey: row.idempotency_key, providerModel: row.provider_model, promptSchemaVersion: row.prompt_schema_version, requestedAt: row.requested_at, completedAt: row.completed_at, outcome: row.outcome, rawProviderResponse: row.raw_provider_response, errorDetails: row.error_details, createdAt: row.created_at, updatedAt: row.updated_at };
+}
+function toAzureExtractionOperation(row: AzureExtractionOperationRow): AzureExtractionOperation {
+  return { id: row.id, invocationId: row.invocation_id, billId: row.bill_id, jobId: row.job_id, operationLocation: row.operation_location, state: row.state, normalized: row.normalized_json ? JSON.parse(row.normalized_json) as ExtractedBill : null, rawProviderResponse: row.raw_provider_response, providerModel: row.provider_model, lastError: row.last_error, completedAt: row.completed_at, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 function toValidationIssue(row: ValidationIssueRow): ValidationIssue {
   return { id: row.id, billId: row.bill_id, field: row.field, code: row.code, message: row.message, severity: row.severity, observedValue: row.observed_value, createdAt: row.created_at };
@@ -119,13 +127,107 @@ export class BillDatabase {
     return row ? toExtraction(row) : null;
   }
 
+  getExtractionInvocations(billId: string): ExtractionInvocation[] {
+    return this.sqlite.query<ExtractionInvocationRow, [string]>("SELECT * FROM extraction_invocations WHERE bill_id = ? ORDER BY requested_at, rowid").all(billId).map(toExtractionInvocation);
+  }
+
+  /** Persists the audit record before a provider call. A stale worker cannot create new work. */
+  beginExtractionInvocation(input: { billId: string; jobId: string; leaseToken: string; jobAttempt: number; provider: ExtractionProvider; idempotencyKey: string; jobIdempotencyKey?: string; providerModel?: string | null; promptSchemaVersion?: string | null; requestedAt: string }): BeginExtractionInvocationResult | null {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      const claimedJob = this.sqlite.query<{ value: number }, [string, string, string, number, string, string]>(`SELECT 1 AS value FROM jobs
+        WHERE id = ? AND bill_id = ? AND type = 'extract' AND idempotency_key = ? AND attempts = ? AND state = 'running'
+          AND lease_token = ? AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`).get(input.jobId, input.billId, input.jobIdempotencyKey ?? input.idempotencyKey, input.jobAttempt, input.leaseToken, now);
+      if (!claimedJob) return null;
+      const inserted = this.sqlite.query(`INSERT INTO extraction_invocations (id, bill_id, job_id, job_attempt, provider, idempotency_key, provider_model, prompt_schema_version, requested_at, outcome, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?)
+        ON CONFLICT(job_id, job_attempt, provider) DO NOTHING`).run(randomUUID(), input.billId, input.jobId, input.jobAttempt, input.provider, input.idempotencyKey, input.providerModel ?? null, input.promptSchemaVersion ?? null, input.requestedAt, now, now);
+      const row = this.sqlite.query<ExtractionInvocationRow, [string, number, ExtractionProvider]>("SELECT * FROM extraction_invocations WHERE job_id = ? AND job_attempt = ? AND provider = ?").get(input.jobId, input.jobAttempt, input.provider);
+      return row ? { invocation: toExtractionInvocation(row), created: inserted.changes === 1 } : null;
+    })();
+  }
+
+  /** Finishes the durable provider audit record without selecting canonical output. */
+  finishExtractionInvocation(input: { invocationId: string; jobId: string; leaseToken: string; outcome: "succeeded" | "failed"; completedAt: string; rawProviderResponse: string | null; errorDetails: string | null }): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
+      const result = this.sqlite.query(`UPDATE extraction_invocations SET outcome = ?, completed_at = ?, raw_provider_response = ?, error_details = ?, updated_at = ?
+        WHERE id = ? AND job_id = ? AND outcome = 'requested'`).run(input.outcome, input.completedAt, input.rawProviderResponse, input.errorDetails, now, input.invocationId, input.jobId);
+      return result.changes === 1;
+    })();
+  }
+
+  getAzureExtractionOperation(invocationId: string): AzureExtractionOperation | null {
+    const row = this.sqlite.query<AzureExtractionOperationRow, [string]>("SELECT * FROM azure_extraction_operations WHERE invocation_id = ?").get(invocationId);
+    return row ? toAzureExtractionOperation(row) : null;
+  }
+
+  listResumableAzureExtractionOperations(): AzureExtractionOperation[] {
+    return this.sqlite.query<AzureExtractionOperationRow, []>("SELECT * FROM azure_extraction_operations WHERE state IN ('submitted','running') ORDER BY updated_at, rowid").all().map(toAzureExtractionOperation);
+  }
+
+  getResumableAzureExtractionOperation(billId: string): AzureExtractionOperation | null {
+    const row = this.sqlite.query<AzureExtractionOperationRow, [string]>("SELECT * FROM azure_extraction_operations WHERE bill_id = ? AND state IN ('submitted','running') ORDER BY updated_at, rowid LIMIT 1").get(billId);
+    return row ? toAzureExtractionOperation(row) : null;
+  }
+
+  getSucceededAzureExtractionOperation(billId: string): AzureExtractionOperation | null {
+    const row = this.sqlite.query<AzureExtractionOperationRow, [string]>("SELECT * FROM azure_extraction_operations WHERE bill_id = ? AND state = 'succeeded' ORDER BY completed_at DESC, rowid DESC LIMIT 1").get(billId);
+    return row ? toAzureExtractionOperation(row) : null;
+  }
+
+  getSubmittingAzureExtractionOperation(billId: string): AzureExtractionOperation | null {
+    const row = this.sqlite.query<AzureExtractionOperationRow, [string]>("SELECT * FROM azure_extraction_operations WHERE bill_id = ? AND state = 'submitting' ORDER BY updated_at, rowid LIMIT 1").get(billId);
+    return row ? toAzureExtractionOperation(row) : null;
+  }
+
+  /** Fences Azure submission before the external request. A replay must not guess whether it reached Azure. */
+  beginAzureExtractionSubmission(input: { invocationId: string; billId: string; jobId: string; leaseToken: string }): { operation: AzureExtractionOperation; created: boolean } | null {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return null;
+      const invocation = this.sqlite.query<{ value: number }, [string, string, string]>("SELECT 1 AS value FROM extraction_invocations WHERE id = ? AND bill_id = ? AND job_id = ? AND provider = 'azure' AND outcome = 'requested'").get(input.invocationId, input.billId, input.jobId);
+      if (!invocation) return null;
+      const inserted = this.sqlite.query("INSERT INTO azure_extraction_operations (id, invocation_id, bill_id, job_id, operation_location, state, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, 'submitting', ?, ?) ON CONFLICT(invocation_id) DO NOTHING").run(randomUUID(), input.invocationId, input.billId, input.jobId, now, now);
+      const operation = this.getAzureExtractionOperation(input.invocationId);
+      return operation ? { operation, created: inserted.changes === 1 } : null;
+    })();
+  }
+
+  /** Stores Azure's operation URL after submission so a later worker can poll it. */
+  persistAzureExtractionOperation(input: { invocationId: string; billId: string; jobId: string; leaseToken: string; operationLocation: string; state?: "submitted" | "running" }): AzureExtractionOperation | null {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return null;
+      const invocation = this.sqlite.query<{ value: number }, [string, string, string]>("SELECT 1 AS value FROM extraction_invocations WHERE id = ? AND bill_id = ? AND job_id = ? AND provider = 'azure' AND outcome = 'requested'").get(input.invocationId, input.billId, input.jobId);
+      if (!invocation) return null;
+      const result = this.sqlite.query(`INSERT INTO azure_extraction_operations (id, invocation_id, bill_id, job_id, operation_location, state, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(invocation_id) DO UPDATE SET operation_location = excluded.operation_location, state = excluded.state, updated_at = excluded.updated_at
+        WHERE azure_extraction_operations.operation_location IS NULL AND azure_extraction_operations.state = 'submitting'`).run(randomUUID(), input.invocationId, input.billId, input.jobId, input.operationLocation, input.state ?? "submitted", now, now);
+      if (result.changes !== 1) return null;
+      return this.getAzureExtractionOperation(input.invocationId);
+    })();
+  }
+
+  /** Marks one persisted Azure operation terminal, fenced by the worker that polled it. */
+  finishAzureExtractionOperation(input: { invocationId: string; jobId: string; leaseToken: string; state: "succeeded" | "failed"; completedAt: string; normalized?: ExtractedBill | null; rawProviderResponse?: string | null; providerModel?: string | null; lastError?: string | null }): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
+      const result = this.sqlite.query("UPDATE azure_extraction_operations SET state = ?, normalized_json = ?, raw_provider_response = ?, provider_model = ?, completed_at = ?, last_error = ?, updated_at = ? WHERE invocation_id = ? AND job_id = ? AND state IN ('submitting','submitted','running')").run(input.state, input.normalized ? JSON.stringify(input.normalized) : null, input.rawProviderResponse ?? null, input.providerModel ?? null, input.completedAt, input.lastError ?? null, now, input.invocationId, input.jobId);
+      return result.changes === 1;
+    })();
+  }
+
   getValidationIssues(billId: string): ValidationIssue[] {
     return this.sqlite.query<ValidationIssueRow, [string]>("SELECT * FROM validation_issues WHERE bill_id = ? ORDER BY rowid").all(billId).map(toValidationIssue);
   }
 
-  getLatestExtractionAttempt(billId: string): { providerModel: string | null; requestedAt: string; completedAt: string; outcome: "succeeded" | "failed"; errorDetails: string | null } | null {
-    const row = this.sqlite.query<{ provider_model: string | null; requested_at: string; completed_at: string; outcome: "succeeded" | "failed"; error_details: string | null }, [string]>("SELECT provider_model, requested_at, completed_at, outcome, error_details FROM extraction_attempts WHERE bill_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(billId);
-    return row ? { providerModel: row.provider_model, requestedAt: row.requested_at, completedAt: row.completed_at, outcome: row.outcome, errorDetails: row.error_details } : null;
+  getLatestExtractionAttempt(billId: string): { provider: ExtractionProvider; providerModel: string | null; requestedAt: string; completedAt: string; outcome: "succeeded" | "failed"; errorDetails: string | null } | null {
+    const row = this.sqlite.query<{ provider: ExtractionProvider; provider_model: string | null; requested_at: string; completed_at: string; outcome: "succeeded" | "failed"; error_details: string | null }, [string]>("SELECT provider, provider_model, requested_at, completed_at, outcome, error_details FROM extraction_attempts WHERE bill_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(billId);
+    return row ? { provider: row.provider, providerModel: row.provider_model, requestedAt: row.requested_at, completedAt: row.completed_at, outcome: row.outcome, errorDetails: row.error_details } : null;
   }
 
   getEffectiveBillData(billId: string): EffectiveBillData | null {
@@ -228,7 +330,7 @@ export class BillDatabase {
     return this.sqlite.transaction(() => {
       const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ?").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
       // A human workflow is sticky: only approveReviewCorrection may approve any review revision.
-      if (!current || (current.review_revision > 0 && input.decision === "approved")) return false;
+      if (!current || ((current.review_revision > 0 || current.manual_review_required === 1) && input.decision === "approved")) return false;
       this.sqlite.query("DELETE FROM validation_issues WHERE bill_id = ?").run(input.billId);
       const insertIssue = this.sqlite.query("INSERT INTO validation_issues (id, bill_id, field, code, message, severity, observed_value, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
       for (const item of input.issues) insertIssue.run(randomUUID(), input.billId, item.field, item.code, item.message, item.severity, item.observedValue, now);
@@ -329,31 +431,63 @@ export class BillDatabase {
     this.sqlite.query("UPDATE bills SET status = 'extracting', updated_at = ? WHERE id = ? AND status = 'received'").run(now, billId);
   }
 
-  persistExtractionSuccess(input: { billId: string; jobId: string; leaseToken: string; jobAttempt: number; normalized: ExtractedBill; rawProviderResponse: string; providerModel: string; promptSchemaVersion: string; requestedAt: string; completedAt: string }): boolean {
+  persistExtractionSuccess(input: { billId: string; jobId: string; leaseToken: string; jobAttempt: number; normalized: ExtractedBill; rawProviderResponse: string; providerModel: string; promptSchemaVersion: string; requestedAt: string; completedAt: string; provider?: ExtractionProvider; fallbackStatus?: ExtractionFallbackStatus }): boolean {
     return this.sqlite.transaction(() => {
       const now = new Date().toISOString();
-      this.recordExtractionAttempt({ ...input, outcome: "succeeded", errorDetails: null });
+      const provider = input.provider ?? "mistral";
       const owned = this.leaseOwned(input.jobId, input.leaseToken, now);
       if (!owned) return false;
-      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-        ON CONFLICT(bill_id) DO UPDATE SET schema_version = excluded.schema_version, normalized_json = excluded.normalized_json, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = NULL, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
-        .run(randomUUID(), input.billId, input.normalized.schemaVersion, JSON.stringify(input.normalized), input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, now, now);
+      this.recordExtractionAttempt({ ...input, provider, outcome: "succeeded", errorDetails: null });
+      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, selected_provider, fallback_status, selected_invocation_id, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        ON CONFLICT(bill_id) DO UPDATE SET schema_version = excluded.schema_version, selected_provider = excluded.selected_provider, fallback_status = excluded.fallback_status, selected_invocation_id = NULL, normalized_json = excluded.normalized_json, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = NULL, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
+        .run(randomUUID(), input.billId, input.normalized.schemaVersion, provider, input.fallbackStatus ?? (provider === "azure" ? "succeeded" : "not_needed"), JSON.stringify(input.normalized), input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, now, now);
        if (result.changes === 1) this.sqlite.query("UPDATE bills SET content_revision = content_revision + 1, updated_at = ? WHERE id = ?").run(now, input.billId);
        return result.changes === 1;
     })();
   }
 
-  persistExtractionFailure(input: { billId: string; jobId: string; leaseToken: string; jobAttempt: number; rawProviderResponse: string | null; providerModel: string | null; promptSchemaVersion: string; requestedAt: string; completedAt: string; errorDetails: string; status?: "needs_review" | "failed" }): boolean {
+  /** Selects canonical output only from a successful, identity-matched durable invocation. */
+  persistCanonicalExtractionSuccess(input: { invocationId: string; billId: string; jobId: string; leaseToken: string; jobAttempt: number; provider: ExtractionProvider; idempotencyKey: string; normalized: ExtractedBill; rawProviderResponse: string; providerModel: string; promptSchemaVersion: string; requestedAt: string; completedAt: string; fallbackStatus?: ExtractionFallbackStatus }): boolean {
     return this.sqlite.transaction(() => {
       const now = new Date().toISOString();
-      this.recordExtractionAttempt({ ...input, outcome: "failed" });
       if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
-      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
-        VALUES (?, ?, '1', NULL, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(bill_id) DO UPDATE SET normalized_json = NULL, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = excluded.error_details, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
-        .run(randomUUID(), input.billId, input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, now, input.errorDetails, now, now);
-      if (result.changes === 1 && input.status) this.sqlite.query("UPDATE bills SET status = ?, updated_at = ? WHERE id = ? AND status = 'extracting'").run(input.status, now, input.billId);
+      const invocation = this.sqlite.query<{ value: number }, [string, string, string, number, ExtractionProvider, string]>(`SELECT 1 AS value FROM extraction_invocations
+        WHERE id = ? AND bill_id = ? AND job_id = ? AND job_attempt = ? AND provider = ? AND idempotency_key = ? AND outcome = 'succeeded'`).get(input.invocationId, input.billId, input.jobId, input.jobAttempt, input.provider, input.idempotencyKey);
+      if (!invocation) return false;
+      this.recordExtractionAttempt({ ...input, outcome: "succeeded", errorDetails: null });
+      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, selected_provider, fallback_status, selected_invocation_id, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        ON CONFLICT(bill_id) DO UPDATE SET schema_version = excluded.schema_version, selected_provider = excluded.selected_provider, fallback_status = excluded.fallback_status, selected_invocation_id = excluded.selected_invocation_id, normalized_json = excluded.normalized_json, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = NULL, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL OR (excluded.selected_provider = 'azure' AND extractions.selected_provider = 'mistral' AND extractions.fallback_status = 'pending')`)
+        .run(randomUUID(), input.billId, input.normalized.schemaVersion, input.provider, input.fallbackStatus ?? (input.provider === "azure" ? "succeeded" : "not_needed"), input.invocationId, JSON.stringify(input.normalized), input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, now, now);
+      if (result.changes === 1) this.sqlite.query("UPDATE bills SET content_revision = content_revision + 1, updated_at = ? WHERE id = ?").run(now, input.billId);
+      return result.changes === 1;
+    })();
+  }
+
+  persistExtractionFailure(input: { billId: string; jobId: string; leaseToken: string; jobAttempt: number; rawProviderResponse: string | null; providerModel: string | null; promptSchemaVersion: string; requestedAt: string; completedAt: string; errorDetails: string; status?: "needs_review" | "failed"; provider?: ExtractionProvider; fallbackStatus?: ExtractionFallbackStatus }): boolean {
+    return this.sqlite.transaction(() => {
+      const now = new Date().toISOString();
+      const provider = input.provider ?? "mistral";
+      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
+      this.recordExtractionAttempt({ ...input, provider, outcome: "failed" });
+      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, selected_provider, fallback_status, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
+        VALUES (?, ?, '1', NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bill_id) DO UPDATE SET fallback_status = excluded.fallback_status, normalized_json = NULL, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = excluded.error_details, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
+        .run(randomUUID(), input.billId, input.fallbackStatus ?? (provider === "azure" ? "failed" : "pending"), input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, input.errorDetails, now, now);
+      if (input.status) this.sqlite.query("UPDATE bills SET status = ?, updated_at = ? WHERE id = ? AND status = 'extracting'").run(input.status, now, input.billId);
+      return result.changes === 1;
+    })();
+  }
+
+  /** Keeps the Mistral result available for review when Azure fallback cannot complete. */
+  persistAzureFallbackFailure(input: { billId: string; jobId: string; leaseToken: string; errorDetails: string }): boolean {
+    return this.sqlite.transaction(() => {
+      const now = new Date().toISOString();
+      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
+      const result = this.sqlite.query(`UPDATE extractions SET fallback_status = 'failed', error_details = ?, updated_at = ?
+        WHERE bill_id = ? AND selected_provider = 'mistral' AND fallback_status = 'pending' AND normalized_json IS NOT NULL`).run(input.errorDetails, now, input.billId);
+      if (result.changes === 1) this.sqlite.query("UPDATE bills SET status = 'needs_review', manual_review_required = 1, updated_at = ? WHERE id = ?").run(now, input.billId);
       return result.changes === 1;
     })();
   }
@@ -362,8 +496,8 @@ export class BillDatabase {
     return Boolean(this.sqlite.query<{ value: number }, [string, string, string]>("SELECT 1 AS value FROM jobs WHERE id = ? AND state = 'running' AND lease_token = ? AND lease_expires_at IS NOT NULL AND lease_expires_at > ?").get(jobId, leaseToken, now)?.value);
   }
 
-  private recordExtractionAttempt(input: { billId: string; jobId: string; jobAttempt: number; providerModel: string | null; requestedAt: string; completedAt: string; outcome: "succeeded" | "failed"; rawProviderResponse: string | null; errorDetails: string | null }): void {
-    this.sqlite.query("INSERT INTO extraction_attempts (id, bill_id, job_id, job_attempt, provider_model, requested_at, completed_at, outcome, raw_provider_response, error_details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(randomUUID(), input.billId, input.jobId, input.jobAttempt, input.providerModel, input.requestedAt, input.completedAt, input.outcome, input.rawProviderResponse, input.errorDetails, new Date().toISOString());
+  private recordExtractionAttempt(input: { billId: string; jobId: string; jobAttempt: number; provider: ExtractionProvider; providerModel: string | null; requestedAt: string; completedAt: string; outcome: "succeeded" | "failed"; rawProviderResponse: string | null; errorDetails: string | null }): void {
+    this.sqlite.query("INSERT INTO extraction_attempts (id, bill_id, job_id, job_attempt, provider, provider_model, requested_at, completed_at, outcome, raw_provider_response, error_details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(randomUUID(), input.billId, input.jobId, input.jobAttempt, input.provider, input.providerModel, input.requestedAt, input.completedAt, input.outcome, input.rawProviderResponse, input.errorDetails, new Date().toISOString());
   }
 
   getJob(id: string): Job | null {

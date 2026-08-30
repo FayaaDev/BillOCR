@@ -6,6 +6,21 @@ export type JobState = (typeof jobStates)[number];
 
 export type BillStatus = "received" | "extracting" | "needs_review" | "approved" | "failed";
 
+export type ExtractionProvider = "mistral" | "azure";
+export type ExtractionFallbackStatus = "not_needed" | "pending" | "succeeded" | "failed";
+
+/** Native provider evidence for one normalized field. */
+export interface FieldEvidence {
+  confidence: number | null;
+  sourceText: string | null;
+}
+
+/** Provenance for the provider whose result is selected as canonical. */
+export interface ExtractionProvenance {
+  selectedProvider: ExtractionProvider;
+  fallbackStatus: ExtractionFallbackStatus;
+}
+
 export interface Bill {
   id: string;
   whatsappMessageId: string;
@@ -37,13 +52,16 @@ export interface ExtractedBill {
   vat: number | null;
   total: number | null;
   description: string | null;
-  fields: Record<string, { confidence: number; sourceText: string | null }>;
+  fields: Record<string, FieldEvidence>;
 }
 
 export interface Extraction {
   id: string;
   billId: string;
   schemaVersion: string;
+  selectedProvider: ExtractionProvider | null;
+  fallbackStatus: ExtractionFallbackStatus | null;
+  selectedInvocationId: string | null;
   normalized: ExtractedBill | null;
   rawProviderResponse: string | null;
   providerModel: string | null;
@@ -51,6 +69,48 @@ export interface Extraction {
   requestedAt: string | null;
   completedAt: string | null;
   errorDetails: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One provider request, persisted before the external call for durable auditability. */
+export interface ExtractionInvocation {
+  id: string;
+  billId: string;
+  jobId: string;
+  jobAttempt: number;
+  provider: ExtractionProvider;
+  idempotencyKey: string;
+  providerModel: string | null;
+  promptSchemaVersion: string | null;
+  requestedAt: string;
+  completedAt: string | null;
+  outcome: "requested" | "succeeded" | "failed";
+  rawProviderResponse: string | null;
+  errorDetails: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The durable invocation and whether this caller created it (rather than resumed it). */
+export interface BeginExtractionInvocationResult {
+  invocation: ExtractionInvocation;
+  created: boolean;
+}
+
+/** Azure's asynchronous operation reference, retained so polling can resume after a restart. */
+export interface AzureExtractionOperation {
+  id: string;
+  invocationId: string;
+  billId: string;
+  jobId: string;
+  operationLocation: string | null;
+  state: "submitting" | "submitted" | "running" | "succeeded" | "failed";
+  normalized: ExtractedBill | null;
+  rawProviderResponse: string | null;
+  providerModel: string | null;
+  lastError: string | null;
+  completedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

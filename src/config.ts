@@ -4,6 +4,9 @@ import { realpathSync } from "node:fs";
 export type GoogleConfig =
   | { enabled: false; authMode: "disabled"; credentialJson: null; driveFolderId: null; sheetId: null; sheetName: string; requestTimeoutMs: number; maxResponseBytes: number }
   | { enabled: true; authMode: "service_account" | "user_oauth"; credentialJson: string; driveFolderId: string; sheetId: string; sheetName: string; requestTimeoutMs: number; maxResponseBytes: number };
+export type AzureConfig =
+  | { enabled: false; endpoint: null; apiKey: null; maxResponseBytes: number; requestTimeoutMs: number; pollIntervalMs: number; fallbackConfidenceThreshold: number }
+  | { enabled: true; endpoint: string; apiKey: string; maxResponseBytes: number; requestTimeoutMs: number; pollIntervalMs: number; fallbackConfidenceThreshold: number };
 export interface AppConfig {
   host: string;
   port: number;
@@ -12,10 +15,11 @@ export interface AppConfig {
   logLevel: "debug" | "info" | "warn" | "error";
   whatsapp: { enabled: boolean; groupId: string; authPath: string; originalsDir: string; maxAttachmentBytes: number };
   mistral: { apiKey: string; model: string; maxResponseBytes: number; requestTimeoutMs: number };
+  azure: AzureConfig;
   imagePreprocessing: { enabled: boolean; timeoutMs: number };
   google: GoogleConfig;
   review: { username: string; password: string };
-  validation: { confidenceThreshold: number; currencyRoundingTolerance: number; maxFutureInvoiceDays: number };
+  validation: { currencyRoundingTolerance: number; maxFutureInvoiceDays: number };
   jobs: { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number };
 }
 
@@ -50,9 +54,7 @@ export function canonicalOriginalsDir(path: string): string { return realpathSyn
 
 /** Validation settings shared by the service and bounded live evaluator. */
 export function loadValidationConfig(env: Env = Bun.env): AppConfig["validation"] {
-  const confidenceThreshold = number(env, "CONFIDENCE_THRESHOLD", 0.50, 0, 1);
   return {
-    confidenceThreshold,
     currencyRoundingTolerance: number(env, "CURRENCY_ROUNDING_TOLERANCE", 0.01, 0, Number.MAX_SAFE_INTEGER),
     maxFutureInvoiceDays: integer(env, "MAX_FUTURE_INVOICE_DAYS", 30, 0),
   };
@@ -73,6 +75,15 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
     logLevel: logLevel as AppConfig["logLevel"],
     whatsapp: { enabled: boolean(env, "WHATSAPP_ENABLED", true), groupId: required(env, "WHATSAPP_GROUP_ID"), authPath: resolve(required(env, "WHATSAPP_AUTH_PATH")), originalsDir: resolve(env.WHATSAPP_ORIGINALS_DIR ?? `${dataDir}/originals`), maxAttachmentBytes: integer(env, "MAX_ATTACHMENT_BYTES", 20 * 1024 * 1024, 1) },
     mistral: { apiKey: required(env, "MISTRAL_API_KEY"), model: required(env, "MISTRAL_MODEL"), maxResponseBytes: integer(env, "MISTRAL_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1), requestTimeoutMs: integer(env, "MISTRAL_REQUEST_TIMEOUT_MS", 60_000, 1) },
+    azure: (() => {
+      const enabled = boolean(env, "AZURE_ENABLED", true);
+      const maxResponseBytes = integer(env, "AZURE_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1);
+      const requestTimeoutMs = integer(env, "AZURE_REQUEST_TIMEOUT_MS", 60_000, 1);
+      const pollIntervalMs = integer(env, "AZURE_POLL_INTERVAL_MS", 500, 0);
+      const fallbackConfidenceThreshold = number(env, "OCR_FALLBACK_CONFIDENCE_THRESHOLD", 0.80, 0, 1);
+      if (!enabled) return { enabled: false, endpoint: null, apiKey: null, maxResponseBytes, requestTimeoutMs, pollIntervalMs, fallbackConfidenceThreshold };
+      return { enabled: true, endpoint: required(env, "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT"), apiKey: required(env, "AZURE_DOCUMENT_INTELLIGENCE_API_KEY"), maxResponseBytes, requestTimeoutMs, pollIntervalMs, fallbackConfidenceThreshold };
+    })(),
     imagePreprocessing: { enabled: boolean(env, "IMAGE_PREPROCESSING_ENABLED", false), timeoutMs: integer(env, "IMAGE_PREPROCESSING_TIMEOUT_MS", 8_000, 1) },
     google: (() => {
       const enabled = boolean(env, "GOOGLE_ENABLED", false);

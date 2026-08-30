@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database as SqliteDatabase } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,8 +19,9 @@ describe("migrations", () => {
   test("apply on a fresh database and safely reapply", () => {
     database.close();
     const reopened = new BillDatabase(path);
-    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(9);
+    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(13);
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'validation_issues'").get()?.name).toBe("validation_issues");
+    expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'extraction_invocations'").get()?.name).toBe("extraction_invocations");
     reopened.close();
     database = new BillDatabase(path);
   });
@@ -32,7 +34,135 @@ describe("migrations", () => {
     expect(await first.exited).toBe(0);
     expect(await second.exited).toBe(0);
     database = new BillDatabase(path);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(9);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(13);
+  });
+
+  test("upgrades a v9 database with existing extraction records without changing canonical data", () => {
+    database.close();
+    rmSync(path, { force: true });
+    const legacy = new SqliteDatabase(path, { create: true, strict: true });
+    legacy.exec(`PRAGMA foreign_keys = ON;
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE bills (id TEXT PRIMARY KEY);
+      CREATE TABLE jobs (id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id));
+      CREATE TABLE extractions (
+        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL UNIQUE REFERENCES bills(id), schema_version TEXT NOT NULL,
+        normalized_json TEXT, raw_provider_response TEXT, provider_model TEXT, prompt_schema_version TEXT,
+        requested_at TEXT, error_details TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT
+      );
+      CREATE TABLE extraction_attempts (
+        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), job_id TEXT NOT NULL REFERENCES jobs(id),
+        job_attempt INTEGER NOT NULL, provider_model TEXT, requested_at TEXT NOT NULL, completed_at TEXT NOT NULL,
+        outcome TEXT NOT NULL, raw_provider_response TEXT, error_details TEXT, created_at TEXT NOT NULL
+      );`);
+    const appliedAt = "2026-08-30T00:00:00.000Z";
+    for (let version = 1; version <= 9; version += 1) legacy.query("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, appliedAt);
+    legacy.query("INSERT INTO bills (id) VALUES (?)").run("legacy-bill");
+    legacy.query("INSERT INTO jobs (id, bill_id) VALUES (?, ?)").run("legacy-job", "legacy-bill");
+    legacy.query("INSERT INTO extractions (id, bill_id, schema_version, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run("legacy-extraction", "legacy-bill", "1", JSON.stringify({ schemaVersion: "1", vendorName: "Legacy" }), "legacy raw", "legacy-model", "1", appliedAt, appliedAt, null, appliedAt, appliedAt);
+    legacy.query("INSERT INTO extraction_attempts (id, bill_id, job_id, job_attempt, provider_model, requested_at, completed_at, outcome, raw_provider_response, error_details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run("legacy-attempt", "legacy-bill", "legacy-job", 1, "legacy-model", appliedAt, appliedAt, "succeeded", "legacy raw", null, appliedAt);
+    legacy.close();
+
+    database = new BillDatabase(path);
+    expect(database.getExtraction("legacy-bill")).toMatchObject({ normalized: { vendorName: "Legacy" }, selectedProvider: null, fallbackStatus: null });
+    expect(database.sqlite.query<{ provider: string }, [string]>("SELECT provider FROM extraction_attempts WHERE id = ?").get("legacy-attempt")?.provider).toBe("mistral");
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(13);
+  });
+});
+
+describe("dual-provider extraction provenance", () => {
+  test("begins only an identity-matched claimed invocation and reports duplicate creation", () => {
+    const bill = database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "identity-job" }]).bill;
+    const job = database.claimNextJob("worker", policy)!;
+    const request = { billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral" as const, idempotencyKey: job.idempotencyKey, requestedAt: new Date().toISOString() };
+    const first = database.beginExtractionInvocation(request);
+    if (!first) throw new Error("expected invocation");
+    expect(first.created).toBe(true);
+    const duplicate = database.beginExtractionInvocation(request);
+    expect(duplicate).toMatchObject({ created: false, invocation: { id: first.invocation.id } });
+    expect(database.beginExtractionInvocation({ ...request, billId: "other-bill" })).toBeNull();
+    expect(database.beginExtractionInvocation({ ...request, idempotencyKey: "other-key" })).toBeNull();
+    expect(database.beginExtractionInvocation({ ...request, jobAttempt: job.attempts + 1 })).toBeNull();
+    const archiveBill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "archive-message", attachmentIndex: 1 }, [{ type: "archive_to_drive", idempotencyKey: "archive-identity-job" }]).bill;
+    const archiveJob = database.claimNextJob("worker", policy, new Date(), ["archive_to_drive"]);
+    if (!archiveJob) throw new Error("expected archive claim");
+    expect(database.beginExtractionInvocation({ ...request, billId: archiveBill.id, jobId: archiveJob.id, leaseToken: archiveJob.leaseToken, jobAttempt: archiveJob.attempts, idempotencyKey: archiveJob.idempotencyKey })).toBeNull();
+  });
+
+  test("audits every provider invocation and retains resumable Azure operation state", () => {
+    const bill = database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "provenance-job" }]).bill;
+    const job = database.claimNextJob("worker", policy)!;
+    const requestedAt = "2026-08-30T00:00:00.000Z";
+    const mistral = database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral", idempotencyKey: job.idempotencyKey, providerModel: "mistral-model", promptSchemaVersion: "1", requestedAt });
+    const azure = database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", idempotencyKey: job.idempotencyKey, providerModel: "azure-model", promptSchemaVersion: "1", requestedAt });
+    if (!mistral || !azure) throw new Error("expected durable invocations");
+    expect(mistral.created).toBe(true); expect(azure.created).toBe(true);
+    expect(database.finishExtractionInvocation({ invocationId: mistral.invocation.id, jobId: job.id, leaseToken: job.leaseToken, outcome: "failed", completedAt: "2026-08-30T00:00:01.000Z", rawProviderResponse: null, errorDetails: "low confidence" })).toBe(true);
+    const operation = database.persistAzureExtractionOperation({ invocationId: azure.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, operationLocation: "https://azure.example/operations/1" });
+    expect(operation).toMatchObject({ invocationId: azure.invocation.id, state: "submitted" });
+    expect(database.listResumableAzureExtractionOperations()).toMatchObject([{ invocationId: azure.invocation.id, operationLocation: "https://azure.example/operations/1" }]);
+    expect(database.finishAzureExtractionOperation({ invocationId: azure.invocation.id, jobId: job.id, leaseToken: job.leaseToken, state: "succeeded", completedAt: "2026-08-30T00:00:02.000Z" })).toBe(true);
+    expect(database.persistAzureExtractionOperation({ invocationId: azure.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, operationLocation: "https://azure.example/operations/1", state: "submitted" })).toBeNull();
+    expect(database.getAzureExtractionOperation(azure.invocation.id)).toMatchObject({ state: "succeeded" });
+    expect(database.finishExtractionInvocation({ invocationId: azure.invocation.id, jobId: job.id, leaseToken: job.leaseToken, outcome: "succeeded", completedAt: "2026-08-30T00:00:02.000Z", rawProviderResponse: "azure response", errorDetails: null })).toBe(true);
+    expect(database.getExtractionInvocations(bill.id)).toMatchObject([{ provider: "mistral", outcome: "failed" }, { provider: "azure", outcome: "succeeded" }]);
+    const normalized = { schemaVersion: "1" as const, vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-30", currency: "USD", subtotal: 1, vat: 0, total: 1, description: null, fields: {} };
+    expect(database.persistCanonicalExtractionSuccess({ invocationId: azure.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral", idempotencyKey: job.idempotencyKey, normalized, rawProviderResponse: "azure response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt, completedAt: "2026-08-30T00:00:02.000Z" })).toBe(false);
+    expect(database.persistCanonicalExtractionSuccess({ invocationId: azure.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", idempotencyKey: job.idempotencyKey, normalized, rawProviderResponse: "azure response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt, completedAt: "2026-08-30T00:00:02.000Z" })).toBe(true);
+    expect(database.persistExtractionSuccess({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral", normalized: { ...normalized, vendorName: "Replacement" }, rawProviderResponse: "mistral response", providerModel: "mistral-model", promptSchemaVersion: "1", requestedAt, completedAt: "2026-08-30T00:00:03.000Z" })).toBe(false);
+    expect(database.getExtraction(bill.id)).toMatchObject({ selectedProvider: "azure", fallbackStatus: "succeeded", selectedInvocationId: azure.invocation.id, normalized: { vendorName: "Vendor" } });
+  });
+
+  test("persists Azure operation state only while its invocation is requested", () => {
+    const bill = database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "completed-invocation-job" }]).bill;
+    const job = database.claimNextJob("worker", policy)!;
+    const invocation = database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", idempotencyKey: job.idempotencyKey, requestedAt: new Date().toISOString() });
+    if (!invocation) throw new Error("expected invocation");
+    expect(database.finishExtractionInvocation({ invocationId: invocation.invocation.id, jobId: job.id, leaseToken: job.leaseToken, outcome: "failed", completedAt: new Date().toISOString(), rawProviderResponse: null, errorDetails: "failed" })).toBe(true);
+    expect(database.persistAzureExtractionOperation({ invocationId: invocation.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, operationLocation: "https://azure.example/operations/completed" })).toBeNull();
+    expect(database.getAzureExtractionOperation(invocation.invocation.id)).toBeNull();
+  });
+
+  test("a replacement attempt resumes a persisted Azure operation and selects its original invocation", () => {
+    const bill = database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "azure-resume-job" }]).bill;
+    const start = new Date();
+    const first = database.claimNextJob("first-worker", policy, start)!;
+    const begun = database.beginExtractionInvocation({ billId: bill.id, jobId: first.id, leaseToken: first.leaseToken, jobAttempt: first.attempts, provider: "azure", idempotencyKey: first.idempotencyKey, requestedAt: start.toISOString() });
+    if (!begun) throw new Error("expected Azure invocation");
+    expect(database.persistAzureExtractionOperation({ invocationId: begun.invocation.id, billId: bill.id, jobId: first.id, leaseToken: first.leaseToken, operationLocation: "https://azure.example/operations/resume" })).toMatchObject({ state: "submitted" });
+
+    const reapedAt = new Date(start.getTime() + policy.leaseMs);
+    expect(database.claimNextJob("second-worker", policy, reapedAt)).toBeNull();
+    const second = database.claimNextJob("second-worker", policy, new Date(reapedAt.getTime() + policy.retryBaseMs))!;
+    expect(second.attempts).toBe(2);
+    expect(database.listResumableAzureExtractionOperations()).toMatchObject([{ invocationId: begun.invocation.id, jobId: first.id, operationLocation: "https://azure.example/operations/resume" }]);
+
+    expect(database.finishAzureExtractionOperation({ invocationId: begun.invocation.id, jobId: second.id, leaseToken: second.leaseToken, state: "succeeded", completedAt: new Date().toISOString() })).toBe(true);
+    expect(database.finishExtractionInvocation({ invocationId: begun.invocation.id, jobId: second.id, leaseToken: second.leaseToken, outcome: "succeeded", completedAt: new Date().toISOString(), rawProviderResponse: "azure response", errorDetails: null })).toBe(true);
+    const normalized = { schemaVersion: "1" as const, vendorName: "Resumed vendor", invoiceNumber: null, invoiceDate: "2026-08-30", currency: "USD", subtotal: 1, vat: 0, total: 1, description: null, fields: {} };
+    expect(database.persistCanonicalExtractionSuccess({ invocationId: begun.invocation.id, billId: bill.id, jobId: second.id, leaseToken: second.leaseToken, jobAttempt: first.attempts, provider: "azure", idempotencyKey: first.idempotencyKey, normalized, rawProviderResponse: "azure response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt: start.toISOString(), completedAt: new Date().toISOString() })).toBe(true);
+    expect(database.getExtraction(bill.id)).toMatchObject({ selectedInvocationId: begun.invocation.id, selectedProvider: "azure", normalized: { vendorName: "Resumed vendor" } });
+    expect(database.getExtractionInvocations(bill.id)).toHaveLength(1);
+    expect(database.sqlite.query<{ count: number }, [string]>("SELECT count(*) AS count FROM azure_extraction_operations WHERE bill_id = ?").get(bill.id)?.count).toBe(1);
+  });
+
+  test("fences stale workers after a replacement claim from changing Azure operation or canonical provenance", () => {
+    const bill = database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "fenced-provenance-job" }]).bill;
+    const start = new Date();
+    const job = database.claimNextJob("worker", policy, start)!;
+    const invocation = database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", idempotencyKey: job.idempotencyKey, requestedAt: new Date().toISOString() });
+    if (!invocation) throw new Error("expected durable invocation");
+    const reapedAt = new Date(start.getTime() + policy.leaseMs);
+    expect(database.claimNextJob("replacement-worker", policy, reapedAt)).toBeNull();
+    const replacement = database.claimNextJob("replacement-worker", policy, new Date(reapedAt.getTime() + policy.retryBaseMs))!;
+    expect(replacement.leaseToken).not.toBe(job.leaseToken);
+    expect(database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral", idempotencyKey: job.idempotencyKey, requestedAt: new Date().toISOString() })).toBeNull();
+    expect(database.persistAzureExtractionOperation({ invocationId: invocation.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, operationLocation: "https://azure.example/operations/stale" })).toBeNull();
+    expect(database.finishExtractionInvocation({ invocationId: invocation.invocation.id, jobId: job.id, leaseToken: job.leaseToken, outcome: "failed", completedAt: new Date().toISOString(), rawProviderResponse: null, errorDetails: "stale" })).toBe(false);
+    expect(database.persistExtractionSuccess({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", normalized: { schemaVersion: "1", vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-30", currency: "USD", subtotal: 1, vat: 0, total: 1, description: null, fields: {} }, rawProviderResponse: "response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt: new Date().toISOString(), completedAt: new Date().toISOString() })).toBe(false);
+    expect(database.getExtraction(bill.id)).toBeNull();
   });
 });
 

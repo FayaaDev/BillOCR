@@ -221,7 +221,7 @@ function googleFailure(error: unknown): Error {
   return new GooglePermanentError(`Google permanent failure${permanent ? ` HTTP ${permanent}` : ""}`);
 }
 function confidenceSummary(extraction: ExtractedBill): string {
-  const values = Object.values(extraction.fields).map((field) => field.confidence).filter(Number.isFinite);
+  const values = Object.values(extraction.fields).map((field) => field.confidence).filter((value): value is number => value !== null && Number.isFinite(value));
   if (!values.length) return "unknown";
   return `${(values.reduce((sum, value) => sum + value, 0) / values.length * 100).toFixed(0)}%`;
 }
