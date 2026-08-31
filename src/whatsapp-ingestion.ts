@@ -12,7 +12,7 @@ import { IMAGE_PREPROCESSING_VERSION } from "./image-preprocessing";
 export type AttachmentKind = "image" | "document";
 export interface IncomingAttachment { kind: AttachmentKind; mimeType: string | null | undefined; filename?: string | null; caption?: string | null; download(): Promise<Uint8Array | AsyncIterable<Uint8Array>> | AsyncIterable<Uint8Array>; }
 export interface IncomingWhatsAppMessage { id: string | null | undefined; groupId: string | null | undefined; senderId: string | null | undefined; timestamp: Date | string | number | null | undefined; caption?: string | null; attachments?: IncomingAttachment[] | null; }
-export interface WhatsAppIngestionOptions { groupId: string; originalsDir: string; database: BillDatabase; logger: Logger; extractionInputVersion?: "original" | typeof IMAGE_PREPROCESSING_VERSION; maxAttachmentBytes?: number; beforeCommit?: () => Promise<void>; beforeStagingPublish?: () => Promise<void>; afterOriginalPublished?: () => Promise<void>; }
+export interface WhatsAppIngestionOptions { groupId: string | null; originalsDir: string; database: BillDatabase; logger: Logger; extractionInputVersion?: "original" | typeof IMAGE_PREPROCESSING_VERSION; maxAttachmentBytes?: number; beforeCommit?: () => Promise<void>; beforeStagingPublish?: () => Promise<void>; afterOriginalPublished?: () => Promise<void>; }
 export interface IngestionResult { bills: Bill[]; }
 
 type StagedAttachment = CreateBillInput & { version: 1; };

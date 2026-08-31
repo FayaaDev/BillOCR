@@ -13,8 +13,8 @@ export interface AppConfig {
   dataDir: string;
   databasePath: string;
   logLevel: "debug" | "info" | "warn" | "error";
-  whatsapp: { enabled: boolean; groupId: string; authPath: string; originalsDir: string; maxAttachmentBytes: number };
-  mistral: { apiKey: string; model: string; maxResponseBytes: number; requestTimeoutMs: number };
+  whatsapp: { enabled: boolean; groupId: string | null; authPath: string; originalsDir: string; maxAttachmentBytes: number };
+  mistral: { apiKey: string | null; model: string | null; maxResponseBytes: number; requestTimeoutMs: number };
   azure: AzureConfig;
   imagePreprocessing: { enabled: boolean; timeoutMs: number };
   google: GoogleConfig;
@@ -67,14 +67,17 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
   if (!levels.has(logLevel)) throw new Error("APP_LOG_LEVEL must be debug, info, warn, or error");
   const retryBaseMs = integer(env, "JOB_RETRY_BASE_MS", 1_000, 1);
   const retryMaxMs = integer(env, "JOB_RETRY_MAX_MS", 300_000, retryBaseMs);
-  return {
+  const config: AppConfig = {
     host: env.APP_HOST ?? "127.0.0.1",
     port: integer(env, "APP_PORT", 3_000, 1),
     dataDir,
     databasePath: resolve(env.APP_DATABASE_PATH ?? `${dataDir}/bill-ledger.sqlite`),
     logLevel: logLevel as AppConfig["logLevel"],
-    whatsapp: { enabled: boolean(env, "WHATSAPP_ENABLED", true), groupId: required(env, "WHATSAPP_GROUP_ID"), authPath: resolve(required(env, "WHATSAPP_AUTH_PATH")), originalsDir: resolve(env.WHATSAPP_ORIGINALS_DIR ?? `${dataDir}/originals`), maxAttachmentBytes: integer(env, "MAX_ATTACHMENT_BYTES", 20 * 1024 * 1024, 1) },
-    mistral: { apiKey: required(env, "MISTRAL_API_KEY"), model: required(env, "MISTRAL_MODEL"), maxResponseBytes: integer(env, "MISTRAL_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1), requestTimeoutMs: integer(env, "MISTRAL_REQUEST_TIMEOUT_MS", 60_000, 1) },
+    whatsapp: { enabled: boolean(env, "WHATSAPP_ENABLED", true), groupId: env.WHATSAPP_GROUP_ID?.trim() || null, authPath: resolve(required(env, "WHATSAPP_AUTH_PATH")), originalsDir: resolve(env.WHATSAPP_ORIGINALS_DIR ?? `${dataDir}/originals`), maxAttachmentBytes: integer(env, "MAX_ATTACHMENT_BYTES", 20 * 1024 * 1024, 1) },
+    mistral: (() => {
+      const enabled = boolean(env, "MISTRAL_ENABLED", true);
+      return { apiKey: enabled ? required(env, "MISTRAL_API_KEY") : null, model: enabled ? required(env, "MISTRAL_MODEL") : null, maxResponseBytes: integer(env, "MISTRAL_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1), requestTimeoutMs: integer(env, "MISTRAL_REQUEST_TIMEOUT_MS", 60_000, 1) };
+    })(),
     azure: (() => {
       const enabled = boolean(env, "AZURE_ENABLED", true);
       const maxResponseBytes = integer(env, "AZURE_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1);
@@ -97,4 +100,6 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
     validation: loadValidationConfig(env),
     jobs: { maxAttempts: integer(env, "JOB_MAX_ATTEMPTS", 5, 1), retryBaseMs, retryMaxMs, leaseMs: integer(env, "JOB_LEASE_MS", 60_000, 1) },
   };
+  if (config.mistral.apiKey === null && !config.azure.enabled) throw new Error("At least one extraction provider must be enabled");
+  return config;
 }

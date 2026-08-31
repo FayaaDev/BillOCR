@@ -6,7 +6,7 @@ SQLite is canonical. WhatsApp, Mistral, Azure Document Intelligence, Google Driv
 
 Install Bun 1.2+, then run `bun install --frozen-lockfile`. Copy `.env.example` to `.env`, create `data/` and `secrets/`, and set strong unique `REVIEW_USERNAME`/`REVIEW_PASSWORD` values. Run migrations with `bun run migrate`, then start with `bun run start`.
 
-Set `WHATSAPP_GROUP_ID` to the target group JID. On first start, scan the locally rendered pairing QR with the dedicated account:
+Set `WHATSAPP_GROUP_ID` to the target group JID. Leave it unset to keep the account connected while ignoring messages from every group. On first start, scan the locally rendered pairing QR with the dedicated account:
 
 ```sh
 bun run whatsapp:qr
@@ -16,7 +16,7 @@ The service writes the current QR token only to `${WHATSAPP_AUTH_PATH}/pairing-q
 
 For handwritten bills, send JPEG, PNG, or WebP images as WhatsApp documents/files when possible to avoid WhatsApp image recompression. Frame the bill clearly and minimize glare.
 
-Set `MISTRAL_API_KEY` and `MISTRAL_MODEL`. Azure fallback is enabled by default: set `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` to the HTTPS origin of the Document Intelligence resource and set `AZURE_DOCUMENT_INTELLIGENCE_API_KEY` privately. It submits the same verified input bytes only when Mistral lacks evidence for `vendorName`, `invoiceDate`, or `total`, or that evidence is below `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default `0.80`). Set `AZURE_ENABLED=false` only for offline/local environments where the fallback is intentionally unavailable; a low-confidence result then remains in the review queue rather than being approved.
+Set `MISTRAL_ENABLED=false` to use Azure Document Intelligence as the only extraction provider; Mistral credentials are not required in this mode. Set `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` to the HTTPS origin of the Document Intelligence resource and set `AZURE_DOCUMENT_INTELLIGENCE_API_KEY` privately. When Mistral is enabled, Azure remains the fallback for missing or low-confidence `vendorName`, `invoiceDate`, or `total` evidence according to `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default `0.80`). At least one extraction provider must be enabled.
 
 Google projections use exactly one `GOOGLE_AUTH_MODE`:
 

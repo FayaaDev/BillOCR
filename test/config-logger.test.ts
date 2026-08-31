@@ -14,6 +14,12 @@ test("configuration allows WhatsApp to be disabled for test environments", () =>
   expect(loadConfig({ ...validEnvironment(), WHATSAPP_ENABLED: "false" }).whatsapp.enabled).toBe(false);
 });
 
+test("configuration permits an active WhatsApp connection without an ingestion group", () => {
+  const environment: Record<string, string> = { ...validEnvironment() };
+  delete environment.WHATSAPP_GROUP_ID;
+  expect(loadConfig(environment).whatsapp).toMatchObject({ enabled: true, groupId: null });
+});
+
 test("image preprocessing is disabled by default and validates its timeout", () => {
   expect(loadConfig(validEnvironment()).imagePreprocessing).toEqual({ enabled: false, timeoutMs: 8_000 });
   expect(loadConfig({ ...validEnvironment(), IMAGE_PREPROCESSING_ENABLED: "true", IMAGE_PREPROCESSING_TIMEOUT_MS: "9" }).imagePreprocessing).toEqual({ enabled: true, timeoutMs: 9 });
@@ -66,6 +72,14 @@ test("Azure fallback validates credentials without exposing them and defaults it
     expect(String(error)).not.toContain(secret);
   }
   expect(() => loadConfig({ ...validEnvironment(), OCR_FALLBACK_CONFIDENCE_THRESHOLD: "1.01" })).toThrow("OCR_FALLBACK_CONFIDENCE_THRESHOLD");
+});
+
+test("Azure-only mode does not require Mistral credentials", () => {
+  const environment = { ...validEnvironment(), MISTRAL_ENABLED: "false", AZURE_ENABLED: "true", AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://azure.example.test", AZURE_DOCUMENT_INTELLIGENCE_API_KEY: "azure-secret" };
+  delete (environment as Partial<typeof environment>).MISTRAL_API_KEY;
+  delete (environment as Partial<typeof environment>).MISTRAL_MODEL;
+  expect(loadConfig(environment).mistral).toMatchObject({ apiKey: null, model: null });
+  expect(() => loadConfig({ ...environment, AZURE_ENABLED: "false" })).toThrow("At least one extraction provider must be enabled");
 });
 
 test("structured logger redacts secret-valued fields", () => {

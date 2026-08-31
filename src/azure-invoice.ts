@@ -263,17 +263,39 @@ function typedMoney(field: Record<string, unknown> | null): { amount: number | n
 function typedAmount(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value !== "string") return null;
-  const normalized = value.replace(/\u066b/g, ".").replace(/[\u0660-\u0669\u06f0-\u06f9]/g, (digit) => String(digit.charCodeAt(0) % 16));
-  if (!/^[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(normalized)) return null;
-  const amount = Number(normalized);
-  return Number.isFinite(amount) ? amount : null;
+  return parseLocalizedAmount(value, { allowSign: true, allowExponent: true, allowCurrencyCode: false });
 }
 function localizedContentAmount(value: unknown): number | null {
   if (typeof value !== "string") return null;
-  const normalized = value.replace(/\u066b/g, ".").replace(/[\u0660-\u0669\u06f0-\u06f9]/g, (digit) => String(digit.charCodeAt(0) % 16));
-  if (!/^\d+(?:\.\d+)?$/.test(normalized)) return null;
-  const amount = Number(normalized);
+  return parseLocalizedAmount(value, { allowSign: false, allowExponent: false, allowCurrencyCode: true });
+}
+function parseLocalizedAmount(value: string, options: { allowSign: boolean; allowExponent: boolean; allowCurrencyCode: boolean }): number | null {
+  let normalized = value.replace(/\u066b/g, ".").replace(/\u066c/g, ",").replace(/[\u0660-\u0669\u06f0-\u06f9]/g, (digit) => String(digit.charCodeAt(0) % 16));
+  if (options.allowCurrencyCode) normalized = normalized.replace(/\s+[A-Za-z]{3}$/, "");
+  const match = normalized.match(new RegExp(`^(${options.allowSign ? "[+-]?" : ""})(\\d[\\d.,]*?)${options.allowExponent ? "([eE][+-]?\\d+)?" : ""}$`));
+  if (!match) return null;
+  const sign = match[1]!;
+  const exponent = match[3] ?? "";
+  const digits = normalizeSeparators(match[2]!);
+  if (digits === null) return null;
+  const amount = Number(`${sign}${digits}${exponent}`);
   return Number.isFinite(amount) ? amount : null;
+}
+function normalizeSeparators(value: string): string | null {
+  const dot = value.lastIndexOf(".");
+  const comma = value.lastIndexOf(",");
+  if (dot < 0 && comma < 0) return value;
+  const decimal = dot >= 0 && comma >= 0 ? Math.max(dot, comma) : -1;
+  if (decimal >= 0) {
+    const integer = value.slice(0, decimal).replace(/[.,]/g, "");
+    const fraction = value.slice(decimal + 1);
+    return integer && /^\d+$/.test(integer) && /^\d+$/.test(fraction) ? `${integer}.${fraction}` : null;
+  }
+  const separator = dot >= 0 ? "." : ",";
+  const parts = value.split(separator);
+  if (parts.some((part) => !/^\d+$/.test(part))) return null;
+  if (parts.length > 2 || parts[1]!.length === 3) return parts.slice(1).every((part) => part.length === 3) ? parts.join("") : null;
+  return `${parts[0]}.${parts[1]}`;
 }
 function getField(fields: Record<string, unknown>, key: string): Record<string, unknown> | null {
   const value = fields[key];

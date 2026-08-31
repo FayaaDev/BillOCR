@@ -14,6 +14,9 @@ const native: NativeOpen | null = platform && dlopen(platform.library, {
   close: { args: [FFIType.i32], returns: FFIType.i32 },
 }).symbols;
 
+// Bun 1.2.23 requires explicit null-terminated bytes for FFI cstring arguments.
+const cstring = (value: string): string => Buffer.from(`${value}\0`) as unknown as string;
+
 function requireNative(): { native: NativeOpen; platform: NonNullable<typeof platform> } {
   if (!native || !platform) throw new Error("descriptor-relative original reads are unsupported on this platform");
   return { native, platform };
@@ -22,12 +25,12 @@ function requireNative(): { native: NativeOpen; platform: NonNullable<typeof pla
 /** Walks from trusted /; every configured-root component is opened descriptor-relatively. */
 export async function openOriginalRoot(components: readonly string[], beforeOpenComponent?: BeforeOpenRootComponent): Promise<number> {
   const { native, platform } = requireNative();
-  let current = native.openat(platform.atFdcwd, "/", platform.readOnly | platform.directory | platform.noFollow | platform.closeOnExec, 0);
+  let current = native.openat(platform.atFdcwd, cstring("/"), platform.readOnly | platform.directory | platform.noFollow | platform.closeOnExec, 0);
   if (current < 0) return -1;
   try {
     for (const component of components) {
       await beforeOpenComponent?.(component);
-      const next = native.openat(current, component, platform.readOnly | platform.directory | platform.noFollow | platform.closeOnExec, 0);
+      const next = native.openat(current, cstring(component), platform.readOnly | platform.directory | platform.noFollow | platform.closeOnExec, 0);
       if (next < 0) { native.close(current); return -1; }
       native.close(current);
       current = next;
@@ -42,7 +45,7 @@ export async function openOriginalRoot(components: readonly string[], beforeOpen
 /** Opens a single direct child of an already-opened configured directory. */
 export function openOriginalChild(rootFd: number, basename: string): number {
   const { native, platform } = requireNative();
-  return native.openat(rootFd, basename, platform.readOnly | platform.noFollow | platform.closeOnExec, 0);
+  return native.openat(rootFd, cstring(basename), platform.readOnly | platform.noFollow | platform.closeOnExec, 0);
 }
 
 export function closeOriginalFd(fd: number): void {

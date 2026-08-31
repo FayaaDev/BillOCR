@@ -1,6 +1,6 @@
 export type AdminOverview = {
   metrics: { received: number; approved: number; failed: number; retryableJobs: number; permanentFailureJobs: number };
-  whatsapp: { state: "connecting" | "connected" | "awaiting_pairing" | "unavailable"; canPair: boolean; configuredGroupId: string; groups: Array<{ id: string; name: string | null }>; csrf: string };
+  whatsapp: { state: "connecting" | "connected" | "awaiting_pairing" | "unavailable"; canPair: boolean; configuredGroupId: string | null; groups: Array<{ id: string; name: string | null }>; csrf: string };
 };
 
 const count = (value: unknown): number | null => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -17,8 +17,8 @@ export function parseAdminOverview(value: unknown): AdminOverview | null {
   const channel = whatsapp as Record<string, unknown>;
   const received = count(metric.received); const approved = count(metric.approved); const failed = count(metric.failed); const retryableJobs = count(metric.retryableJobs); const permanentFailureJobs = count(metric.permanentFailureJobs);
   const state = channel.state;
-  const configuredGroupId = text(channel.configuredGroupId); const csrf = text(channel.csrf);
-  if (received === null || approved === null || failed === null || retryableJobs === null || permanentFailureJobs === null || (state !== "connecting" && state !== "connected" && state !== "awaiting_pairing" && state !== "unavailable") || typeof channel.canPair !== "boolean" || !configuredGroupId || !csrf || !Array.isArray(channel.groups)) return null;
+  const configuredGroupId = channel.configuredGroupId === null ? null : text(channel.configuredGroupId); const csrf = text(channel.csrf);
+  if (received === null || approved === null || failed === null || retryableJobs === null || permanentFailureJobs === null || (state !== "connecting" && state !== "connected" && state !== "awaiting_pairing" && state !== "unavailable") || typeof channel.canPair !== "boolean" || (channel.configuredGroupId !== null && !configuredGroupId) || !csrf || !Array.isArray(channel.groups)) return null;
   const groups: AdminOverview["whatsapp"]["groups"] = [];
   for (const group of channel.groups) {
     if (!group || typeof group !== "object") return null;

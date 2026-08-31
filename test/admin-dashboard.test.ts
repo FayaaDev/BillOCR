@@ -7,6 +7,7 @@ const overview = { metrics: { received: 12, approved: 9, failed: 1, retryableJob
 
 test("admin dashboard accepts the bounded safe overview contract", () => {
   expect(parseAdminOverview(overview)).toEqual(overview);
+  expect(parseAdminOverview({ ...overview, whatsapp: { ...overview.whatsapp, configuredGroupId: null } })?.whatsapp.configuredGroupId).toBeNull();
 });
 
 test("admin dashboard rejects secret-like or malformed overview values", () => {
@@ -14,6 +15,7 @@ test("admin dashboard rejects secret-like or malformed overview values", () => {
   expect(parseAdminOverview({ ...overview, metrics: { ...overview.metrics, received: -1 } })).toBeNull();
   expect(parseAdminOverview({ ...overview, whatsapp: { ...overview.whatsapp, state: "token" } })).toBeNull();
   expect(parseAdminOverview({ ...overview, whatsapp: { ...overview.whatsapp, canPair: "yes" } })).toBeNull();
+  expect(parseAdminOverview({ ...overview, whatsapp: { ...overview.whatsapp, configuredGroupId: "" } })).toBeNull();
   expect(parseAdminOverview({ ...overview, whatsapp: { ...overview.whatsapp, groups: [{ id: "", name: null }] } })).toBeNull();
 });
 

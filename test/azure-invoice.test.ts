@@ -80,7 +80,7 @@ test("keeps omitted and unsupported typed values null without using OCR prose", 
 });
 
 test("normalizes every Arabic-Indic and Persian digit in typed-money strings", async () => {
-  for (const [input, expected] of [["٠١٢٣٤٥٦٧٨٩", 123456789], ["۰۱۲۳۴۵۶۷۸۹", 123456789], ["٧٠٫٥", 70.5], ["۷۰٫۵", 70.5]] as const) {
+  for (const [input, expected] of [["٠١٢٣٤٥٦٧٨٩", 123456789], ["۰۱۲۳۴۵۶۷۸۹", 123456789], ["٧٠٫٥", 70.5], ["۷۰٫۵", 70.5], ["١٢.٥٠٠,٠٠", 12500]] as const) {
     expect(await extractTypedTotal(input)).toBe(expected);
   }
 });
@@ -90,8 +90,8 @@ test("keeps signed and exponent typed-money strings supported", async () => {
   expect(await extractTypedTotal("٧e1")).toBe(70);
 });
 
-test("rejects non-canonical typed-money strings", async () => {
-  for (const input of [" ٧٠", "٧٠ ", "٧٠٬٥", "70,5", "٧٠x", "٧٠٫", "١e٣٠٩"]) {
+test("rejects malformed typed-money strings", async () => {
+  for (const input of [" ٧٠", "٧٠ ", "70,,5", "70.5.4", "٧٠x", "٧٠٫", "١e٣٠٩"]) {
     expect(await extractTypedTotal(input)).toBeNull();
   }
 });
@@ -125,6 +125,21 @@ test("accepts a localized decimal currency content fallback", async () => {
   expect((await provider.extract({ bytes: new Uint8Array(), mimeType: "image/png" })).bill.total).toBe(70.5);
 });
 
+test("normalizes grouped localized currency content when Azure omits valueCurrency", async () => {
+  for (const [content, expected] of [["١٢.٥٠٠,٠٠ SAR", 12500], ["12,500.00 SAR", 12500], ["١٢٬٥٠٠٫٠٠", 12500]] as const) {
+    const provider = new AzureDocumentIntelligenceInvoiceProvider({
+      endpoint,
+      apiKey: "secret",
+      pollIntervalMs: 0,
+      fetchImpl: async (_input, init) => new Request(_input, init).method === "POST"
+        ? new Response(null, { status: 202, headers: { "operation-location": `${endpoint}/result` } })
+        : Response.json(completed({ InvoiceTotal: { type: "currency", content } })),
+    });
+
+    expect((await provider.extract({ bytes: new Uint8Array(), mimeType: "image/png" })).bill.total).toBe(expected);
+  }
+});
+
 test("prefers a valid typed currency amount over its content fallback", async () => {
   const provider = new AzureDocumentIntelligenceInvoiceProvider({
     endpoint,
@@ -155,11 +170,11 @@ test("does not use content when Azure supplied an invalid typed amount", async (
 
 test("rejects malformed, non-string, or non-currency source content as money", async () => {
   for (const field of [
-    { type: "currency", content: "٧٠٬٥" },
     { type: "currency", content: "٧٠ ريال" },
     { type: "currency", content: " ٧٠" },
     { type: "currency", content: "+٧٠" },
     { type: "currency", content: "٧٠e1" },
+    { type: "currency", content: "70,,5" },
     { type: "currency", content: 70 },
     { type: "string", content: "٧٠" },
   ]) {

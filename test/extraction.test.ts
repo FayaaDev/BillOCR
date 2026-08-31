@@ -400,6 +400,21 @@ test("skips Azure when all required Mistral native evidence meets the fallback t
   expect(database.getExtractionInvocations(bill.bill.id)).toMatchObject([{ provider: "mistral", outcome: "succeeded" }]);
 });
 
+test("Azure-only mode invokes Azure directly without creating a Mistral invocation", async () => {
+  const bill = enqueue();
+  let submissions = 0;
+  let polls = 0;
+  const azure: AzureInvoiceProvider = {
+    submit: async () => { submissions += 1; return { operationLocation: "https://azure.example/operations/direct" }; },
+    poll: async () => { polls += 1; return { bill: parseExtractedBill(valid({ vendorName: "Azure only" })), rawResponse: "azure", model: "prebuilt-invoice" }; },
+  };
+  const handler = createExtractJobHandler(database, null, policy.maxAttempts, () => undefined, originals(), undefined, azure);
+  await new JobWorker(database, { extract: handler }, policy, "azure-only", createLogger("error")).runOnce();
+  expect({ submissions, polls }).toEqual({ submissions: 1, polls: 1 });
+  expect(database.getExtraction(bill.bill.id)).toMatchObject({ selectedProvider: "azure", fallbackStatus: "not_needed", normalized: { vendorName: "Azure only" } });
+  expect(database.getExtractionInvocations(bill.bill.id)).toMatchObject([{ provider: "azure", outcome: "succeeded" }]);
+});
+
 test("Azure fallback exhaustion records a blocking validation issue and preserves sticky review", async () => {
   const bill = enqueue();
   const validate = createExtractionValidationCallback(database, { currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));

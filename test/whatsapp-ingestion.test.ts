@@ -111,6 +111,12 @@ describe("WhatsApp ingestion", () => {
     expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(0);
   });
 
+  test("ignores every group when no ingestion group is configured", async () => {
+    const unconfigured = new WhatsAppIngestionService({ groupId: null, originalsDir: join(directory, "unconfigured-originals"), database, logger: silentLogger });
+    expect((await unconfigured.ingest(message([attachment("image", "image/png", new Uint8Array([1]))]))).bills).toEqual([]);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(0);
+  });
+
   test("returns the existing bill without another download or jobs on redelivery", async () => {
     let downloads = 0;
     const image = { ...attachment("image", "image/png", new Uint8Array([7]), "once.png"), download: async () => { downloads += 1; return new Uint8Array([7]); } };

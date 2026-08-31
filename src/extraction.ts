@@ -279,7 +279,7 @@ function parsePersistedMistralInvocation(rawProviderResponse: string | null): { 
   }
 }
 
-export function createExtractJobHandler(database: BillDatabase, provider: MistralOcrProvider, maxAttempts: number, onExtracted: (billId: string) => Promise<void> | void = () => undefined, originals: { root: string; maxBytes: number }, preprocessor: ImagePreprocessor = noImagePreprocessor, azureProvider?: AzureInvoiceProvider, fallbackConfidenceThreshold = 0.8): JobHandler {
+export function createExtractJobHandler(database: BillDatabase, provider: MistralOcrProvider | null, maxAttempts: number, onExtracted: (billId: string) => Promise<void> | void = () => undefined, originals: { root: string; maxBytes: number }, preprocessor: ImagePreprocessor = noImagePreprocessor, azureProvider?: AzureInvoiceProvider, fallbackConfidenceThreshold = 0.8): JobHandler {
   if (!Number.isFinite(fallbackConfidenceThreshold) || fallbackConfidenceThreshold < 0 || fallbackConfidenceThreshold > 1) throw new Error("fallbackConfidenceThreshold must be between 0 and 1");
   return async (job: ClaimedJob, context: JobHandlerContext): Promise<void> => {
     const bill = database.getBill(job.billId);
@@ -301,8 +301,9 @@ export function createExtractJobHandler(database: BillDatabase, provider: Mistra
     let mistralInvocationId: string | null = null;
     let azureInvocationId: string | null = null;
     let azureOperationPersisted = false;
+    const azureOnly = provider === null;
     const completedAt = () => new Date().toISOString();
-    const failure = (error: unknown, status?: "needs_review" | "failed") => database.persistExtractionFailure({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, rawProviderResponse, providerModel, promptSchemaVersion: EXTRACTION_PROMPT_VERSION, requestedAt, completedAt: completedAt(), errorDetails: sanitizeErrorDetails(error instanceof Error ? error.message : String(error)), status });
+    const failure = (error: unknown, status?: "needs_review" | "failed") => database.persistExtractionFailure({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, rawProviderResponse, providerModel, promptSchemaVersion: azureOnly ? AZURE_INVOICE_PROMPT_VERSION : EXTRACTION_PROMPT_VERSION, requestedAt, completedAt: completedAt(), errorDetails: sanitizeErrorDetails(error instanceof Error ? error.message : String(error)), status, provider: azureOnly ? "azure" : undefined });
     try {
       context.assertLease();
       let originalBytes: Uint8Array;
@@ -327,9 +328,9 @@ export function createExtractJobHandler(database: BillDatabase, provider: Mistra
       }
       const inputHash = createHash("sha256").update(bytes).digest("hex");
       const mistralKey = `${context.idempotencyKey}:mistral:input:${inputHash}`;
-      let mistral = database.getExtraction(bill.id)?.normalized;
+      let mistral = database.getExtraction(bill.id)?.normalized ?? null;
       let mistralInvocationAttempt = job.attempts;
-      if (!mistral) {
+      if (provider && !mistral) {
         const completedInvocation = database.getExtractionInvocations(bill.id).find((item) => item.provider === "mistral" && item.idempotencyKey === mistralKey && item.outcome === "succeeded");
         const invocation = completedInvocation ? { invocation: completedInvocation, created: false } : database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral", idempotencyKey: mistralKey, jobIdempotencyKey: context.idempotencyKey, promptSchemaVersion: EXTRACTION_PROMPT_VERSION, requestedAt });
         if (!invocation) throw new RetryableExtractionError("Extraction invocation lost job lease");
@@ -353,11 +354,10 @@ export function createExtractJobHandler(database: BillDatabase, provider: Mistra
         const fallbackNeeded = requiresAzureFallback(mistral, fallbackConfidenceThreshold);
         if (!database.persistCanonicalExtractionSuccess({ invocationId: invocation.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: mistralInvocationAttempt, provider: "mistral", idempotencyKey: mistralKey, normalized: mistral, rawProviderResponse: rawProviderResponse!, providerModel: providerModel!, promptSchemaVersion: EXTRACTION_PROMPT_VERSION, requestedAt, completedAt: completedAt(), fallbackStatus: fallbackNeeded ? "pending" : "not_needed" })) throw new RetryableExtractionError("Extraction persistence lost job lease");
       }
-      if (!requiresAzureFallback(mistral, fallbackConfidenceThreshold)) {
-        await onExtracted(bill.id);
-        return;
-      }
+      if (provider && mistral && !requiresAzureFallback(mistral, fallbackConfidenceThreshold)) { await onExtracted(bill.id); return; }
+      if (provider && !mistral) throw new RetryableExtractionError("Mistral extraction did not produce a result");
       if (!azureProvider) {
+        if (azureOnly) throw new PermanentJobError("Azure extraction provider is unavailable");
         if (!database.persistAzureFallbackFailure({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, errorDetails: "Azure fallback provider is unavailable" })) throw new RetryableExtractionError("Azure fallback persistence lost job lease");
         await onExtracted(bill.id);
         return;
@@ -417,12 +417,12 @@ export function createExtractJobHandler(database: BillDatabase, provider: Mistra
       }
       if (azureInvocationOutcome === "requested" && !database.finishExtractionInvocation({ invocationId, jobId: job.id, leaseToken: job.leaseToken, outcome: "succeeded", completedAt: completedAt(), rawProviderResponse, errorDetails: null })) throw new RetryableExtractionError("Azure invocation persistence lost job lease");
       if (azureInvocationOutcome === "failed") throw new RetryableExtractionError("Azure operation has a failed invocation");
-      if (!database.persistCanonicalExtractionSuccess({ invocationId, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: invocationAttempt, provider: "azure", idempotencyKey: azureKey, normalized: azureNormalized, rawProviderResponse: rawProviderResponse!, providerModel: providerModel!, promptSchemaVersion: AZURE_INVOICE_PROMPT_VERSION, requestedAt: azureRequestedAt, completedAt: completedAt(), fallbackStatus: "succeeded" })) throw new RetryableExtractionError("Azure canonical persistence lost job lease");
+      if (!database.persistCanonicalExtractionSuccess({ invocationId, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: invocationAttempt, provider: "azure", idempotencyKey: azureKey, normalized: azureNormalized, rawProviderResponse: rawProviderResponse!, providerModel: providerModel!, promptSchemaVersion: AZURE_INVOICE_PROMPT_VERSION, requestedAt: azureRequestedAt, completedAt: completedAt(), fallbackStatus: azureOnly ? "not_needed" : "succeeded" })) throw new RetryableExtractionError("Azure canonical persistence lost job lease");
       await onExtracted(bill.id);
     } catch (error) {
       const persisted = database.getExtraction(bill.id);
       const azureFallbackPending = persisted?.fallbackStatus === "pending" && persisted.selectedProvider === "mistral" && persisted.normalized !== null;
-      const terminalAzureFailure = azureFallbackPending && (error instanceof PermanentJobError || job.attempts >= maxAttempts);
+      const terminalAzureFailure = (azureOnly || azureFallbackPending) && (error instanceof PermanentJobError || job.attempts >= maxAttempts);
       if (mistralInvocationId) database.finishExtractionInvocation({ invocationId: mistralInvocationId, jobId: job.id, leaseToken: job.leaseToken, outcome: "failed", completedAt: completedAt(), rawProviderResponse, errorDetails: sanitizeErrorDetails(error instanceof Error ? error.message : String(error)) });
       if (terminalAzureFailure) {
         const errorDetails = sanitizeErrorDetails(error instanceof Error ? error.message : String(error));
@@ -430,8 +430,11 @@ export function createExtractJobHandler(database: BillDatabase, provider: Mistra
           if (azureOperationPersisted) database.finishAzureExtractionOperation({ invocationId: azureInvocationId, jobId: job.id, leaseToken: job.leaseToken, state: "failed", completedAt: completedAt(), lastError: errorDetails });
           database.finishExtractionInvocation({ invocationId: azureInvocationId, jobId: job.id, leaseToken: job.leaseToken, outcome: "failed", completedAt: completedAt(), rawProviderResponse, errorDetails });
         }
-        database.persistAzureFallbackFailure({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, errorDetails });
-        await onExtracted(bill.id);
+        if (azureOnly) failure(error, error instanceof PermanentJobError ? "failed" : "needs_review");
+        else {
+          database.persistAzureFallbackFailure({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, errorDetails });
+          await onExtracted(bill.id);
+        }
       } else if (error instanceof MalformedStructuredOutputError) {
         rawProviderResponse = error.rawProviderResponse;
         providerModel = error.providerModel;
