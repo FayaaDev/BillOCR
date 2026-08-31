@@ -72,6 +72,39 @@ describe("migrations", () => {
   });
 });
 
+describe("dashboard metrics", () => {
+  test("returns zero metrics for an empty ledger", () => {
+    expect(database.getDashboardMetrics()).toEqual({
+      receivedBills: 0,
+      approvedBills: 0,
+      failedBills: 0,
+      retryableJobs: 0,
+      permanentFailureJobs: 0,
+    });
+  });
+
+  test("counts canonical bill and background-job outcomes independently", () => {
+    const received = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-received" }, [{ type: "extract", idempotencyKey: "metrics-received-job" }]).bill;
+    const approved = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-approved", attachmentIndex: 1 }, [{ type: "extract", idempotencyKey: "metrics-approved-job" }]).bill;
+    const failed = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-failed", attachmentIndex: 2 }, [{ type: "extract", idempotencyKey: "metrics-failed-job" }]).bill;
+    const needsReview = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-review", attachmentIndex: 3 }, [{ type: "extract", idempotencyKey: "metrics-review-job" }]).bill;
+
+    database.sqlite.query("UPDATE bills SET status = 'approved' WHERE id = ?").run(approved.id);
+    database.sqlite.query("UPDATE bills SET status = 'failed' WHERE id = ?").run(failed.id);
+    database.sqlite.query("UPDATE bills SET status = 'needs_review' WHERE id = ?").run(needsReview.id);
+    database.sqlite.query("UPDATE jobs SET state = 'retryable_failure' WHERE bill_id = ?").run(received.id);
+    database.sqlite.query("UPDATE jobs SET state = 'permanent_failure' WHERE bill_id = ?").run(approved.id);
+
+    expect(database.getDashboardMetrics()).toEqual({
+      receivedBills: 4,
+      approvedBills: 1,
+      failedBills: 1,
+      retryableJobs: 1,
+      permanentFailureJobs: 1,
+    });
+  });
+});
+
 describe("dual-provider extraction provenance", () => {
   test("begins only an identity-matched claimed invocation and reports duplicate creation", () => {
     const bill = database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "identity-job" }]).bill;

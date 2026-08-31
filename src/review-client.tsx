@@ -8,6 +8,7 @@ import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMe
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { reviewDataTableFeatures } from "./review-data-table-features";
+import "./review-original-preview";
 
 type ReviewBill = { id: string; status: string; originalFilename: string | null; receivedAt: string; updatedAt: string };
 const statusLabels: Record<string, string> = { needs_review: "تحتاج إلى مراجعة", approved: "معتمدة", failed: "فشلت", pending: "قيد الانتظار" };

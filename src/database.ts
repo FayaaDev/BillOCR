@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import type { AzureExtractionOperation, BeginExtractionInvocationResult, Bill, ClaimedJob, CreateBillInput, EffectiveBillData, ExtractedBill, Extraction, ExtractionFallbackStatus, ExtractionInvocation, ExtractionProvider, InitialJobInput, Job, JobState, JobTransition, JobType, ProviderProjectionMetadata, ReviewEvent, ValidationIssue } from "./contracts";
+import type { AzureExtractionOperation, BeginExtractionInvocationResult, Bill, ClaimedJob, CreateBillInput, DashboardMetrics, EffectiveBillData, ExtractedBill, Extraction, ExtractionFallbackStatus, ExtractionInvocation, ExtractionProvider, InitialJobInput, Job, JobState, JobTransition, JobType, ProviderProjectionMetadata, ReviewEvent, ValidationIssue } from "./contracts";
 import { applyMigrations } from "./migrations";
 import { jobTypes } from "./contracts";
 
@@ -22,6 +22,7 @@ type ValidationIssueRow = { id: string; bill_id: string; field: string | null; c
 type ProjectionRow = { id: string; bill_id: string; provider: string; projection_key: string; external_id: string | null; external_url: string | null; metadata_json: string | null; created_at: string; updated_at: string };
 type DriveReservationRow = { reservation_key: string; kind: "file" | "folder"; parent_id: string | null; logical_path: string; drive_id: string; state: "reserved" | "confirmed"; bill_id: string | null; content_sha256: string | null; created_at: string; updated_at: string };
 type ReviewEventRow = { id: string; bill_id: string; reviewer_id: string; action: string; previous_values: string | null; corrected_values: string | null; reason: string | null; note: string | null; created_at: string };
+type DashboardMetricsRow = { received_bills: number; approved_bills: number; failed_bills: number; retryable_jobs: number; permanent_failure_jobs: number };
 
 function toJob(row: JobRow): Job {
   return { id: row.id, billId: row.bill_id, type: row.type, state: row.state, idempotencyKey: row.idempotency_key, attempts: row.attempts, availableAt: row.available_at, leaseToken: row.lease_token, leaseExpiresAt: row.lease_expires_at, claimedBy: row.claimed_by, claimedAt: row.claimed_at, lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at, expectedRevision: row.expected_revision };
@@ -120,6 +121,24 @@ export class BillDatabase {
   getBill(id: string): Bill | null {
     const row = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE id = ?").get(id);
     return row ? toBill(row) : null;
+  }
+
+  /** Read-only canonical dashboard totals. Bill and background-job failures are distinct. */
+  getDashboardMetrics(): DashboardMetrics {
+    const row = this.sqlite.query<DashboardMetricsRow, []>(`SELECT
+      (SELECT COUNT(*) FROM bills) AS received_bills,
+      (SELECT COUNT(*) FROM bills WHERE status = 'approved') AS approved_bills,
+      (SELECT COUNT(*) FROM bills WHERE status = 'failed') AS failed_bills,
+      (SELECT COUNT(*) FROM jobs WHERE state = 'retryable_failure') AS retryable_jobs,
+      (SELECT COUNT(*) FROM jobs WHERE state = 'permanent_failure') AS permanent_failure_jobs`).get();
+    if (!row) throw new Error("Dashboard metrics query returned no row");
+    return {
+      receivedBills: row.received_bills,
+      approvedBills: row.approved_bills,
+      failedBills: row.failed_bills,
+      retryableJobs: row.retryable_jobs,
+      permanentFailureJobs: row.permanent_failure_jobs,
+    };
   }
 
   getExtraction(billId: string): Extraction | null {

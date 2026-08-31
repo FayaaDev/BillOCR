@@ -6,7 +6,7 @@ import { handleRequest } from "./http";
 import { createLogger } from "./logger";
 import type { JobHandlers } from "./contracts";
 import { BackgroundWorkerLoop, JobWorker } from "./worker";
-import { BaileysTransport, type WhatsAppTransport } from "./baileys-transport";
+import { BaileysTransport, type WhatsAppAdminOperations, type WhatsAppTransport } from "./baileys-transport";
 import { WhatsAppIngestionService } from "./whatsapp-ingestion";
 import { createExtractJobHandler, MistralHttpOcrProvider, type MistralOcrProvider } from "./extraction";
 import { IMAGE_PREPROCESSING_VERSION, WorkerImagePreprocessor, type ImagePreprocessor } from "./image-preprocessing";
@@ -14,7 +14,7 @@ import { createExtractionValidationCallback } from "./validation";
 import { createDriveArchiveHandler, createGoogleAdapters, createReviewCorrectionSyncHandler, createSheetsProjectionHandler, type DriveAdapter, type SheetsAdapter } from "./google-projections";
 import { AzureDocumentIntelligenceInvoiceProvider, type AzureInvoiceProvider } from "./azure-invoice";
 
-export interface RunningService { url: string; shutdown(): Promise<void>; }
+export interface RunningService { url: string; whatsappAdmin: WhatsAppAdminOperations; shutdown(): Promise<void>; }
 export interface ServiceDependencies {
   createDatabase?: (path: string) => BillDatabase;
   serve?: typeof Bun.serve;
@@ -26,6 +26,20 @@ export interface ServiceDependencies {
   onExtractionPersisted?: (billId: string) => Promise<void> | void;
   driveAdapter?: DriveAdapter;
   sheetsAdapter?: SheetsAdapter;
+}
+
+function unavailableWhatsAppAdmin(): WhatsAppAdminOperations {
+  return {
+    status: () => ({ state: "unavailable", canPair: false }),
+    pairingQr: async () => null,
+    groups: async () => ({ available: false, groups: [] }),
+    startPairing: async () => { throw new Error("WhatsApp pairing unavailable"); },
+    cancelPairing: async () => { throw new Error("WhatsApp pairing unavailable"); },
+  };
+}
+
+function isWhatsAppAdminOperations(transport: WhatsAppTransport): transport is WhatsAppTransport & WhatsAppAdminOperations {
+  return "status" in transport && "pairingQr" in transport && "groups" in transport && "startPairing" in transport && "cancelPairing" in transport;
 }
 
 /** Starts HTTP and the non-blocking durable worker. Provider phases inject handlers here. */
@@ -56,16 +70,29 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
   const workerLoop = new BackgroundWorkerLoop(worker, logger);
   const transport = dependencies.whatsappTransport ?? new BaileysTransport(config.whatsapp.authPath, logger);
   const ingestion = new WhatsAppIngestionService({ groupId: config.whatsapp.groupId, originalsDir: config.whatsapp.originalsDir, maxAttachmentBytes: config.whatsapp.maxAttachmentBytes, extractionInputVersion: config.imagePreprocessing.enabled ? IMAGE_PREPROCESSING_VERSION : "original", database, logger });
+  const whatsappEnabled = dependencies.enableWhatsApp ?? config.whatsapp.enabled;
+  const whatsappAdmin = whatsappEnabled && isWhatsAppAdminOperations(transport) ? transport : unavailableWhatsAppAdmin();
+  const admin = {
+    metrics: () => database.getDashboardMetrics(),
+    whatsapp: {
+      status: () => {
+        return whatsappAdmin.status();
+      },
+      pairingQr: () => whatsappAdmin.pairingQr(),
+      groups: async () => (await whatsappAdmin.groups()).groups.map(({ id, subject }) => ({ id, name: subject || null })),
+      startPairing: () => whatsappAdmin.startPairing(),
+      cancelPairing: () => whatsappAdmin.cancelPairing(),
+    },
+  };
   let server: ReturnType<typeof Bun.serve>;
   try {
-    server = (dependencies.serve ?? Bun.serve)({ hostname: config.host, port: config.port, fetch: (request) => handleRequest(request, database, config) });
+    server = (dependencies.serve ?? Bun.serve)({ hostname: config.host, port: config.port, fetch: (request) => handleRequest(request, database, config, admin) });
   } catch (error) {
     database.close();
     throw error;
   }
   logger.info("service started", { host: config.host, port: server.port });
   workerLoop.start();
-  const whatsappEnabled = dependencies.enableWhatsApp ?? config.whatsapp.enabled;
   let acceptingIngestion = true;
   const inFlightIngestion = new Set<Promise<void>>();
   const receiveMessage = async (message: Parameters<WhatsAppTransport["start"]>[0] extends (message: infer Message) => Promise<void> ? Message : never): Promise<void> => {
@@ -83,6 +110,7 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
   let shuttingDown = false;
   return {
     url: server.url.toString(),
+    whatsappAdmin,
     async shutdown(): Promise<void> {
       if (shuttingDown) return;
       shuttingDown = true;

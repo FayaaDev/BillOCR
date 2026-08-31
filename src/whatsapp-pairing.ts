@@ -37,17 +37,17 @@ export class PairingQrTokenStore {
   }
 }
 
-export interface PairingQrRenderDependencies {
+export interface PairingQrRenderDependencies<Result = void> {
   stat(path: string): Promise<{ mode: number; isFile(): boolean }>;
   readFile(path: string, encoding: "utf8"): Promise<string>;
-  render(token: string): void;
+  render(token: string): Result;
 }
 
-export async function renderStoredPairingQr(authPath: string, dependencies: PairingQrRenderDependencies = { stat, readFile, render: () => undefined }): Promise<void> {
+export async function renderStoredPairingQr<Result = void>(authPath: string, dependencies: PairingQrRenderDependencies<Result> = { stat, readFile, render: () => undefined } as unknown as PairingQrRenderDependencies<Result>): Promise<Result> {
   const path = pairingQrPath(authPath);
   const details = await dependencies.stat(path);
   if (!details.isFile() || (details.mode & 0o077) !== 0) throw new Error("WhatsApp pairing QR token has unsafe permissions");
   const token = await dependencies.readFile(path, "utf8");
   if (!token) throw new Error("No WhatsApp pairing QR is available");
-  dependencies.render(token);
+  return dependencies.render(token);
 }

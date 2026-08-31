@@ -6,6 +6,15 @@ export type JobState = (typeof jobStates)[number];
 
 export type BillStatus = "received" | "extracting" | "needs_review" | "approved" | "failed";
 
+/** Read-only dashboard totals derived from canonical bill and job state. Processed means approved. */
+export interface DashboardMetrics {
+  receivedBills: number;
+  approvedBills: number;
+  failedBills: number;
+  retryableJobs: number;
+  permanentFailureJobs: number;
+}
+
 export type ExtractionProvider = "mistral" | "azure";
 export type ExtractionFallbackStatus = "not_needed" | "pending" | "succeeded" | "failed";
 

@@ -112,6 +112,53 @@ test("connection updates persist pairing QR without logging it and remove it whe
   await expect(stat(pairingQrPath(authPath))).rejects.toThrow();
 });
 
+test("admin operations render a pairing QR without exposing its token and discover groups only when connected", async () => {
+  const authPath = await mkdtemp(`${tmpdir()}/bill-ledger-auth-`);
+  const listeners = new Map<string, ((event: any) => void)>();
+  const transport = new BaileysTransport(authPath, logger, 60_000, {
+    loadAuth: async () => ({ state: {}, saveCreds: async () => undefined }),
+    createSocket: () => ({ ev: { on: (event, listener) => listeners.set(event, listener) }, end() {}, groupFetchAllParticipating: async () => ({ "group-1@g.us": { id: "group-1@g.us", subject: "Receipts" } }) }),
+  });
+  await transport.start(async () => undefined);
+  expect(transport.status()).toEqual({ state: "connecting", canPair: true });
+  expect(await transport.groups()).toEqual({ available: false, groups: [] });
+  listeners.get("connection.update")?.({ qr: "secret-pairing-token" });
+  expect(transport.status()).toEqual({ state: "connecting", canPair: true });
+  expect(await transport.pairingQr()).toBeNull();
+  await Bun.sleep(5);
+  expect(transport.status()).toEqual({ state: "awaiting_pairing", canPair: true });
+  const qr = await transport.pairingQr();
+  expect(qr?.contentType).toBe("image/svg+xml");
+  expect(new TextDecoder().decode(qr?.body)).not.toContain("secret-pairing-token");
+  listeners.get("connection.update")?.({ connection: "open" });
+  expect(await transport.groups()).toEqual({ available: true, groups: [{ id: "group-1@g.us", subject: "Receipts" }] });
+  await transport.stop();
+});
+
+test("cancelling pairing clears the QR, then Pair now restarts without logging out or exposing a stale QR", async () => {
+  const authPath = await mkdtemp(`${tmpdir()}/bill-ledger-auth-`);
+  const listeners = new Map<string, ((event: any) => void)>();
+  let created = 0;
+  const transport = new BaileysTransport(authPath, logger, 60_000, {
+    loadAuth: async () => ({ state: {}, saveCreds: async () => undefined }),
+    createSocket: () => {
+      created += 1;
+      return { ev: { on: (event, listener) => listeners.set(`${created}:${event}`, listener) }, end() {} };
+    },
+  });
+  await transport.start(async () => undefined);
+  listeners.get("1:connection.update")?.({ qr: "cancel-secret" });
+  await Bun.sleep(5);
+  await transport.cancelPairing();
+  expect(transport.status()).toEqual({ state: "unavailable", canPair: true });
+  expect(await transport.pairingQr()).toBeNull();
+  await transport.startPairing();
+  expect(created).toBe(2);
+  expect(transport.status()).toEqual({ state: "connecting", canPair: true });
+  expect(await transport.pairingQr()).toBeNull();
+  await transport.stop();
+});
+
 test("connection failures log a generic code without secret-bearing exception text", async () => {
   const lines: string[] = [];
   const secretLogger: Logger = { ...logger, warn: (message, fields) => lines.push(JSON.stringify({ message, fields })) };

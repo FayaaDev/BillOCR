@@ -30,13 +30,17 @@ test("review requires Basic auth, escapes model output, and protects originals",
   expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/original`, { headers: basic() }), database, config)).status).toBe(404);
 });
 
-test("review detail omits evidence and has correction controls", async () => {
+test("review detail renders an accessible image-original preview while PDFs retain the original link", async () => {
   const detail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
   const html = await detail.text();
   expect(html).toContain('<html lang="ar" dir="rtl">');
   expect(html).toContain('src="/review/assets/theme.js"');
   expect(html).toContain('<main class="review-page review-detail">'); expect(html).toContain('class="queue-back" href="/review"'); expect(html).toContain('class="status-badge">تحتاج إلى مراجعة</span>');
-  expect(html).toContain('class="original-actions"'); expect(html).toContain('href="/review/bills/review-bill/original?download=1"'); expect(html).not.toContain('>Evidence</h2>'); expect(html).not.toContain('Immutable extraction data and review history.'); expect(html).not.toContain('Immutable model output'); expect(html).not.toContain('Confidence'); expect(html).not.toContain('Validation issues'); expect(html).not.toContain('Provenance'); expect(html).not.toContain('Audit events');
+  expect(html).toContain('class="original-actions"'); expect(html).toContain('id="original-preview-trigger" href="/review/bills/review-bill/original"'); expect(html).toContain('<dialog id="original-preview-dialog" aria-labelledby="original-preview-title">'); expect(html).toContain('id="original-preview-close"'); expect(html).toContain('إغلاق عرض الأصل'); expect(html).toContain('id="original-preview-image"'); expect(html).toContain('src="/review/assets/client.js" defer'); expect(html).toContain('href="/review/bills/review-bill/original?download=1"'); expect(html).not.toContain('>Evidence</h2>'); expect(html).not.toContain('Immutable extraction data and review history.'); expect(html).not.toContain('Immutable model output'); expect(html).not.toContain('Confidence'); expect(html).not.toContain('Validation issues'); expect(html).not.toContain('Provenance'); expect(html).not.toContain('Audit events');
+  database.sqlite.query("UPDATE bills SET mime_type = 'application/pdf' WHERE id = ?").run(id);
+  const pdf = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
+  const pdfHtml = await pdf.text();
+  expect(pdfHtml).toContain('href="/review/bills/review-bill/original">عرض الأصل</a>'); expect(pdfHtml).not.toContain('original-preview-dialog');
   expect(html).toContain('class="correction-form"'); expect(html).toContain('<label class="review-field" for="vendorName"><span>اسم المورد</span>'); expect(html).toContain('<textarea id="description" name="description"'); expect(html).not.toContain('name="handwritten"'); expect(html).not.toContain('name="reason"'); expect(html).not.toContain('name="note"'); expect(html).not.toContain('Reason for decision'); expect(html).not.toContain('Review note'); expect(html).toContain('class="review-action approve-action"'); expect(html).toContain('>اعتماد الفاتورة</button>'); expect(html).toContain('class="review-action reject-action"'); expect(html).toContain('>رفض الفاتورة</button>');
 });
 

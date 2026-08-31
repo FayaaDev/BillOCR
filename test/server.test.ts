@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppConfig } from "../src/config";
 import { startService, type RunningService } from "../src/server";
-import type { WhatsAppTransport } from "../src/baileys-transport";
+import type { WhatsAppAdminTransport, WhatsAppTransport } from "../src/baileys-transport";
 import type { IncomingWhatsAppMessage } from "../src/whatsapp-ingestion";
 import type { MistralOcrProvider } from "../src/extraction";
 import type { AzureInvoiceProvider } from "../src/azure-invoice";
@@ -80,6 +80,38 @@ test("service starts and stops an injected WhatsApp transport when enabled", asy
   expect(started).toBe(1);
   await service.shutdown();
   expect(stopped).toBe(1);
+});
+
+test("service exposes a typed unavailable WhatsApp admin capability when WhatsApp is disabled", async () => {
+  expect(service.whatsappAdmin.status()).toEqual({ state: "unavailable", canPair: false });
+  expect(await service.whatsappAdmin.pairingQr()).toBeNull();
+  expect(await service.whatsappAdmin.groups()).toEqual({ available: false, groups: [] });
+  await expect(service.whatsappAdmin.startPairing()).rejects.toThrow("unavailable");
+  await expect(service.whatsappAdmin.cancelPairing()).rejects.toThrow("unavailable");
+});
+
+test("admin preserves connecting during a pairing restart so the client does not request a QR yet", async () => {
+  await service.shutdown();
+  let qrRequests = 0;
+  const transport: WhatsAppAdminTransport = {
+    start: async () => undefined, stop: async () => undefined,
+    status: () => ({ state: "connecting", canPair: true }),
+    pairingQr: async () => { qrRequests += 1; return null; },
+    groups: async () => ({ available: false, groups: [] }),
+    startPairing: async () => undefined, cancelPairing: async () => undefined,
+  };
+  const config: AppConfig = {
+    host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "connecting.sqlite"), logLevel: "error",
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
+    google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
+  };
+  service = startService(config, {}, { whatsappTransport: transport });
+  const headers = { authorization: `Basic ${btoa("reviewer:secret")}` };
+  const overview = await (await fetch(new URL("admin/api/overview", service.url), { headers })).json();
+  expect(overview.whatsapp).toMatchObject({ state: "connecting", canPair: true });
+  expect(qrRequests).toBe(0);
+  expect((await fetch(new URL("admin/api/whatsapp/qr", service.url), { headers })).status).toBe(404);
+  expect(qrRequests).toBe(0);
 });
 
 test("shutdown drains an in-flight WhatsApp ingestion before closing the database", async () => {
