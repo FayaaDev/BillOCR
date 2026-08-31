@@ -81,6 +81,30 @@ test("admin protects every route, serves only known assets, and rejects malforme
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("admin ZIP API is authenticated, separately CSRF-protected, bounded, and returns only batch status", async () => {
+  const api = capabilities();
+  let received = 0;
+  api.zip.ingest = async ({ bytes }) => { for await (const chunk of bytes) received += chunk.byteLength; return { batch: { id: "batch-1", idempotencyKey: "private-key", originalFilename: "bills.zip", state: "queued", createdAt: "now", updatedAt: "now" }, counts: { accepted: 1, rejected: 0, ignored: 0 } }; };
+  expect((await handleAdminRequest(new Request("http://x/admin/api/zip", { method: "POST" }), config, api)).status).toBe(401);
+  const overview = await (await handleAdminRequest(new Request("http://x/admin/api/overview", { headers: auth }), config, api)).json() as { whatsapp: { csrf: string }; zip: { csrf: string } };
+  const headers = { ...auth, "content-type": "application/zip", "content-length": "3", "x-upload-id": "upload_1", "x-upload-filename": "bills.zip", "x-csrf-token": overview.zip.csrf };
+  const uploaded = await handleAdminRequest(new Request("http://x/admin/api/zip", { method: "POST", headers, body: new Uint8Array([1, 2, 3]) }), config, api);
+  expect(uploaded.status).toBe(202); expect(received).toBe(3); expect(await uploaded.json()).toEqual({ batch: { id: "batch-1", originalFilename: "bills.zip", state: "queued" }, counts: { accepted: 1, rejected: 0, ignored: 0 } });
+  expect((await handleAdminRequest(new Request("http://x/admin/api/zip", { method: "POST", headers: { ...headers, "x-csrf-token": overview.whatsapp.csrf }, body: new Uint8Array([1]) }), config, api)).status).toBe(400);
+  expect((await handleAdminRequest(new Request("http://x/admin/api/zip", { method: "POST", headers: { ...headers, "content-type": "image/png" }, body: new Uint8Array([1]) }), config, api)).status).toBe(400);
+  expect((await handleAdminRequest(new Request("http://x/admin/api/zip", { method: "POST", headers: { ...headers, "content-length": "101" }, body: new Uint8Array([1]) }), config, api)).status).toBe(400);
+  const status = await handleAdminRequest(new Request("http://x/admin/api/zip/batch-1", { headers: auth }), config, api);
+  expect(status.status).toBe(200); expect(await status.text()).not.toContain("private-key");
+  expect((await handleAdminRequest(new Request("http://x/admin/api/zip/batch-1", { method: "POST", headers: auth }), config, api)).status).toBe(405);
+});
+
+test("admin ZIP API does not submit while Azure ingestion is unavailable", async () => {
+  const api = capabilities(); api.zip.available = () => false;
+  const overview = await (await handleAdminRequest(new Request("http://x/admin/api/overview", { headers: auth }), config, api)).json() as { zip: { csrf: string } };
+  const response = await handleAdminRequest(new Request("http://x/admin/api/zip", { method: "POST", headers: { ...auth, "content-type": "application/zip", "content-length": "1", "x-upload-id": "upload_1", "x-upload-filename": "bills.zip", "x-csrf-token": overview.zip.csrf }, body: new Uint8Array([1]) }), config, api);
+  expect(response.status).toBe(503); expect(await response.text()).not.toContain("Azure");
+});
+
 test("unavailable WhatsApp discovery is explicit and admin reads never mutate canonical records or originals", async () => {
   const directory = mkdtempSync(join(tmpdir(), "admin-canonical-"));
   const original = join(directory, "original.png");
@@ -101,5 +125,5 @@ test("unavailable WhatsApp discovery is explicit and admin reads never mutate ca
 });
 
 function capabilities(overrides: Partial<AdminHttpCapabilities["whatsapp"]> = {}): AdminHttpCapabilities {
-  return { metrics: () => ({ receivedBills: 1, approvedBills: 0, failedBills: 0, retryableJobs: 0, permanentFailureJobs: 0 }), whatsapp: { status: () => ({ state: "connected" as const, canPair: true }), pairingQr: async () => null, groups: () => [{ id: "group", name: "Bills" }], startPairing: async () => undefined, cancelPairing: async () => undefined, ...overrides } };
+  return { metrics: () => ({ receivedBills: 1, approvedBills: 0, failedBills: 0, retryableJobs: 0, permanentFailureJobs: 0 }), whatsapp: { status: () => ({ state: "connected" as const, canPair: true }), pairingQr: async () => null, groups: () => [{ id: "group", name: "Bills" }], startPairing: async () => undefined, cancelPairing: async () => undefined, ...overrides }, zip: { available: () => true, maxCompressedBytes: 100, ingest: async () => ({ batch: { id: "batch-1", idempotencyKey: "key", originalFilename: "bills.zip", state: "queued", createdAt: "now", updatedAt: "now" }, counts: { accepted: 1, rejected: 0, ignored: 0 } }), status: () => ({ batch: { id: "batch-1", idempotencyKey: "key", originalFilename: "bills.zip", state: "completed", createdAt: "now", updatedAt: "now" }, counts: { total: 1, queued: 0, processing: 0, complete: 1, notInvoice: 0, rejected: 0, failed: 0 }, items: [{ entryPath: "invoice.pdf", state: "complete", errorCode: null, billId: "bill-1" }] }) } };
 }

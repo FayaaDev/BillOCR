@@ -3,16 +3,27 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AppConfig } from "./config";
 import type { ExtractedBill } from "./contracts";
-import type { BillDatabase } from "./database";
+import type { BillDatabase, CompletedInvoiceExportRecord, ReviewQueueFilters } from "./database";
 import { readVerifiedOriginal } from "./originals";
 import { isSupportedImageMimeType } from "./attachment-mime";
 
 const editable = ["vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description"] as const;
 type Editable = (typeof editable)[number];
 const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'" };
+/** Columns in the completed-invoice download, in CSV order. */
+export const completedInvoiceCsvHeaders = ["Bill ID", "Received date", "Vendor", "Invoice number", "Invoice date", "Subtotal", "VAT", "Total", "Currency", "Description", "Sender"] as const;
 const esc = (value: unknown): string => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+function csvCell(value: string | number | null): string {
+  let text = String(value ?? "");
+  if (/^\s*[=+\-@]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+function completedInvoiceCsv(records: CompletedInvoiceExportRecord[]): string {
+  const values = records.map(({ id, receivedAt, senderId, extraction }) => [id, receivedAt.slice(0, 10), extraction.vendorName, extraction.invoiceNumber, extraction.invoiceDate, extraction.subtotal, extraction.vat, extraction.total, extraction.currency, extraction.description, senderId]);
+  return `\uFEFF${[completedInvoiceCsvHeaders, ...values].map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
+}
 const page = (title: string, body: string, status = 200): Response => new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)}</title><script src="/review/assets/theme.js"></script><link rel="stylesheet" href="/review/assets/client.css"></head><body>${body}</body></html>`, { status, headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
-const appShell = (): Response => new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>قائمة المراجعة</title><script src="/review/assets/theme.js"></script><link rel="stylesheet" href="/review/assets/client.css"></head><body><div id="root"></div><script src="/review/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+const appShell = (): Response => new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>قائمة المراجعة</title><script src="/review/assets/theme.js"></script><link rel="stylesheet" href="/review/assets/client.css"></head><body><a class="button-link" href="/review/export.csv">تصدير CSV</a><div id="root"></div><script src="/review/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
 
 function authenticated(request: Request, config: AppConfig): string | null {
   const value = request.headers.get("authorization");
@@ -38,6 +49,11 @@ function corrected(form: URLSearchParams, original: ExtractedBill): ExtractedBil
   }
   return result;
 }
+function reviewFilters(url: URL): ReviewQueueFilters | null {
+  const source = url.searchParams.get("source"); const batchId = url.searchParams.get("batch"); const status = url.searchParams.get("status");
+  if ((source !== null && source !== "whatsapp" && source !== "admin_upload") || (batchId !== null && (!/^[A-Za-z0-9_-]{1,128}$/.test(batchId))) || (status !== null && !["received", "extracting", "needs_review", "approved", "failed", "complete", "not_invoice"].includes(status))) return null;
+  return { ...(source ? { source } : {}), ...(batchId ? { batchId } : {}), ...(status ? { status: status as ReviewQueueFilters["status"] } : {}) };
+}
 const unavailableExtraction = (): ExtractedBill => ({ schemaVersion: "1", vendorName: null, invoiceNumber: null, invoiceDate: null, currency: null, subtotal: null, vat: null, total: null, description: null, fields: {} });
 class FormError extends Error { constructor(readonly status: number) { super("invalid form"); } }
 async function parseForm(request: Request): Promise<URLSearchParams> {
@@ -55,9 +71,14 @@ export async function handleReviewRequest(request: Request, database: BillDataba
   if (request.method === "GET" && url.pathname === "/review") {
     return appShell();
   }
+  if (url.pathname === "/review/export.csv") {
+    if (request.method !== "GET") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET" } });
+    return new Response(completedInvoiceCsv(database.listCompletedInvoiceExports()), { headers: { ...headers, "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="completed-invoices.csv"' } });
+  }
   if (url.pathname === "/review/api/bills") {
     if (request.method !== "GET") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET" } });
-    const bills = database.listReviewBills().map(({ id, status, originalFilename, receivedAt, updatedAt }) => ({ id, status, originalFilename, receivedAt, updatedAt }));
+    const filters = reviewFilters(url); if (!filters) return new Response("طلب غير صالح", { status: 400, headers });
+    const bills = database.listReviewBills(filters).map(({ id, status, displayStatus, source, batchId, originalFilename, receivedAt, updatedAt }) => ({ id, status, displayStatus, source, batchId, originalFilename, receivedAt, updatedAt }));
     return Response.json(bills, { headers });
   }
   const font = /^\/review\/assets\/files\/(noto-sans-arabic-arabic-(?:400|700)-normal\.woff2)$/.exec(url.pathname)?.[1];
@@ -81,7 +102,12 @@ export async function handleReviewRequest(request: Request, database: BillDataba
       const form = await parseForm(request);
       if (!csrfValid(form.get("csrf"), config, user, billId)) return page("تعذرت المراجعة", "تعذر إرسال المراجعة.", 400);
       const action = form.get("action");
-      if (action !== "approve" && action !== "reject") return page("تعذرت المراجعة", "تعذر إرسال المراجعة.", 400);
+       if (action === "mark_not_invoice" || action === "reclassify_invoice") {
+         const content = Number(form.get("contentRevision")); const review = Number(form.get("reviewRevision"));
+         if (!Number.isInteger(content) || !Number.isInteger(review) || !database.overrideClassification({ billId, reviewerId: user, action, expectedContentRevision: content, expectedReviewRevision: review })) return page("تعارض في المراجعة", "تعذر إرسال المراجعة بسبب تغيير أحدث.", 409);
+         return new Response(null, { status: 303, headers: { ...headers, location: `/review/bills/${encodeURIComponent(billId)}` } });
+       }
+       if (action !== "approve" && action !== "reject") return page("تعذرت المراجعة", "تعذر إرسال المراجعة.", 400);
       const original = database.getEffectiveExtraction(billId) ?? unavailableExtraction();
       const data = corrected(form, original);
       const content = Number(form.get("contentRevision")); const review = Number(form.get("reviewRevision"));
@@ -96,8 +122,11 @@ export async function handleReviewRequest(request: Request, database: BillDataba
   const fieldLabels: Record<Exclude<Editable, "description">, string> = { vendorName: "اسم المورد", invoiceNumber: "رقم الفاتورة", invoiceDate: "تاريخ الفاتورة", currency: "العملة", subtotal: "المجموع الفرعي", vat: "ضريبة القيمة المضافة", total: "الإجمالي" };
   const fields = (Object.keys(fieldLabels) as Exclude<Editable, "description">[]).map((field) => `<label class="review-field" for="${field}"><span>${fieldLabels[field]}</span><input id="${field}" name="${field}" value="${esc(formData[field] ?? "")}"></label>`).join("");
   const extractionUnavailable = !extraction?.normalized;
-  const statusLabels: Record<string, string> = { needs_review: "تحتاج إلى مراجعة", approved: "معتمدة", failed: "فشلت", pending: "قيد الانتظار" };
+   const statusLabels: Record<string, string> = { needs_review: "تحتاج إلى مراجعة", approved: "مكتملة", failed: "فشلت", pending: "قيد الانتظار", not_invoice: "ليست فاتورة" };
   const originalUrl = `/review/bills/${encodeURIComponent(bill.id)}/original`;
   const originalPreview = isSupportedImageMimeType(bill.mimeType) ? `<a class="button-link" id="original-preview-trigger" href="${originalUrl}">عرض الأصل</a><dialog id="original-preview-dialog" aria-labelledby="original-preview-title"><div class="original-preview-content"><h2 id="original-preview-title">عرض الأصل</h2><button class="button-link button-link-secondary" type="button" id="original-preview-close">إغلاق عرض الأصل</button><img id="original-preview-image" alt="معاينة الأصل"></div></dialog><script src="/review/assets/client.js" defer></script>` : `<a class="button-link" href="${originalUrl}">عرض الأصل</a>`;
-  return page("مراجعة الفاتورة", `<main class="review-page review-detail"><header class="review-detail-header"><a class="queue-back" href="/review">قائمة المراجعة →</a><div class="review-title"><h1 dir="ltr">${esc(bill.id)}</h1><span class="status-badge">${esc(statusLabels[bill.status] ?? bill.status)}</span></div><nav class="original-actions" aria-label="المرفق الأصلي">${originalPreview}<a class="button-link button-link-secondary" href="${originalUrl}?download=1">تنزيل الأصل</a></nav></header>${extractionUnavailable ? `<p class="notice error permanent-failure">تعذر استخراج بيانات الفاتورة. أدخل البيانات المصححة أدناه.</p>` : ""}<section class="review-section correction-section" aria-labelledby="correction-heading"><div class="section-heading"><h2 id="correction-heading">تصحيح بيانات الفاتورة</h2><p>راجع القيم المستخرجة وصححها قبل تحديد الإجراء.</p></div><form class="correction-form" method="post" action="/review/bills/${encodeURIComponent(bill.id)}/review"><input type="hidden" name="csrf" value="${esc(csrf(config, user, bill.id))}"><input type="hidden" name="contentRevision" value="${bill.contentRevision}"><input type="hidden" name="reviewRevision" value="${bill.reviewRevision}"><div class="form-grid">${fields}</div><label class="review-field review-field-full" for="description"><span>الوصف</span><textarea id="description" name="description" rows="4">${esc(formData.description ?? "")}</textarea></label><div class="review-actions"><button class="review-action approve-action" name="action" value="approve">اعتماد الفاتورة</button><button class="review-action reject-action" name="action" value="reject">رفض الفاتورة</button></div></form></section></main>`);
+   const csrfInput = `<input type="hidden" name="csrf" value="${esc(csrf(config, user, bill.id))}"><input type="hidden" name="contentRevision" value="${bill.contentRevision}"><input type="hidden" name="reviewRevision" value="${bill.reviewRevision}">`;
+   const override = bill.classification === "not_invoice" ? `<button class="review-action" name="action" value="reclassify_invoice">إعادة تصنيفها كفاتورة للمراجعة اليدوية</button>` : `<button class="review-action reject-action" name="action" value="mark_not_invoice">وضع علامة ليست فاتورة</button>`;
+    const reviewActions = bill.classification === "not_invoice" ? override : `<button class="review-action approve-action" name="action" value="approve">اعتماد الفاتورة</button><button class="review-action reject-action" name="action" value="reject">رفض الفاتورة</button>${override}`;
+    return page("مراجعة الفاتورة", `<main class="review-page review-detail"><header class="review-detail-header"><a class="queue-back" href="/review">قائمة المراجعة →</a><div class="review-title"><h1 dir="ltr">${esc(bill.id)}</h1><span class="status-badge">${esc(bill.classification === "not_invoice" ? statusLabels.not_invoice : statusLabels[bill.status] ?? bill.status)}</span></div><nav class="original-actions" aria-label="المرفق الأصلي">${originalPreview}<a class="button-link button-link-secondary" href="${originalUrl}?download=1">تنزيل الأصل</a></nav></header>${extractionUnavailable ? `<p class="notice error permanent-failure">تعذر استخراج بيانات الفاتورة. أدخل البيانات المصححة أدناه.</p>` : ""}<section class="review-section correction-section" aria-labelledby="correction-heading"><div class="section-heading"><h2 id="correction-heading">تصحيح بيانات الفاتورة</h2><p>راجع القيم المستخرجة وصححها قبل تحديد الإجراء.</p></div><form class="correction-form" method="post" action="/review/bills/${encodeURIComponent(bill.id)}/review">${csrfInput}<div class="form-grid">${fields}</div><label class="review-field review-field-full" for="description"><span>الوصف</span><textarea id="description" name="description" rows="4">${esc(formData.description ?? "")}</textarea></label><div class="review-actions">${reviewActions}</div></form></section></main>`);
 }

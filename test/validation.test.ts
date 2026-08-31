@@ -22,12 +22,10 @@ test("approves valid totals within configured rounding tolerance", () => {
   expect(validateExtractedBill(extracted({ total: 11.009 }), config, now)).toEqual({ decision: "approved", issues: [] });
 });
 
-test("blocks arithmetic and required fields without using native confidence for approval", () => {
+test("blocks arithmetic and required fields while confidence remains informational", () => {
   expect(validateExtractedBill(extracted({ total: 12 }), config, now).issues).toContainEqual(expect.objectContaining({ code: "total_mismatch", field: "total" }));
   expect(validateExtractedBill(extracted({ vendorName: null }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_missing", field: "vendorName" }));
-  for (const confidence of [null, 0, 0.01, 1]) {
-    expect(validateExtractedBill(extracted({ fields: { vendorName: { confidence, sourceText: "Vendor" }, invoiceDate: { confidence, sourceText: "date" }, total: { confidence, sourceText: "11" } } }), config, now)).toEqual({ decision: "approved", issues: [] });
-  }
+  for (const confidence of [null, 0, 0.01, 0.79, 1]) expect(validateExtractedBill(extracted({ fields: { vendorName: { confidence, sourceText: "Vendor" }, invoiceDate: { confidence, sourceText: "date" }, total: { confidence, sourceText: "11" } } }), config, now)).toEqual({ decision: "approved", issues: [] });
 });
 
 test("blocks a failed Azure fallback even when the Mistral extraction is otherwise valid", () => {

@@ -12,8 +12,8 @@
 
 - `src/server.ts` is the composition root. SQLite is canonical; WhatsApp is input and Drive/Sheets are retryable projections. Do not reconstruct canonical state from a provider.
 - Never hold SQLite transactions across external calls. Handlers must preserve durable idempotency, lease/claim-token fencing, revision guards, transition history, and bounded retries.
-- `src/validation.ts` is the sole automatic-approval decision point. It trusts Mistral's schema-valid field confidence directly, still requiring `vendorName`, `invoiceDate`, and `total` to meet `CONFIDENCE_THRESHOLD` plus deterministic validation. Manual review is sticky.
-- Treat provider output as untrusted: keep strict schema/runtime parsing, raw-versus-normalized separation, and response size/time bounds. Do not use OCR prose as accounting data.
+- `src/validation.ts` is the sole automatic-approval decision point. Approval is completeness-based: `vendorName`, `invoiceDate`, and `total` are required, confidence is informational, and deterministic validation still applies. Manual review is sticky.
+- Treat provider output as untrusted: keep bounded runtime normalization, raw-versus-normalized separation, and response size/time limits. Do not use OCR prose as accounting data.
 - Originals are immutable direct children of `WHATSAPP_ORIGINALS_DIR`; their DB SHA-256 must match disk bytes. Provider, archive, and backup paths must use `readVerifiedOriginal`, not pathname `readFile`/`stat`.
 - Image preprocessing is in-memory and fail-open; PDFs bypass it. Production extraction explicitly uses Sharp-only preprocessing (orientation, enhancement, resize); OpenCV is evaluator-only. The Mistral idempotency key hashes the actual submitted bytes.
 - Drive IDs are reserved durably before mutation. Sheet projections are revision-specific; the hidden `bill.id` is the immutable row identity, and writes wait for a persisted Drive URL.

@@ -13,6 +13,7 @@ import { IMAGE_PREPROCESSING_VERSION, WorkerImagePreprocessor, type ImagePreproc
 import { createExtractionValidationCallback } from "./validation";
 import { createDriveArchiveHandler, createGoogleAdapters, createReviewCorrectionSyncHandler, createSheetsProjectionHandler, type DriveAdapter, type SheetsAdapter } from "./google-projections";
 import { AzureDocumentIntelligenceInvoiceProvider, type AzureInvoiceProvider } from "./azure-invoice";
+import { AdminZipIngestionService } from "./admin-zip-ingestion";
 
 export interface RunningService { url: string; whatsappAdmin: WhatsAppAdminOperations; shutdown(): Promise<void>; }
 export interface ServiceDependencies {
@@ -84,6 +85,11 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
       startPairing: () => whatsappAdmin.startPairing(),
       cancelPairing: () => whatsappAdmin.cancelPairing(),
     },
+    zip: (() => {
+      const maxCompressedBytes = 50 * 1024 * 1024;
+      const ingestion = new AdminZipIngestionService({ database, logger, originalsDir: config.whatsapp.originalsDir, stagingDir: `${config.dataDir}/admin-zip-staging`, limits: { maxCompressedBytes } });
+      return { available: () => config.azure.enabled, maxCompressedBytes, ingest: (input: { sourceId: string; originalFilename: string; bytes: AsyncIterable<Uint8Array> }) => ingestion.ingest(input), status: (batchId: string) => database.getAdminUploadBatchStatus(batchId), reconcilePending: () => ingestion.reconcilePending() };
+    })(),
   };
   let server: ReturnType<typeof Bun.serve>;
   try {
@@ -103,10 +109,12 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
     inFlightIngestion.add(task);
     await task;
   };
-  const listenerStartup = whatsappEnabled ? (async () => {
+  const listenerStartup = (async () => {
+    await admin.zip.reconcilePending();
+    if (!whatsappEnabled) return;
     await ingestion.reconcilePending();
     if (acceptingIngestion) await transport.start(receiveMessage);
-  })().catch(() => logger.error("WhatsApp listener failed to start", { code: "whatsapp_listener_start_failed" })) : Promise.resolve();
+  })().catch(() => logger.error("ingestion listener failed to start", { code: "ingestion_listener_start_failed" }));
 
   let shuttingDown = false;
   return {

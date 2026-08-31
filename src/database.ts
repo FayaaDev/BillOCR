@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import type { AzureExtractionOperation, BeginExtractionInvocationResult, Bill, ClaimedJob, CreateBillInput, DashboardMetrics, EffectiveBillData, ExtractedBill, Extraction, ExtractionFallbackStatus, ExtractionInvocation, ExtractionProvider, InitialJobInput, Job, JobState, JobTransition, JobType, ProviderProjectionMetadata, ReviewEvent, ValidationIssue } from "./contracts";
+import type { AdminUploadBatch, AdminUploadBatchItem, AdminUploadBatchStatusCounts, AzureExtractionOperation, BeginExtractionInvocationResult, Bill, BillClassification, BillSource, ClaimedJob, CreateBillInput, DashboardMetrics, EffectiveBillData, ExtractedBill, Extraction, ExtractionFallbackStatus, ExtractionInvocation, ExtractionPolicy, ExtractionProvider, InitialJobInput, Job, JobState, JobTransition, JobType, ProviderProjectionMetadata, ReviewEvent, ValidationIssue } from "./contracts";
 import { applyMigrations } from "./migrations";
 import { jobTypes } from "./contracts";
 
@@ -13,6 +13,7 @@ type BillRow = {
   id: string; whatsapp_message_id: string; whatsapp_group_id: string; whatsapp_sender_id: string; attachment_index: number;
   received_at: string; caption: string | null; original_filename: string | null; mime_type: string; original_path: string;
   content_sha256: string; status: Bill["status"]; drive_file_id: string | null; sheet_row_key: string | null; created_at: string; updated_at: string; content_revision: number; review_revision: number; manual_review_required: number;
+  source: BillSource; source_identity: string; extraction_policy: ExtractionPolicy; classification: BillClassification; batch_item_id: string | null;
 };
 type JobTransitionRow = { id: string; job_id: string; from_state: JobState | null; to_state: JobState; reason: string; created_at: string };
 type ExtractionRow = { id: string; bill_id: string; schema_version: string; selected_provider: ExtractionProvider | null; fallback_status: ExtractionFallbackStatus | null; selected_invocation_id: string | null; normalized_json: string | null; raw_provider_response: string | null; provider_model: string | null; prompt_schema_version: string | null; requested_at: string | null; completed_at: string | null; error_details: string | null; created_at: string; updated_at: string };
@@ -23,12 +24,14 @@ type ProjectionRow = { id: string; bill_id: string; provider: string; projection
 type DriveReservationRow = { reservation_key: string; kind: "file" | "folder"; parent_id: string | null; logical_path: string; drive_id: string; state: "reserved" | "confirmed"; bill_id: string | null; content_sha256: string | null; created_at: string; updated_at: string };
 type ReviewEventRow = { id: string; bill_id: string; reviewer_id: string; action: string; previous_values: string | null; corrected_values: string | null; reason: string | null; note: string | null; created_at: string };
 type DashboardMetricsRow = { received_bills: number; approved_bills: number; failed_bills: number; retryable_jobs: number; permanent_failure_jobs: number };
+type AdminUploadBatchRow = { id: string; idempotency_key: string; original_filename: string; state: AdminUploadBatch["state"]; created_at: string; updated_at: string };
+type AdminUploadBatchItemRow = { id: string; batch_id: string; item_index: number; entry_path: string; state: AdminUploadBatchItem["state"]; error_code: string | null; bill_id: string | null; created_at: string; updated_at: string };
 
 function toJob(row: JobRow): Job {
   return { id: row.id, billId: row.bill_id, type: row.type, state: row.state, idempotencyKey: row.idempotency_key, attempts: row.attempts, availableAt: row.available_at, leaseToken: row.lease_token, leaseExpiresAt: row.lease_expires_at, claimedBy: row.claimed_by, claimedAt: row.claimed_at, lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at, expectedRevision: row.expected_revision };
 }
 function toBill(row: BillRow): Bill {
-  return { id: row.id, whatsappMessageId: row.whatsapp_message_id, whatsappGroupId: row.whatsapp_group_id, whatsappSenderId: row.whatsapp_sender_id, attachmentIndex: row.attachment_index, receivedAt: row.received_at, caption: row.caption, originalFilename: row.original_filename, mimeType: row.mime_type, originalPath: row.original_path, contentSha256: row.content_sha256, status: row.status, driveFileId: row.drive_file_id, sheetRowKey: row.sheet_row_key, createdAt: row.created_at, updatedAt: row.updated_at, contentRevision: row.content_revision, reviewRevision: row.review_revision };
+  return { id: row.id, whatsappMessageId: row.whatsapp_message_id, whatsappGroupId: row.whatsapp_group_id, whatsappSenderId: row.whatsapp_sender_id, attachmentIndex: row.attachment_index, receivedAt: row.received_at, caption: row.caption, originalFilename: row.original_filename, mimeType: row.mime_type, originalPath: row.original_path, contentSha256: row.content_sha256, status: row.status, driveFileId: row.drive_file_id, sheetRowKey: row.sheet_row_key, createdAt: row.created_at, updatedAt: row.updated_at, contentRevision: row.content_revision, reviewRevision: row.review_revision, source: row.source, sourceIdentity: row.source_identity, extractionPolicy: row.extraction_policy, classification: row.classification, batchItemId: row.batch_item_id };
 }
 function toJobTransition(row: JobTransitionRow): JobTransition {
   return { id: row.id, jobId: row.job_id, fromState: row.from_state, toState: row.to_state, reason: row.reason, createdAt: row.created_at };
@@ -55,6 +58,10 @@ function recordTransition(db: Database, jobId: string, fromState: JobState | nul
 export interface RetryPolicy { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number; }
 export interface CreateBillResult { bill: Bill; created: boolean; }
 export interface ReviewSubmission { billId: string; reviewerId: string; action: "approve" | "reject"; reason: string | null; note: string | null; expectedContentRevision: number; expectedReviewRevision: number; corrected: ExtractedBill; }
+export interface CompletedInvoiceExportRecord { id: string; receivedAt: string; senderId: string; extraction: ExtractedBill; }
+export interface ReviewQueueFilters { source?: BillSource; batchId?: string; status?: "complete" | "not_invoice" | Bill["status"]; }
+export interface ReviewQueueBill extends Bill { batchId: string | null; displayStatus: "Complete" | "NotInvoice" | Bill["status"]; }
+export interface ReviewClassificationOverride { billId: string; reviewerId: string; action: "mark_not_invoice" | "reclassify_invoice"; expectedContentRevision: number; expectedReviewRevision: number; }
 
 function retryTransition(attempts: number, policy: RetryPolicy, now: Date): { state: "retryable_failure" | "permanent_failure"; availableAt: string } {
   if (attempts >= policy.maxAttempts) return { state: "permanent_failure", availableAt: now.toISOString() };
@@ -85,8 +92,17 @@ export class BillDatabase {
   createBillWithInitialJobs(input: CreateBillInput, initialJobs: InitialJobInput[]): CreateBillResult {
     const now = new Date().toISOString();
     const billId = input.id ?? randomUUID();
-    const insertBill = this.sqlite.query(`INSERT INTO bills (id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, caption, original_filename, mime_type, original_path, content_sha256, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?) ON CONFLICT(whatsapp_message_id, attachment_index) DO NOTHING`);
-    const bySource = this.sqlite.query<BillRow, [string, number]>("SELECT * FROM bills WHERE whatsapp_message_id = ? AND attachment_index = ?");
+    const source = input.source ?? "whatsapp";
+    const sourceIdentity = input.sourceIdentity ?? `whatsapp:${input.whatsappMessageId}:${input.attachmentIndex}`;
+    const extractionPolicy = input.extractionPolicy ?? "mistral_with_azure_fallback";
+    const classification = input.classification ?? "unclassified";
+    if (!sourceIdentity) throw new Error("Bill source identity is required");
+    if (source === "whatsapp" && input.batchItemId) throw new Error("WhatsApp bill cannot link an admin-upload batch item");
+    if (source === "admin_upload" && !input.batchItemId) throw new Error("Admin-upload bill requires a batch item");
+    if (classification === "not_invoice" && initialJobs.some((job) => job.type === "project_to_sheet")) throw new Error("NotInvoice bills cannot create sheet projection jobs");
+    const insertBill = this.sqlite.query(`INSERT INTO bills (id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, caption, original_filename, mime_type, original_path, content_sha256, status, source, source_identity, extraction_policy, classification, batch_item_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
+    const bySource = this.sqlite.query<BillRow, [BillSource, string]>("SELECT * FROM bills WHERE source = ? AND source_identity = ?");
+    const legacyWhatsApp = this.sqlite.query<BillRow, [string, number]>("SELECT * FROM bills WHERE whatsapp_message_id = ? AND attachment_index = ?");
     const insertJob = this.sqlite.query(`INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, 0, ?, ?, ?)`);
     const jobByKey = this.sqlite.query<{ bill_id: string }, [string]>("SELECT bill_id FROM jobs WHERE idempotency_key = ?");
     return this.sqlite.transaction(() => {
@@ -95,9 +111,15 @@ export class BillDatabase {
         if (jobKeys.has(job.idempotencyKey)) throw new Error(`Duplicate required job idempotency key: ${job.idempotencyKey}`);
         jobKeys.add(job.idempotencyKey);
       }
-      const result = insertBill.run(billId, input.whatsappMessageId, input.whatsappGroupId, input.whatsappSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, input.mimeType, input.originalPath, input.contentSha256, now, now);
-      const row = bySource.get(input.whatsappMessageId, input.attachmentIndex);
-      if (!row) throw new Error("Bill insert did not produce a bill");
+      const existingBill = bySource.get(source, sourceIdentity) ?? (source === "whatsapp" ? legacyWhatsApp.get(input.whatsappMessageId, input.attachmentIndex) : null);
+      if (source === "admin_upload" && input.batchItemId && !existingBill) {
+        const compatible = this.sqlite.query<{ value: number }, [string]>(`SELECT 1 AS value FROM admin_upload_batch_items item
+          JOIN admin_upload_batches batch ON batch.id = item.batch_id WHERE item.id = ? AND item.bill_id IS NULL AND item.state = 'queued'`).get(input.batchItemId);
+        if (!compatible) throw new Error("Admin-upload batch item is missing or already linked");
+      }
+      const result = insertBill.run(billId, input.whatsappMessageId, input.whatsappGroupId, input.whatsappSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, input.mimeType, input.originalPath, input.contentSha256, source, sourceIdentity, extractionPolicy, classification, input.batchItemId ?? null, now, now);
+      const row = existingBill ?? bySource.get(source, sourceIdentity) ?? (source === "whatsapp" ? legacyWhatsApp.get(input.whatsappMessageId, input.attachmentIndex) : null);
+      if (!row) throw new Error("Bill source identity conflicts with another bill");
       const created = result.changes === 1;
       for (const job of initialJobs) {
         const existing = jobByKey.get(job.idempotencyKey);
@@ -108,6 +130,11 @@ export class BillDatabase {
           if (insertJob.run(jobId, row.id, job.type, job.idempotencyKey, job.availableAt ?? now, now, now).changes !== 1) throw new Error(`Could not create required initial job: ${job.idempotencyKey}`);
           recordTransition(this.sqlite, jobId, null, "pending", "created", now);
         }
+      }
+      if (created && input.batchItemId) {
+        const linked = this.sqlite.query(`UPDATE admin_upload_batch_items SET bill_id = ?, state = 'processing', updated_at = ?
+          WHERE id = ? AND bill_id IS NULL AND state = 'queued' AND EXISTS (SELECT 1 FROM admin_upload_batches WHERE id = admin_upload_batch_items.batch_id)`).run(row.id, now, input.batchItemId);
+        if (linked.changes !== 1) throw new Error("Admin-upload batch item is missing or already linked");
       }
       return { bill: toBill(row), created };
     })();
@@ -121,6 +148,120 @@ export class BillDatabase {
   getBill(id: string): Bill | null {
     const row = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE id = ?").get(id);
     return row ? toBill(row) : null;
+  }
+
+  createAdminUploadBatch(input: { id?: string; idempotencyKey: string; originalFilename: string }): { batch: AdminUploadBatch; created: boolean } {
+    const now = new Date().toISOString();
+    const id = input.id ?? randomUUID();
+    return this.sqlite.transaction(() => {
+      const result = this.sqlite.query("INSERT INTO admin_upload_batches (id, idempotency_key, original_filename, state, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING").run(id, input.idempotencyKey, input.originalFilename, now, now);
+      const row = this.sqlite.query<AdminUploadBatchRow, [string]>("SELECT * FROM admin_upload_batches WHERE idempotency_key = ?").get(input.idempotencyKey);
+      if (!row) throw new Error("Admin-upload batch insert did not produce a batch");
+      return { batch: { id: row.id, idempotencyKey: row.idempotency_key, originalFilename: row.original_filename, state: row.state, createdAt: row.created_at, updatedAt: row.updated_at }, created: result.changes === 1 };
+    })();
+  }
+
+  createAdminUploadBatchItem(input: { id?: string; batchId: string; itemIndex: number; entryPath: string }): { item: AdminUploadBatchItem; created: boolean } {
+    const now = new Date().toISOString();
+    const id = input.id ?? randomUUID();
+    return this.sqlite.transaction(() => {
+      const byIndex = this.sqlite.query<AdminUploadBatchItemRow, [string, number]>("SELECT * FROM admin_upload_batch_items WHERE batch_id = ? AND item_index = ?");
+      const existing = byIndex.get(input.batchId, input.itemIndex);
+      if (existing) return { item: { id: existing.id, batchId: existing.batch_id, itemIndex: existing.item_index, entryPath: existing.entry_path, state: existing.state, errorCode: existing.error_code, billId: existing.bill_id, createdAt: existing.created_at, updatedAt: existing.updated_at }, created: false };
+      const result = this.sqlite.query(`INSERT INTO admin_upload_batch_items (id, batch_id, item_index, entry_path, state, created_at, updated_at)
+        SELECT ?, ?, ?, ?, 'queued', ?, ? WHERE EXISTS (SELECT 1 FROM admin_upload_batches WHERE id = ? AND state IN ('queued', 'processing'))`).run(id, input.batchId, input.itemIndex, input.entryPath, now, now, input.batchId);
+      const row = byIndex.get(input.batchId, input.itemIndex);
+      if (!row) throw new Error("Admin-upload batch item requires an existing batch");
+      return { item: { id: row.id, batchId: row.batch_id, itemIndex: row.item_index, entryPath: row.entry_path, state: row.state, errorCode: row.error_code, billId: row.bill_id, createdAt: row.created_at, updatedAt: row.updated_at }, created: result.changes === 1 };
+    })();
+  }
+
+  setAdminUploadBatchState(batchId: string, state: AdminUploadBatch["state"]): boolean {
+    const now = new Date().toISOString();
+    const expected = state === "processing" ? "queued" : state === "completed" ? "processing" : "";
+    if (state === "completed") {
+      return this.sqlite.query(`UPDATE admin_upload_batches SET state = ?, updated_at = ? WHERE id = ? AND state = ?
+        AND NOT EXISTS (SELECT 1 FROM admin_upload_batch_items WHERE batch_id = admin_upload_batches.id AND state IN ('queued', 'processing'))`).run(state, now, batchId, expected).changes === 1;
+    }
+    if (state === "failed") return this.sqlite.query("UPDATE admin_upload_batches SET state = ?, updated_at = ? WHERE id = ? AND state IN ('queued', 'processing')").run(state, now, batchId).changes === 1;
+    return this.sqlite.query("UPDATE admin_upload_batches SET state = ?, updated_at = ? WHERE id = ? AND state = ?").run(state, now, batchId, expected).changes === 1;
+  }
+
+  /** Seals ZIP enumeration and atomically chooses processing or completed from item state. */
+  finalizeAdminUploadBatch(batchId: string): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => this.sqlite.query(`UPDATE admin_upload_batches SET state = CASE WHEN NOT EXISTS
+      (SELECT 1 FROM admin_upload_batch_items WHERE batch_id = admin_upload_batches.id AND state IN ('queued', 'processing')) THEN 'completed' ELSE 'processing' END, updated_at = ?
+      WHERE id = ? AND state = 'queued'`).run(now, batchId).changes === 1)();
+  }
+
+  /** Completes the parent in the same transaction as the terminal item transition. */
+  private completeAdminUploadBatchIfTerminal(itemId: string, now: string): void {
+    this.sqlite.query(`UPDATE admin_upload_batches SET state = 'completed', updated_at = ?
+      WHERE id = (SELECT batch_id FROM admin_upload_batch_items WHERE id = ?) AND state = 'processing'
+        AND NOT EXISTS (SELECT 1 FROM admin_upload_batch_items WHERE batch_id = admin_upload_batches.id AND state IN ('queued', 'processing'))`).run(now, itemId);
+  }
+
+  transitionAdminUploadBatchItemState(input: { itemId: string; state: AdminUploadBatchItem["state"]; errorCode?: string | null; expectedStates?: readonly AdminUploadBatchItem["state"][] }): boolean {
+    if (input.expectedStates?.length === 0) return false;
+    const now = new Date().toISOString();
+    const allowedPrevious: Record<AdminUploadBatchItem["state"], readonly AdminUploadBatchItem["state"][]> = {
+      queued: [], processing: ["queued"], complete: ["processing"], not_invoice: ["processing"], rejected: ["queued", "processing"], failed: ["queued", "processing"],
+    };
+    const expected = input.expectedStates
+      ? input.expectedStates.filter((state) => allowedPrevious[input.state].includes(state))
+      : allowedPrevious[input.state];
+    if (expected.length === 0) return false;
+    const placeholders = expected.map(() => "?").join(",");
+    return this.sqlite.transaction(() => {
+      const result = this.sqlite.query(`UPDATE admin_upload_batch_items SET state = ?, error_code = ?, updated_at = ? WHERE id = ? AND state IN (${placeholders})`).run(input.state, input.errorCode ?? null, now, input.itemId, ...expected);
+      if (result.changes === 1 && input.state !== "processing") this.completeAdminUploadBatchIfTerminal(input.itemId, now);
+      return result.changes === 1;
+    })();
+  }
+
+  getAdminUploadBatchStatusCounts(batchId: string): AdminUploadBatchStatusCounts | null {
+    const batch = this.sqlite.query<{ value: number }, [string]>("SELECT 1 AS value FROM admin_upload_batches WHERE id = ?").get(batchId);
+    if (!batch) return null;
+    const row = this.sqlite.query<AdminUploadBatchStatusCounts, [string]>(`SELECT COUNT(*) AS total,
+      COALESCE(SUM(state = 'queued'), 0) AS queued, COALESCE(SUM(state = 'processing'), 0) AS processing, COALESCE(SUM(state = 'complete'), 0) AS complete,
+      COALESCE(SUM(state = 'not_invoice'), 0) AS notInvoice, COALESCE(SUM(state = 'rejected'), 0) AS rejected, COALESCE(SUM(state = 'failed'), 0) AS failed
+      FROM admin_upload_batch_items WHERE batch_id = ?`).get(batchId);
+    return row ? { total: row.total, queued: row.queued, processing: row.processing, complete: row.complete, notInvoice: row.notInvoice, rejected: row.rejected, failed: row.failed } : { total: 0, queued: 0, processing: 0, complete: 0, notInvoice: 0, rejected: 0, failed: 0 };
+  }
+
+  getAdminUploadBatchStatus(batchId: string): { batch: AdminUploadBatch; counts: AdminUploadBatchStatusCounts; items: Array<Pick<AdminUploadBatchItem, "entryPath" | "state" | "errorCode" | "billId">> } | null {
+    const row = this.sqlite.query<AdminUploadBatchRow, [string]>("SELECT * FROM admin_upload_batches WHERE id = ?").get(batchId);
+    if (!row) return null;
+    const counts = this.getAdminUploadBatchStatusCounts(batchId);
+    if (!counts) return null;
+    const items = this.sqlite.query<AdminUploadBatchItemRow, [string]>("SELECT * FROM admin_upload_batch_items WHERE batch_id = ? ORDER BY item_index").all(batchId)
+      .map((item) => ({ entryPath: item.entry_path, state: item.state, errorCode: item.error_code, billId: item.bill_id }));
+    return { batch: { id: row.id, idempotencyKey: row.idempotency_key, originalFilename: row.original_filename, state: row.state, createdAt: row.created_at, updatedAt: row.updated_at }, counts, items };
+  }
+
+  /** A claimed extract job and the exact bill revision fence this provider-derived transition. */
+  transitionBillClassification(input: { billId: string; jobId: string; leaseToken: string; classification: "invoice" | "not_invoice"; actor: string; reason?: string | null; expectedContentRevision: number; expectedReviewRevision: number }): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      const owned = this.sqlite.query<{ value: number }, [string, string, string, string]>(`SELECT 1 AS value FROM jobs
+        WHERE id = ? AND bill_id = ? AND type = 'extract' AND state = 'running' AND lease_token = ? AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`).get(input.jobId, input.billId, input.leaseToken, now);
+      if (!owned) return false;
+      const bill = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ?").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      if (!bill || bill.classification !== "unclassified") return false;
+      const contentRevision = bill.content_revision + 1;
+      if (input.classification === "not_invoice") this.sqlite.query("UPDATE bills SET classification = ?, status = 'failed', manual_review_required = 1, content_revision = ?, updated_at = ? WHERE id = ?").run(input.classification, contentRevision, now, input.billId);
+      else this.sqlite.query("UPDATE bills SET classification = ?, content_revision = ?, updated_at = ? WHERE id = ?").run(input.classification, contentRevision, now, input.billId);
+      this.sqlite.query("INSERT INTO bill_classification_events (id, bill_id, from_classification, to_classification, actor, reason, content_revision, review_revision, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(randomUUID(), input.billId, bill.classification, input.classification, input.actor, input.reason ?? null, contentRevision, bill.review_revision, now);
+      if (bill.batch_item_id) {
+        if (input.classification === "not_invoice") {
+          this.sqlite.query("UPDATE admin_upload_batch_items SET state = 'not_invoice', updated_at = ? WHERE id = ? AND state = 'processing'").run(now, bill.batch_item_id);
+          this.completeAdminUploadBatchIfTerminal(bill.batch_item_id, now);
+        }
+      }
+      if (input.classification === "not_invoice") this.invalidatePendingProjectJobs(input.billId, now);
+      return true;
+    })();
   }
 
   /** Read-only canonical dashboard totals. Bill and background-job failures are distinct. */
@@ -256,9 +397,30 @@ export class BillDatabase {
 
   getEffectiveExtraction(billId: string): ExtractedBill | null { return this.getEffectiveBillData(billId)?.extraction ?? this.getExtraction(billId)?.normalized ?? null; }
 
-  listReviewBills(): Bill[] {
-    return this.sqlite.query<BillRow, []>(`SELECT DISTINCT b.* FROM bills b LEFT JOIN jobs j ON j.bill_id = b.id
-      WHERE b.status = 'needs_review' OR j.state = 'permanent_failure' ORDER BY b.updated_at DESC`).all().map(toBill);
+  /** Approved admin-upload invoices whose batch entry reached the terminal complete state. */
+  listCompletedInvoiceExports(): CompletedInvoiceExportRecord[] {
+    return this.sqlite.query<{ id: string; received_at: string; whatsapp_sender_id: string; normalized_json: string }, []>(`SELECT b.id, b.received_at, b.whatsapp_sender_id,
+      COALESCE(effective.normalized_json, extraction.normalized_json) AS normalized_json
+      FROM bills b
+      JOIN admin_upload_batch_items item ON item.id = b.batch_item_id AND item.state = 'complete'
+      LEFT JOIN effective_bill_data effective ON effective.bill_id = b.id
+      LEFT JOIN extractions extraction ON extraction.bill_id = b.id
+      WHERE b.status = 'approved' AND b.classification = 'invoice'
+        AND COALESCE(effective.normalized_json, extraction.normalized_json) IS NOT NULL
+      ORDER BY b.received_at, b.id`).all().map((row) => ({ id: row.id, receivedAt: row.received_at, senderId: row.whatsapp_sender_id, extraction: JSON.parse(row.normalized_json) as ExtractedBill }));
+  }
+
+  listReviewBills(filters: ReviewQueueFilters = {}): ReviewQueueBill[] {
+    const where: string[] = [];
+    const values: string[] = [];
+    if (filters.source) { where.push("b.source = ?"); values.push(filters.source); }
+    if (filters.batchId) { where.push("item.batch_id = ?"); values.push(filters.batchId); }
+    if (filters.status === "complete") where.push("b.status = 'approved' AND b.classification != 'not_invoice'");
+    else if (filters.status === "not_invoice") where.push("b.classification = 'not_invoice'");
+    else if (filters.status) { where.push("b.status = ? AND b.classification != 'not_invoice'"); values.push(filters.status); }
+    const rows = this.sqlite.query<BillRow & { batch_id: string | null }, string[]>(`SELECT b.*, item.batch_id FROM bills b
+      LEFT JOIN admin_upload_batch_items item ON item.id = b.batch_item_id ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY b.updated_at DESC`).all(...values);
+    return rows.map((row) => ({ ...toBill(row), batchId: row.batch_id, displayStatus: row.classification === "not_invoice" ? "NotInvoice" : row.status === "approved" ? "Complete" : row.status }));
   }
 
   getReviewEvents(billId: string): ReviewEvent[] {
@@ -271,6 +433,8 @@ export class BillDatabase {
     return this.sqlite.transaction(() => {
       const bill = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND status IN ('needs_review','failed')").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
       if (!bill) return false;
+      // Reject a crafted approval before any effective-data, audit, issue, or revision mutation.
+      if (input.action === "approve" && bill.classification === "not_invoice") return false;
       const original = this.getEffectiveExtraction(input.billId);
       const nextContent = bill.content_revision + 1;
       const nextReview = bill.review_revision + 1;
@@ -280,13 +444,44 @@ export class BillDatabase {
       this.sqlite.query("DELETE FROM validation_issues WHERE bill_id = ?").run(input.billId);
       const insertIssue = this.sqlite.query("INSERT INTO validation_issues (id, bill_id, field, code, message, severity, observed_value, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
       for (const issue of factualIssues) insertIssue.run(randomUUID(), input.billId, issue.field, issue.code, issue.message, issue.severity, issue.observedValue, now);
-      const approved = input.action === "approve";
+       const approved = input.action === "approve";
       this.sqlite.query("UPDATE bills SET status = ?, manual_review_required = 0, content_revision = ?, review_revision = ?, updated_at = ? WHERE id = ?").run(approved ? "approved" : "failed", nextContent, nextReview, now, input.billId);
-      this.invalidatePendingProjectJobs(input.billId, now);
+       this.invalidatePendingProjectJobs(input.billId, now);
+        if (bill.batch_item_id) {
+          this.sqlite.query("UPDATE admin_upload_batch_items SET state = ?, updated_at = ? WHERE id = ? AND state = 'processing'").run(approved ? "complete" : "rejected", now, bill.batch_item_id);
+          this.completeAdminUploadBatchIfTerminal(bill.batch_item_id, now);
+        }
       if (approved) {
         this.ensureArchiveJob(input.billId, now);
         this.activateProjectJob(input.billId, nextContent, now);
       } else if (bill.sheet_row_key !== null || this.getProjectionMetadata("sheets", input.billId)) this.activateReviewSyncJob(input.billId, nextReview, now);
+      return true;
+    })();
+  }
+
+  /** Human classification override is revision-fenced and cannot race an active extractor lease. */
+  overrideClassification(input: ReviewClassificationOverride): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      const bill = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ?").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      if (!bill || this.sqlite.query<{ value: number }, [string, string]>("SELECT 1 AS value FROM jobs WHERE bill_id = ? AND type = 'extract' AND state = 'running' AND lease_expires_at > ?").get(input.billId, now)?.value) return false;
+      const to = input.action === "mark_not_invoice" ? "not_invoice" : "invoice";
+      if ((to === "not_invoice" && bill.classification === "not_invoice") || (to === "invoice" && bill.classification !== "not_invoice")) return false;
+      const contentRevision = bill.content_revision + 1;
+      const reviewRevision = bill.review_revision + 1;
+      const status = to === "not_invoice" ? "failed" : "needs_review";
+      this.sqlite.query("UPDATE bills SET classification = ?, status = ?, manual_review_required = 1, content_revision = ?, review_revision = ?, updated_at = ? WHERE id = ?").run(to, status, contentRevision, reviewRevision, now, input.billId);
+      this.sqlite.query("INSERT INTO bill_classification_events (id, bill_id, from_classification, to_classification, actor, reason, content_revision, review_revision, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(randomUUID(), input.billId, bill.classification, to, input.reviewerId, input.action, contentRevision, reviewRevision, now);
+      this.sqlite.query("INSERT INTO review_events (id, bill_id, reviewer_id, action, previous_values, corrected_values, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(randomUUID(), input.billId, input.reviewerId, input.action, JSON.stringify({ classification: bill.classification, status: bill.status }), JSON.stringify({ classification: to, status }), now);
+      this.invalidatePendingProjectJobs(input.billId, now);
+      if (bill.batch_item_id) {
+        this.sqlite.query("UPDATE admin_upload_batch_items SET state = ?, updated_at = ? WHERE id = ?").run(to === "not_invoice" ? "not_invoice" : "processing", now, bill.batch_item_id);
+        if (to === "not_invoice") this.completeAdminUploadBatchIfTerminal(bill.batch_item_id, now);
+        if (to === "invoice") this.sqlite.query("UPDATE admin_upload_batches SET state = 'processing', updated_at = ? WHERE id = (SELECT batch_id FROM admin_upload_batch_items WHERE id = ?)").run(now, bill.batch_item_id);
+      }
+      // A Sheets append can succeed immediately before its SQLite persistence. Always record
+      // revision-fenced cleanup so a NotInvoice/reclassification later compensates that crash.
+      this.activateReviewSyncJob(input.billId, reviewRevision, now);
       return true;
     })();
   }
@@ -349,11 +544,15 @@ export class BillDatabase {
     return this.sqlite.transaction(() => {
       const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ?").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
       // A human workflow is sticky: only approveReviewCorrection may approve any review revision.
-      if (!current || ((current.review_revision > 0 || current.manual_review_required === 1) && input.decision === "approved")) return false;
+      if (!current || (current.classification === "not_invoice" && input.decision === "approved") || ((current.review_revision > 0 || current.manual_review_required === 1) && input.decision === "approved")) return false;
       this.sqlite.query("DELETE FROM validation_issues WHERE bill_id = ?").run(input.billId);
       const insertIssue = this.sqlite.query("INSERT INTO validation_issues (id, bill_id, field, code, message, severity, observed_value, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
       for (const item of input.issues) insertIssue.run(randomUUID(), input.billId, item.field, item.code, item.message, item.severity, item.observedValue, now);
       this.sqlite.query("UPDATE bills SET status = ?, updated_at = ? WHERE id = ?").run(input.decision, now, input.billId);
+      if (input.decision === "approved" && current.batch_item_id) {
+        this.sqlite.query("UPDATE admin_upload_batch_items SET state = 'complete', updated_at = ? WHERE id = ? AND state = 'processing'").run(now, current.batch_item_id);
+        this.completeAdminUploadBatchIfTerminal(current.batch_item_id, now);
+      }
       this.ensureArchiveJob(input.billId, now);
       if (input.decision === "approved") this.activateProjectJob(input.billId, input.expectedContentRevision, now);
       else this.invalidatePendingProjectJobs(input.billId, now);
@@ -370,6 +569,7 @@ export class BillDatabase {
   }
 
   private activateProjectJob(billId: string, revision: number, now: string): void {
+    if (!this.isProjectableInvoice(billId)) return;
     const idempotencyKey = `project:${billId}:${revision}`;
     const existing = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE idempotency_key = ?").get(idempotencyKey);
     if (existing) return;
@@ -393,9 +593,13 @@ export class BillDatabase {
     const now = new Date().toISOString();
     return this.sqlite.transaction(() => {
       const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND manual_review_required = 1").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
-      if (!current) return false;
+      if (!current || current.classification === "not_invoice") return false;
       this.sqlite.query("UPDATE bills SET status = 'approved', manual_review_required = 0, updated_at = ? WHERE id = ?").run(now, input.billId);
       this.sqlite.query("INSERT INTO review_events (id, bill_id, reviewer_id, action, created_at) VALUES (?, ?, ?, ?, ?)").run(randomUUID(), input.billId, input.reviewerId, input.action ?? "approved", now);
+      if (current.batch_item_id) {
+        this.sqlite.query("UPDATE admin_upload_batch_items SET state = 'complete', updated_at = ? WHERE id = ? AND state = 'processing'").run(now, current.batch_item_id);
+        this.completeAdminUploadBatchIfTerminal(current.batch_item_id, now);
+      }
       this.ensureArchiveJob(input.billId, now);
       this.activateProjectJob(input.billId, input.expectedContentRevision, now);
       return true;
@@ -412,18 +616,19 @@ export class BillDatabase {
 
   /** Used by Sheets handlers immediately before their provider effect. */
   isApprovedAtRevision(billId: string, revision: number | null): boolean {
-    return revision !== null && Boolean(this.sqlite.query<{ value: number }, [string, number]>("SELECT 1 AS value FROM bills WHERE id = ? AND status = 'approved' AND content_revision = ?").get(billId, revision)?.value);
+    return revision !== null && Boolean(this.sqlite.query<{ value: number }, [string, number]>("SELECT 1 AS value FROM bills WHERE id = ? AND status = 'approved' AND classification != 'not_invoice' AND content_revision = ?").get(billId, revision)?.value);
   }
-  isFailedAtReviewRevision(billId: string, revision: number | null): boolean {
-    return revision !== null && Boolean(this.sqlite.query<{ value: number }, [string, number]>("SELECT 1 AS value FROM bills WHERE id = ? AND status = 'failed' AND review_revision = ?").get(billId, revision)?.value);
+  private isProjectableInvoice(billId: string): boolean { return Boolean(this.sqlite.query<{ value: number }, [string]>("SELECT 1 AS value FROM bills WHERE id = ? AND classification != 'not_invoice'").get(billId)?.value); }
+  isUnapprovedAtReviewRevision(billId: string, revision: number | null): boolean {
+    return revision !== null && Boolean(this.sqlite.query<{ value: number }, [string, number]>("SELECT 1 AS value FROM bills WHERE id = ? AND status != 'approved' AND review_revision = ?").get(billId, revision)?.value);
   }
   ensureCurrentProjectionJob(billId: string): void {
-    const bill = this.getBill(billId); if (!bill || bill.status !== "approved") return;
+    const bill = this.getBill(billId); if (!bill || bill.status !== "approved" || bill.classification === "not_invoice") return;
     this.sqlite.transaction(() => this.activateProjectJob(billId, bill.contentRevision, new Date().toISOString()))();
   }
   /** Compensation after a stale rejection clear: never touch a running/succeeded job. */
   enqueueProjectionRepair(syncJobId: string, billId: string): void {
-    const bill = this.getBill(billId); if (!bill || bill.status !== "approved") return;
+    const bill = this.getBill(billId); if (!bill || bill.status !== "approved" || bill.classification === "not_invoice") return;
     const now = new Date().toISOString(); const key = `repair:${syncJobId}:${bill.contentRevision}`;
     this.sqlite.transaction(() => {
       if (this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE idempotency_key = ?").get(key)) return;
@@ -495,6 +700,13 @@ export class BillDatabase {
         ON CONFLICT(bill_id) DO UPDATE SET fallback_status = excluded.fallback_status, normalized_json = NULL, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = excluded.error_details, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
         .run(randomUUID(), input.billId, input.fallbackStatus ?? (provider === "azure" ? "failed" : "pending"), input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, input.errorDetails, now, now);
       if (input.status) this.sqlite.query("UPDATE bills SET status = ?, updated_at = ? WHERE id = ? AND status = 'extracting'").run(input.status, now, input.billId);
+      if (input.status === "failed") {
+        const bill = this.getBill(input.billId);
+        if (bill?.batchItemId) {
+          this.sqlite.query("UPDATE admin_upload_batch_items SET state = 'failed', updated_at = ? WHERE id = ? AND state = 'processing'").run(now, bill.batchItemId);
+          this.completeAdminUploadBatchIfTerminal(bill.batchItemId, now);
+        }
+      }
       return result.changes === 1;
     })();
   }
@@ -558,7 +770,7 @@ export class BillDatabase {
       const job = this.getJob(id);
       if (!job || (job.state !== "retryable_failure" && (!includePermanent || job.state !== "permanent_failure")) || job.lastError === "validation_invalidated") return false;
       const bill = this.getBill(job.billId);
-      if (!bill || (job.type === "project_to_sheet" && !this.isApprovedAtRevision(job.billId, job.expectedRevision)) || (job.type === "sync_review_correction" && bill.status !== "failed" && bill.status !== "approved")) return false;
+      if (!bill || (job.type === "project_to_sheet" && !this.isApprovedAtRevision(job.billId, job.expectedRevision)) || (job.type === "sync_review_correction" && bill.status !== "failed" && bill.status !== "needs_review" && bill.status !== "approved")) return false;
       const result = this.sqlite.query("UPDATE jobs SET state = 'pending', available_at = ?, lease_token = NULL, lease_expires_at = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ? AND state IN ('retryable_failure', 'permanent_failure')").run(now, now, id);
       if (result.changes === 1) recordTransition(this.sqlite, id, job.state, "pending", "operator_replay", now);
       return result.changes === 1;

@@ -321,9 +321,9 @@ export function createReviewCorrectionSyncHandler(database: BillDatabase, sheets
         // A replayed correction-sync job converges on the same revision-specific hidden-ID upsert.
         return createSheetsProjectionHandler(database, sheets)({ ...job, expectedRevision: bill.contentRevision }, context);
       }
-      if (!database.isFailedAtReviewRevision(bill.id, job.expectedRevision)) return;
+      if (!database.isUnapprovedAtReviewRevision(bill.id, job.expectedRevision)) return;
       await sheets.initializeLedger();
-      context.assertLease(); if (!database.isFailedAtReviewRevision(bill.id, job.expectedRevision)) return;
+      context.assertLease(); if (!database.isUnapprovedAtReviewRevision(bill.id, job.expectedRevision)) return;
       const found = sheets.findRowsByBillId ? await sheets.findRowsByBillId(bill.id) : await sheets.findRowByBillId(bill.id);
       const rows: number[] = Array.isArray(found) ? found : found === null ? [] : [found];
       if (rows.length && sheets.clearRows) await sheets.clearRows([...rows].sort((a, b) => b - a));
@@ -331,7 +331,7 @@ export function createReviewCorrectionSyncHandler(database: BillDatabase, sheets
       else if (rows.length) throw new GooglePermanentError("Google input failure: Sheets adapter cannot remove review row");
       // The clear cannot be transactional with SQLite. If reapproval raced it, durably restore
       // the approved revision; its hidden-ID upsert is idempotent.
-      if (!database.isFailedAtReviewRevision(bill.id, job.expectedRevision)) database.enqueueProjectionRepair(job.id, bill.id);
+      if (!database.isUnapprovedAtReviewRevision(bill.id, job.expectedRevision)) database.enqueueProjectionRepair(job.id, bill.id);
     } catch (error) { throw googleFailure(error); }
   };
 }

@@ -19,7 +19,7 @@ describe("migrations", () => {
   test("apply on a fresh database and safely reapply", () => {
     database.close();
     const reopened = new BillDatabase(path);
-    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(13);
+    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(14);
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'validation_issues'").get()?.name).toBe("validation_issues");
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'extraction_invocations'").get()?.name).toBe("extraction_invocations");
     reopened.close();
@@ -34,7 +34,7 @@ describe("migrations", () => {
     expect(await first.exited).toBe(0);
     expect(await second.exited).toBe(0);
     database = new BillDatabase(path);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(13);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(14);
   });
 
   test("upgrades a v9 database with existing extraction records without changing canonical data", () => {
@@ -68,7 +68,44 @@ describe("migrations", () => {
     database = new BillDatabase(path);
     expect(database.getExtraction("legacy-bill")).toMatchObject({ normalized: { vendorName: "Legacy" }, selectedProvider: null, fallbackStatus: null });
     expect(database.sqlite.query<{ provider: string }, [string]>("SELECT provider FROM extraction_attempts WHERE id = ?").get("legacy-attempt")?.provider).toBe("mistral");
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(13);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(14);
+  });
+
+  test("upgrades historical WhatsApp identity, jobs, foreign keys, and projections without loss", () => {
+    database.close();
+    rmSync(path, { force: true });
+    const legacy = new SqliteDatabase(path, { create: true, strict: true });
+    const appliedAt = "2026-08-30T00:00:00.000Z";
+    legacy.exec(`PRAGMA foreign_keys = ON;
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE bills (
+        id TEXT PRIMARY KEY, whatsapp_message_id TEXT NOT NULL, whatsapp_group_id TEXT NOT NULL, whatsapp_sender_id TEXT NOT NULL, attachment_index INTEGER NOT NULL,
+        received_at TEXT NOT NULL, caption TEXT, original_filename TEXT, mime_type TEXT NOT NULL, original_path TEXT NOT NULL, content_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL, drive_file_id TEXT, sheet_row_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        content_revision INTEGER NOT NULL DEFAULT 0, review_revision INTEGER NOT NULL DEFAULT 0, manual_review_required INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (whatsapp_message_id, attachment_index)
+      );
+      CREATE TABLE jobs (
+        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), type TEXT NOT NULL, state TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
+        attempts INTEGER NOT NULL DEFAULT 0, available_at TEXT NOT NULL, lease_token TEXT, lease_expires_at TEXT, claimed_by TEXT, claimed_at TEXT,
+        last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expected_revision INTEGER
+      );
+      CREATE TABLE provider_projection_metadata (
+        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), provider TEXT NOT NULL, projection_key TEXT NOT NULL,
+        external_id TEXT, external_url TEXT, metadata_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (provider, projection_key)
+      );`);
+    for (let version = 1; version <= 13; version += 1) legacy.query("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, appliedAt);
+    legacy.query(`INSERT INTO bills (id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, caption, original_filename, mime_type, original_path, content_sha256, status, drive_file_id, sheet_row_key, created_at, updated_at, content_revision, review_revision, manual_review_required)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run("legacy-whatsapp", "wamid.legacy", "group@chat", "sender@chat", 2, appliedAt, "فاتورة", "legacy.pdf", "application/pdf", "/originals/legacy.pdf", "b".repeat(64), "approved", "drive-legacy", "sheet-legacy", appliedAt, appliedAt, 7, 3, 0);
+    legacy.query("INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run("legacy-job", "legacy-whatsapp", "archive_to_drive", "succeeded", "archive:legacy", 1, appliedAt, appliedAt, appliedAt);
+    legacy.query("INSERT INTO provider_projection_metadata (id, bill_id, provider, projection_key, external_id, external_url, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run("legacy-projection", "legacy-whatsapp", "sheets", "legacy-whatsapp", "sheet-legacy", "https://sheet.example", "{}", appliedAt, appliedAt);
+    legacy.close();
+
+    database = new BillDatabase(path);
+    expect(database.getBill("legacy-whatsapp")).toMatchObject({ whatsappMessageId: "wamid.legacy", attachmentIndex: 2, status: "approved", driveFileId: "drive-legacy", sheetRowKey: "sheet-legacy", contentRevision: 7, reviewRevision: 3, source: "whatsapp", sourceIdentity: "legacy-whatsapp", extractionPolicy: "mistral_with_azure_fallback", classification: "unclassified", batchItemId: null });
+    expect(database.getJob("legacy-job")).toMatchObject({ billId: "legacy-whatsapp", state: "succeeded" });
+    expect(database.getProjectionMetadata("sheets", "legacy-whatsapp")).toMatchObject({ billId: "legacy-whatsapp", externalId: "sheet-legacy" });
   });
 });
 
@@ -296,5 +333,111 @@ describe("canonical bill and jobs", () => {
     if (!claim) throw new Error("expected claim");
     expect(database.failJob(claim.id, claim.leaseToken, "fatal", { ...policy, maxAttempts: 1 }, start)?.state).toBe("permanent_failure");
     expect(database.getJobTransitions(claim.id).map((transition) => transition.toState)).toEqual(["pending", "running", "permanent_failure"]);
+  });
+});
+
+describe("admin-upload source and classification persistence", () => {
+  test("creates batches and items idempotently with bounded status counts", () => {
+    const first = database.createAdminUploadBatch({ idempotencyKey: "upload:sha256", originalFilename: "invoices.zip" });
+    const repeated = database.createAdminUploadBatch({ idempotencyKey: "upload:sha256", originalFilename: "changed.zip" });
+    expect(first.created).toBe(true); expect(repeated).toMatchObject({ created: false, batch: { id: first.batch.id, originalFilename: "invoices.zip" } });
+    const item = database.createAdminUploadBatchItem({ batchId: first.batch.id, itemIndex: 0, entryPath: "nested/invoice.pdf" });
+    expect(database.createAdminUploadBatchItem({ batchId: first.batch.id, itemIndex: 0, entryPath: "other.pdf" })).toMatchObject({ created: false, item: { id: item.item.id, entryPath: "nested/invoice.pdf" } });
+    expect(database.getAdminUploadBatchStatusCounts(first.batch.id)).toEqual({ total: 1, queued: 1, processing: 0, complete: 0, notInvoice: 0, rejected: 0, failed: 0 });
+    expect(database.transitionAdminUploadBatchItemState({ itemId: item.item.id, state: "rejected", errorCode: "unsupported_mime", expectedStates: ["queued"] })).toBe(true);
+    expect(database.transitionAdminUploadBatchItemState({ itemId: item.item.id, state: "processing", expectedStates: ["queued"] })).toBe(false);
+    expect(database.transitionAdminUploadBatchItemState({ itemId: item.item.id, state: "failed" })).toBe(false);
+    expect(database.getAdminUploadBatchStatusCounts(first.batch.id)).toEqual({ total: 1, queued: 0, processing: 0, complete: 0, notInvoice: 0, rejected: 1, failed: 0 });
+    expect(database.setAdminUploadBatchState(first.batch.id, "processing")).toBe(true);
+    expect(database.setAdminUploadBatchState(first.batch.id, "queued")).toBe(false);
+    expect(database.setAdminUploadBatchState(first.batch.id, "completed")).toBe(true);
+    expect(database.setAdminUploadBatchState(first.batch.id, "failed")).toBe(false);
+    expect(database.getAdminUploadBatchStatusCounts("missing")).toBeNull();
+  });
+
+  test("enforces item terminal states and completes batches only after every item is terminal", () => {
+    const batch = database.createAdminUploadBatch({ idempotencyKey: "upload:state-machine", originalFilename: "invoices.zip" }).batch;
+    const rejected = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 0, entryPath: "rejected.pdf" }).item;
+    const completed = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 1, entryPath: "completed.pdf" }).item;
+
+    expect(database.setAdminUploadBatchState(batch.id, "processing")).toBe(true);
+    expect(database.setAdminUploadBatchState(batch.id, "completed")).toBe(false);
+    expect(database.transitionAdminUploadBatchItemState({ itemId: rejected.id, state: "rejected", expectedStates: ["queued"] })).toBe(true);
+    expect(database.transitionAdminUploadBatchItemState({ itemId: rejected.id, state: "processing", expectedStates: ["rejected"] })).toBe(false);
+    expect(database.transitionAdminUploadBatchItemState({ itemId: rejected.id, state: "queued", expectedStates: ["rejected"] })).toBe(false);
+    expect(database.transitionAdminUploadBatchItemState({ itemId: completed.id, state: "processing", expectedStates: ["queued"] })).toBe(true);
+    expect(database.setAdminUploadBatchState(batch.id, "completed")).toBe(false);
+    expect(database.transitionAdminUploadBatchItemState({ itemId: completed.id, state: "complete", expectedStates: ["processing"] })).toBe(true);
+    expect(database.transitionAdminUploadBatchItemState({ itemId: completed.id, state: "failed", expectedStates: ["complete"] })).toBe(false);
+    expect(database.getAdminUploadBatchStatusCounts(batch.id)).toEqual({ total: 2, queued: 0, processing: 0, complete: 1, notInvoice: 0, rejected: 1, failed: 0 });
+    expect(database.getAdminUploadBatchStatus(batch.id)?.batch.state).toBe("completed");
+    expect(database.setAdminUploadBatchState(batch.id, "completed")).toBe(false);
+    expect(() => database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 2, entryPath: "late.pdf" })).toThrow("requires an existing batch");
+    expect(database.getAdminUploadBatchStatusCounts(batch.id)?.total).toBe(2);
+  });
+
+  test("uses source identity for idempotent uploaded bills and records Azure-only policy", () => {
+    const batch = database.createAdminUploadBatch({ idempotencyKey: "upload:source", originalFilename: "invoices.zip" }).batch;
+    const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 3, entryPath: "invoice.pdf" }).item;
+    const uploaded = { ...input(), whatsappMessageId: `admin-upload:${batch.id}:3`, whatsappGroupId: "admin-upload", whatsappSenderId: "admin-upload", attachmentIndex: 0, source: "admin_upload" as const, sourceIdentity: `admin-upload:${batch.id}:3`, extractionPolicy: "azure_only" as const, batchItemId: item.id };
+    const first = database.createBillWithInitialJobs(uploaded, [{ type: "extract", idempotencyKey: `extract:${uploaded.sourceIdentity}` }]);
+    const repeated = database.createBillWithInitialJobs({ ...uploaded, whatsappMessageId: "changed-legacy-value" }, [{ type: "extract", idempotencyKey: `extract:${uploaded.sourceIdentity}` }]);
+    expect(first.created).toBe(true); expect(repeated).toMatchObject({ created: false, bill: { id: first.bill.id, source: "admin_upload", sourceIdentity: uploaded.sourceIdentity, extractionPolicy: "azure_only", batchItemId: item.id } });
+    expect(database.getAdminUploadBatchStatusCounts(batch.id)).toEqual({ total: 1, queued: 0, processing: 1, complete: 0, notInvoice: 0, rejected: 0, failed: 0 });
+    expect(() => database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "whatsapp-with-batch", batchItemId: item.id }, [{ type: "extract", idempotencyKey: "whatsapp-with-batch" }])).toThrow("WhatsApp");
+    expect(() => database.createBillWithInitialJobs({ ...uploaded, whatsappMessageId: "admin-missing-item", attachmentIndex: 9, sourceIdentity: "other-upload", batchItemId: "missing-item" }, [{ type: "extract", idempotencyKey: "missing-upload-item" }])).toThrow("batch item");
+  });
+
+  test("persists NotInvoice terminally and prevents sheet projection jobs", () => {
+    const batch = database.createAdminUploadBatch({ idempotencyKey: "upload:classification", originalFilename: "invoices.zip" }).batch;
+    const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 0, entryPath: "not-invoice.png" }).item;
+    const bill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: `admin-upload:${batch.id}:0`, whatsappGroupId: "admin-upload", whatsappSenderId: "admin-upload", source: "admin_upload", sourceIdentity: `admin-upload:${batch.id}:0`, extractionPolicy: "azure_only", batchItemId: item.id }, [{ type: "extract", idempotencyKey: `extract:${item.id}` }]).bill;
+    const job = database.claimNextJob("azure", policy)!;
+    expect(database.transitionBillClassification({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, classification: "not_invoice", actor: "azure", reason: "no_document", expectedContentRevision: 0, expectedReviewRevision: 0 })).toBe(true);
+    expect(database.getBill(bill.id)).toMatchObject({ status: "failed", classification: "not_invoice", contentRevision: 1 });
+    database.sqlite.query("UPDATE bills SET status = 'approved' WHERE id = ?").run(bill.id);
+    database.ensureCurrentProjectionJob(bill.id);
+    expect(database.listJobsForBill(bill.id).map((job) => job.type)).toEqual(["extract"]);
+    expect(database.isApprovedAtRevision(bill.id, 1)).toBe(false);
+    expect(database.getAdminUploadBatchStatusCounts(batch.id)?.notInvoice).toBe(1);
+    expect(() => database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "not-invoice", sourceIdentity: "not-invoice", classification: "not_invoice" }, [{ type: "project_to_sheet", idempotencyKey: "not-invoice-project" }])).toThrow("NotInvoice");
+  });
+
+  test("review-correction approval terminalizes its item and parent batch", () => {
+    const batch = database.createAdminUploadBatch({ idempotencyKey: "upload:review-approval", originalFilename: "invoices.zip" }).batch;
+    const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 0, entryPath: "review.pdf" }).item;
+    expect(database.setAdminUploadBatchState(batch.id, "processing")).toBe(true);
+    const bill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "review-approval", source: "admin_upload", sourceIdentity: "review-approval", extractionPolicy: "azure_only", classification: "invoice", batchItemId: item.id }, [{ type: "extract", idempotencyKey: "extract:review-approval" }]).bill;
+    database.sqlite.query("UPDATE bills SET status = 'needs_review', manual_review_required = 1, content_revision = 3, review_revision = 2 WHERE id = ?").run(bill.id);
+    expect(database.approveReviewCorrection({ billId: bill.id, reviewerId: "reviewer", expectedContentRevision: 3, expectedReviewRevision: 2 })).toBe(true);
+    expect(database.getAdminUploadBatchStatus(batch.id)?.batch.state).toBe("completed");
+    expect(database.getAdminUploadBatchStatus(batch.id)?.items).toMatchObject([{ state: "complete", billId: bill.id }]);
+  });
+
+  test("fences classification by active extract claim and exact revision while recording one event", () => {
+    const bill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "classification-fence" }, [{ type: "extract", idempotencyKey: "classification-fence-job" }]).bill;
+    const job = database.claimNextJob("azure", policy)!;
+    const base = { billId: bill.id, jobId: job.id, classification: "invoice" as const, actor: "azure", expectedContentRevision: 0, expectedReviewRevision: 0 };
+    expect(database.transitionBillClassification({ ...base, leaseToken: "stale-token" })).toBe(false);
+    expect(database.transitionBillClassification({ ...base, leaseToken: job.leaseToken, expectedContentRevision: 1 })).toBe(false);
+    expect(database.transitionBillClassification({ ...base, leaseToken: job.leaseToken })).toBe(true);
+    expect(database.transitionBillClassification({ ...base, leaseToken: job.leaseToken })).toBe(false);
+    expect(database.getBill(bill.id)).toMatchObject({ classification: "invoice", status: "received", contentRevision: 1 });
+    expect(database.sqlite.query<{ count: number }, [string]>("SELECT count(*) AS count FROM bill_classification_events WHERE bill_id = ?").get(bill.id)?.count).toBe(1);
+  });
+
+  test("reviewer overrides are revision-fenced, blocked by an active extractor lease, and never auto-approve NotInvoice", () => {
+    const bill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "review-override" }, [{ type: "extract", idempotencyKey: "review-override-job" }]).bill;
+    const job = database.claimNextJob("azure", policy)!;
+    expect(database.overrideClassification({ billId: bill.id, reviewerId: "alice", action: "mark_not_invoice", expectedContentRevision: 0, expectedReviewRevision: 0 })).toBe(false);
+    expect(database.failJob(job.id, job.leaseToken, "stop", { ...policy, maxAttempts: 1 })).not.toBeNull();
+    expect(database.overrideClassification({ billId: bill.id, reviewerId: "alice", action: "mark_not_invoice", expectedContentRevision: 1, expectedReviewRevision: 0 })).toBe(false);
+    expect(database.overrideClassification({ billId: bill.id, reviewerId: "alice", action: "mark_not_invoice", expectedContentRevision: 0, expectedReviewRevision: 0 })).toBe(true);
+    expect(database.getBill(bill.id)).toMatchObject({ classification: "not_invoice", status: "failed", contentRevision: 1, reviewRevision: 1 });
+    expect(database.isApprovedAtRevision(bill.id, 1)).toBe(false);
+    expect(database.getReviewEvents(bill.id)).toMatchObject([{ reviewerId: "alice", action: "mark_not_invoice", createdAt: expect.any(String) }]);
+    const corrected = { schemaVersion: "1" as const, vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-27", currency: "USD", subtotal: 1, vat: 0, total: 1, description: null, fields: {} };
+    expect(database.submitReview({ billId: bill.id, reviewerId: "alice", action: "approve", reason: null, note: null, expectedContentRevision: 1, expectedReviewRevision: 1, corrected }, [])).toBe(false);
+    expect(database.persistValidationDecision({ billId: bill.id, expectedContentRevision: 1, expectedReviewRevision: 1, decision: "approved", issues: [] })).toBe(false);
   });
 });

@@ -69,7 +69,7 @@ test("public ingest, worker, SQLite, and mocked providers archive a reviewable b
 
 test("provider exhaustion, restart replay, and lost Drive/Sheets responses stay visible and converge without duplicate effects", async () => {
   const bytes = readFileSync(join(import.meta.dir, "fixtures", "bill.pdf")); const { service, event } = ingest(bytes, "application/pdf"); const bill = (await service.ingest(event)).bills[0]!;
-  let calls = 0; const provider: MistralOcrProvider = { extract: async () => { calls += 1; if (calls === 1) throw new RetryableExtractionError("timeout"); if (calls === 2) throw new RetryableExtractionError("HTTP 429 rate limit"); return { annotation: {}, rawResponse: "malformed", model: "mistral-mock" }; } };
+  let calls = 0; const provider: MistralOcrProvider = { extract: async () => { calls += 1; if (calls === 1) throw new RetryableExtractionError("timeout"); if (calls === 2) throw new RetryableExtractionError("HTTP 429 rate limit"); return { annotation: [], rawResponse: "malformed", model: "mistral-mock" }; } };
   const drive = new MemoryDrive(); const sheets = new MemorySheets(); const firstWorker = extractWorker(provider);
   await firstWorker.runOnce(); let extract = database.listJobsForBill(bill.id).find((job) => job.type === "extract")!; expect(extract).toMatchObject({ state: "retryable_failure", lastError: "provider_timeout" }); expect(database.requeueJob(extract.id)).toBe(true);
   database.close(); database = new BillDatabase(join(directory, "ledger.sqlite")); // process restart after persisted failure

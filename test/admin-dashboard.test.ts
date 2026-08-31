@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseAdminOverview, whatsappPairingView, type AdminOverview } from "../src/admin-dashboard";
+import { adminZipTerminal, parseAdminOverview, parseAdminZipStatus, whatsappPairingView, type AdminOverview, type AdminZipStatus } from "../src/admin-dashboard";
 
-const overview = { metrics: { received: 12, approved: 9, failed: 1, retryableJobs: 2, permanentFailureJobs: 3 }, whatsapp: { state: "awaiting_pairing", canPair: true, configuredGroupId: "1203630@g.us", groups: [{ id: "1203630@g.us", name: "الفواتير" }], csrf: "signed-token" } } satisfies AdminOverview;
+const overview = { metrics: { received: 12, approved: 9, failed: 1, retryableJobs: 2, permanentFailureJobs: 3 }, whatsapp: { state: "awaiting_pairing", canPair: true, configuredGroupId: "1203630@g.us", groups: [{ id: "1203630@g.us", name: "الفواتير" }], csrf: "signed-token" }, zip: { available: true, maxCompressedBytes: 1024, csrf: "zip-token" } } satisfies AdminOverview;
 
 test("admin dashboard accepts the bounded safe overview contract", () => {
   expect(parseAdminOverview(overview)).toEqual(overview);
@@ -32,4 +32,16 @@ test("admin navigation links to the authenticated review queue without operation
   expect(client).toContain('className="admin-tabs"');
   expect(client).toContain('href="/review">مراجعة الفواتير</a>');
   expect(client).not.toContain("ملخص الأعطال التشغيلية");
+  expect(client).toContain('type="file"');
+  expect(client).toContain("تقدم الرفع");
+  expect(client).toContain("خدمة التحليل غير مهيأة");
+});
+
+test("ZIP status parser accepts safe aggregate and entry data only and identifies terminal batches", () => {
+  const status = { batch: { id: "batch-1", originalFilename: "bills.zip", state: "completed" }, counts: { total: 2, queued: 0, processing: 0, complete: 1, notInvoice: 0, rejected: 1, failed: 0 }, items: [{ entryPath: "invoice.pdf", state: "complete", errorCode: null, billId: "bill-1" }, { entryPath: "notes.txt", state: "rejected", errorCode: "unsupported_content", billId: null }] } satisfies AdminZipStatus;
+  expect(parseAdminZipStatus(status)).toEqual(status);
+  expect(adminZipTerminal(status)).toBe(true);
+  expect(adminZipTerminal({ ...status, counts: { ...status.counts, queued: 1 } })).toBe(false);
+  expect(parseAdminZipStatus({ ...status, items: [{ ...status.items[0], state: "raw_provider_error" }] })).toBeNull();
+  expect(parseAdminZipStatus({ ...status, counts: { ...status.counts, total: -1 } })).toBeNull();
 });

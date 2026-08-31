@@ -16,7 +16,7 @@ test("evaluator rejects a symlink even when its target is a safe workspace image
   finally { rmSync(path, { force: true }); }
 });
 
-test("evaluator does not use native confidence for an approved production validation decision", () => {
+test("evaluator treats model-supplied confidence without native evidence as informational", () => {
   const expected = { vendorName: "Al-Anzi Lathe", invoiceNumber: "0427", invoiceDate: "2026-08-26", currency: null, subtotal: 70, vat: null, total: 70, description: null };
   const annotation = { schemaVersion: "1", ...expected, fields: { vendorName: { confidence: 0.99, sourceText: "Al-Anzi Lathe" }, invoiceDate: { confidence: 0.99, sourceText: "26/08/2026" }, total: { confidence: 0.99, sourceText: "Total: 70" } } };
   expect(evaluateApprovedAnnotation(annotation, expected, new Date("2026-08-29T00:00:00.000Z"))).toMatchObject({ differences: [], decision: "approved", issues: [], passed: true });

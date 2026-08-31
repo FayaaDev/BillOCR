@@ -1,9 +1,11 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Moon, RefreshCw, Sun } from "lucide-react";
-import { parseAdminOverview, whatsappPairingView, type AdminOverview } from "./admin-dashboard";
+import { parseAdminOverview, parseAdminZipStatus, whatsappPairingView, type AdminOverview, type AdminZipStatus } from "./admin-dashboard";
+import { ZipUploadSession, zipUploadControlDisabled } from "./admin-zip-client";
 
 const stateLabel: Record<AdminOverview["whatsapp"]["state"], string> = { connecting: "جارٍ الاتصال", connected: "متصل", awaiting_pairing: "بانتظار الاقتران", unavailable: "غير متاح" };
+const zipStateLabel: Record<AdminZipStatus["items"][number]["state"], string> = { queued: "في الانتظار", processing: "قيد المعالجة", complete: "مكتملة", not_invoice: "ليست فاتورة", rejected: "مرفوضة", failed: "فشلت" };
 
 function copy(value: string): void {
   void navigator.clipboard?.writeText(value).catch(() => undefined);
@@ -13,6 +15,12 @@ function Dashboard(): ReactNode {
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [error, setError] = useState(false);
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+  const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [batch, setBatch] = useState<AdminZipStatus | null>(null);
+  const [uploadError, setUploadError] = useState(false);
+  const zipSession = useRef<ZipUploadSession | null>(null);
   const load = (): void => {
     setError(false);
     void fetch("/admin/api/overview", { credentials: "same-origin", cache: "no-store" })
@@ -27,6 +35,18 @@ function Dashboard(): ReactNode {
     const timer = setTimeout(load, 5_000);
     return () => clearTimeout(timer);
   }, [pairingView]);
+  const getZipSession = (): ZipUploadSession => zipSession.current ??= new ZipUploadSession({
+    createSourceId: () => crypto.randomUUID(), createRequest: () => new XMLHttpRequest(),
+    fetchStatus: async (batchId) => { const response = await fetch(`/admin/api/zip/${encodeURIComponent(batchId)}`, { credentials: "same-origin", cache: "no-store" }); return response.ok ? parseAdminZipStatus(await response.json()) : null; },
+    schedule: (callback, delayMs) => setTimeout(callback, delayMs), cancel: clearTimeout,
+    onProgress: setProgress, onUploading: setUploading, onStatus: setBatch, onError: () => setUploadError(true),
+  });
+  useEffect(() => () => zipSession.current?.dispose(), []);
+  const submitZip = (): void => {
+    if (!file || !overview?.zip.available || uploading) return;
+    setUploading(true); setUploadError(false); setProgress(0); setBatch(null);
+    getZipSession().submit(file, overview.zip.csrf);
+  };
   const toggleTheme = (): void => { const next = !dark; document.documentElement.classList.toggle("dark", next); try { localStorage.setItem("review-theme", next ? "dark" : "light"); } catch {} setDark(next); };
   const metrics = overview?.metrics;
   return <main className="admin-page">
@@ -34,6 +54,11 @@ function Dashboard(): ReactNode {
     {error && <p className="notice error">تعذر تحميل بيانات لوحة الإدارة. حدّث الصفحة وحاول مرة أخرى.</p>}
     <section className="admin-metrics" aria-label="ملخص الفواتير">
       {[ ["الفواتير المستلمة", metrics?.received], ["الفواتير المعتمدة", metrics?.approved], ["الفواتير الفاشلة", metrics?.failed] ].map(([label, value]) => <article className="admin-card" key={String(label)}><p>{label}</p><strong dir="ltr">{value ?? "—"}</strong></article>)}
+    </section>
+    <section className="admin-card admin-zip" aria-labelledby="zip-heading"><h2 id="zip-heading">رفع فواتير ZIP</h2><p className="admin-hint">اختر ملف ZIP يحتوي على صور أو ملفات PDF للفواتير. الحد الأقصى للملف المضغوط: {overview ? `${Math.floor(overview.zip.maxCompressedBytes / (1024 * 1024))} ميغابايت` : "—"}.</p>
+      {overview && !overview.zip.available ? <p className="notice error">رفع ملفات ZIP غير متاح حاليًا لأن خدمة التحليل غير مهيأة.</p> : <><label className="admin-field"><span>ملف ZIP</span><input type="file" accept=".zip,application/zip,application/x-zip-compressed" disabled={!overview || uploading} onChange={(event) => { zipSession.current?.reset(); setFile(event.target.files?.[0] ?? null); setUploadError(false); }} /></label>{file && <p className="admin-hint">الملف المحدد: <b dir="ltr">{file.name}</b></p>}<button className="admin-danger-button admin-upload-button" type="button" disabled={zipUploadControlDisabled(overview?.zip.available === true, file !== null, uploading)} onClick={submitZip}>{uploading ? "جارٍ الرفع…" : "رفع الملف"}</button>{progress !== null && <p className="admin-hint" role="status">تقدم الرفع: {progress}%</p>}</>}
+      {uploadError && <p className="notice error">تعذر رفع الملف أو قراءة حالته. تحقق من ملف ZIP وحاول مرة أخرى.</p>}
+      {batch && <div className="admin-zip-results" aria-live="polite"><p>نتيجة الرفع: {batch.counts.complete} مكتملة، {batch.counts.notInvoice} ليست فواتير، {batch.counts.rejected + batch.counts.failed} مرفوضة أو فاشلة، {batch.counts.queued + batch.counts.processing} قيد المعالجة.</p><ul>{batch.items.map((item) => <li key={`${item.entryPath}-${item.billId ?? ""}`}><code dir="ltr">{item.entryPath}</code><span>{zipStateLabel[item.state]}</span>{item.errorCode && <span>(تعذر قبول الملف)</span>}</li>)}</ul></div>}
     </section>
     <section className="admin-card admin-whatsapp" aria-labelledby="whatsapp-heading"><div className="admin-section-heading"><div><h2 id="whatsapp-heading">واتساب</h2><p>الحالة: <b>{overview ? stateLabel[overview.whatsapp.state] : "جارٍ التحميل…"}</b></p></div>{overview?.whatsapp.state === "awaiting_pairing" && <span className="admin-status">يتم التحديث تلقائيًا</span>}</div>
       {pairingView === "waiting" && <p className="notice">يتم الاتصال بواتساب وتجهيز رمز الاقتران. يرجى الانتظار.</p>}

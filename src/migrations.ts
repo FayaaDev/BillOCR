@@ -117,6 +117,32 @@ const migrations = [
      SELECT id, invocation_id, bill_id, job_id, operation_location, state, normalized_json, raw_provider_response, provider_model, last_error, completed_at, created_at, updated_at FROM azure_extraction_operations_previous;
    DROP TABLE azure_extraction_operations_previous;
    CREATE INDEX IF NOT EXISTS azure_extraction_operations_resume_idx ON azure_extraction_operations(state, updated_at);`,
+  `CREATE TABLE IF NOT EXISTS admin_upload_batches (
+      id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, original_filename TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('queued','processing','completed','failed')),
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS admin_upload_batch_items (
+      id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES admin_upload_batches(id), item_index INTEGER NOT NULL CHECK (item_index >= 0),
+      entry_path TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued','processing','complete','not_invoice','rejected','failed')),
+      error_code TEXT, bill_id TEXT REFERENCES bills(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      UNIQUE (batch_id, item_index)
+    );
+    CREATE INDEX IF NOT EXISTS admin_upload_batch_items_batch_idx ON admin_upload_batch_items(batch_id, state, item_index);
+    ALTER TABLE bills ADD COLUMN source TEXT NOT NULL DEFAULT 'whatsapp' CHECK (source IN ('whatsapp','admin_upload'));
+    ALTER TABLE bills ADD COLUMN source_identity TEXT;
+    ALTER TABLE bills ADD COLUMN extraction_policy TEXT NOT NULL DEFAULT 'mistral_with_azure_fallback' CHECK (extraction_policy IN ('mistral_with_azure_fallback','azure_only'));
+    ALTER TABLE bills ADD COLUMN classification TEXT NOT NULL DEFAULT 'unclassified' CHECK (classification IN ('unclassified','invoice','not_invoice'));
+    ALTER TABLE bills ADD COLUMN batch_item_id TEXT REFERENCES admin_upload_batch_items(id);
+    UPDATE bills SET source_identity = id WHERE source_identity IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS bills_source_identity_idx ON bills(source, source_identity) WHERE source_identity IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS bills_batch_item_idx ON bills(batch_item_id) WHERE batch_item_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS bill_classification_events (
+      id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), from_classification TEXT NOT NULL CHECK (from_classification IN ('unclassified','invoice','not_invoice')),
+      to_classification TEXT NOT NULL CHECK (to_classification IN ('unclassified','invoice','not_invoice')),
+      actor TEXT NOT NULL, reason TEXT, content_revision INTEGER NOT NULL, review_revision INTEGER NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS bill_classification_events_bill_idx ON bill_classification_events(bill_id, created_at);`,
 ];
 
 export function applyMigrations(db: Database): void {

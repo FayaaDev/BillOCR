@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +47,28 @@ test("startService preserves an injected Azure provider instead of constructing 
   };
   service = startService(config, {}, { azureProvider });
   expect((await fetch(new URL("health", service.url))).status).toBe(200);
+});
+
+test("startService exposes authenticated safe ZIP failures and reconciles staged ZIP batches on startup", async () => {
+  await service.shutdown();
+  const sourceId = "restart-upload"; const staging = join(directory, "admin-zip-staging", createHash("sha256").update(sourceId).digest("hex").slice(0, 32));
+  const emptyZip = new Uint8Array([0x50, 0x4b, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  mkdirSync(staging, { recursive: true }); writeFileSync(join(staging, "upload.zip"), emptyZip);
+  writeFileSync(join(staging, "manifest.json"), JSON.stringify({ version: 1, sourceId, originalFilename: "restart.zip", contentSha256: createHash("sha256").update(emptyZip).digest("hex"), zipPath: join(staging, "upload.zip") }));
+  const config: AppConfig = {
+    host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "zip.sqlite"), logLevel: "error",
+    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: true, endpoint: "https://azure.test", apiKey: "secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .8 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 }, google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 },
+  };
+  service = startService(config, {}, { azureProvider: { submit: async () => ({ operationLocation: "unused" }), poll: async () => { throw new Error("unused"); } } });
+  const auth = { authorization: `Basic ${btoa("reviewer:secret")}` };
+  const overview = await (await fetch(new URL("admin/api/overview", service.url), { headers: auth })).json() as { zip: { csrf: string } };
+  const upload = await fetch(new URL("admin/api/zip", service.url), { method: "POST", headers: { ...auth, "content-type": "application/zip", "x-upload-id": "corrupt-upload", "x-upload-filename": "corrupt.zip", "x-csrf-token": overview.zip.csrf }, body: new Uint8Array([0x50, 0x4b, 5, 6]) });
+  expect(upload.status).toBe(202); const response = await upload.json() as { batch: { id: string; state: string } }; expect(response.batch.state).toBe("failed");
+  expect(await (await fetch(new URL(`admin/api/zip/${response.batch.id}`, service.url), { headers: auth })).json()).toMatchObject({ batch: { id: response.batch.id, state: "failed" }, counts: { failed: 1 } });
+  let restartBatchId: string | undefined;
+  for (let attempts = 0; !restartBatchId && attempts < 20; attempts += 1) { const database = new BillDatabase(config.databasePath); restartBatchId = database.sqlite.query<{ id: string }, [string]>("SELECT id FROM admin_upload_batches WHERE idempotency_key = ?").get(`admin-zip:${sourceId}`)?.id; database.close(); if (!restartBatchId) await Bun.sleep(1); }
+  expect(restartBatchId).toBeString();
+  expect(await (await fetch(new URL(`admin/api/zip/${restartBatchId!}`, service.url), { headers: auth })).json()).toMatchObject({ batch: { id: restartBatchId, state: "completed" } });
 });
 
 test("startup closes its database when HTTP construction fails", async () => {

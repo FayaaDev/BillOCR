@@ -2,12 +2,9 @@ import { createHash } from "node:crypto";
 import { fstat, read } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { closeOriginalFd, openOriginalChild, openOriginalRoot, type BeforeOpenRootComponent } from "./original-fd";
+import { sniffSupportedDocumentMimeType } from "./attachment-mime";
 
 export class OriginalVerificationError extends Error {}
-function magicMatches(bytes: Uint8Array, mime: string): boolean {
-  const at = (...v: number[]) => v.every((item, index) => bytes[index] === item);
-  return mime === "application/pdf" ? at(37, 80, 68, 70, 45) : mime === "image/png" ? at(137, 80, 78, 71, 13, 10, 26, 10) : mime === "image/jpeg" ? at(255, 216, 255) : mime === "image/webp" ? new TextDecoder().decode(bytes.slice(0, 4)) === "RIFF" && new TextDecoder().decode(bytes.slice(8, 12)) === "WEBP" : false;
-}
 function statFd(fd: number): Promise<import("node:fs").Stats> {
   return new Promise((resolve, reject) => fstat(fd, (error, stats) => error ? reject(error) : resolve(stats)));
 }
@@ -38,7 +35,7 @@ export async function readVerifiedOriginal(input: { path: string; root: string; 
     const stat = await statFd(childFd); if (!stat.isFile() || stat.size < 0 || stat.size > input.maxBytes) throw new OriginalVerificationError("original unavailable");
     const bytes = await readFd(childFd, stat.size);
     if (createHash("sha256").update(bytes).digest("hex") !== input.sha256) throw new OriginalVerificationError("original hash mismatch");
-    const matches = magicMatches(bytes, input.mimeType); if (input.requireMagic && !matches) throw new OriginalVerificationError("original MIME mismatch");
+    const matches = sniffSupportedDocumentMimeType(bytes) === input.mimeType; if (input.requireMagic && !matches) throw new OriginalVerificationError("original MIME mismatch");
     return { bytes, magicMatches: matches };
   } catch (error) {
     if (error instanceof OriginalVerificationError) throw error;

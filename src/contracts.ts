@@ -5,6 +5,9 @@ export const jobStates = ["pending", "running", "succeeded", "retryable_failure"
 export type JobState = (typeof jobStates)[number];
 
 export type BillStatus = "received" | "extracting" | "needs_review" | "approved" | "failed";
+export type BillSource = "whatsapp" | "admin_upload";
+export type ExtractionPolicy = "mistral_with_azure_fallback" | "azure_only";
+export type BillClassification = "unclassified" | "invoice" | "not_invoice";
 
 /** Read-only dashboard totals derived from canonical bill and job state. Processed means approved. */
 export interface DashboardMetrics {
@@ -49,6 +52,11 @@ export interface Bill {
   updatedAt: string;
   contentRevision: number;
   reviewRevision: number;
+  source: BillSource;
+  sourceIdentity: string;
+  extractionPolicy: ExtractionPolicy;
+  classification: BillClassification;
+  batchItemId: string | null;
 }
 
 export interface ExtractedBill {
@@ -204,6 +212,42 @@ export interface CreateBillInput {
   mimeType: string;
   originalPath: string;
   contentSha256: string;
+  source?: BillSource;
+  sourceIdentity?: string;
+  extractionPolicy?: ExtractionPolicy;
+  classification?: BillClassification;
+  batchItemId?: string | null;
+}
+
+export interface AdminUploadBatch {
+  id: string;
+  idempotencyKey: string;
+  originalFilename: string;
+  state: "queued" | "processing" | "completed" | "failed";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminUploadBatchItem {
+  id: string;
+  batchId: string;
+  itemIndex: number;
+  entryPath: string;
+  state: "queued" | "processing" | "complete" | "not_invoice" | "rejected" | "failed";
+  errorCode: string | null;
+  billId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminUploadBatchStatusCounts {
+  total: number;
+  queued: number;
+  processing: number;
+  complete: number;
+  notInvoice: number;
+  rejected: number;
+  failed: number;
 }
 
 export interface InitialJobInput {

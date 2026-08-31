@@ -1,6 +1,6 @@
 import type { ExtractedBill, FieldEvidence } from "./contracts";
 import { isSupportedDocumentMimeType } from "./attachment-mime";
-import { RetryableExtractionError } from "./extraction";
+import { RetryableExtractionError } from "./extraction-errors";
 import { PermanentJobError } from "./worker";
 
 const API_VERSION = "2024-11-30";
@@ -21,9 +21,13 @@ export class AzureMalformedInvoiceOutputError extends RetryableExtractionError {
   constructor(message: string, readonly rawProviderResponse: string) { super(message); }
 }
 
+export type AzureInvoiceAnalysis =
+  | { classification: "invoice"; bill: ExtractedBill; rawResponse: string; model: string }
+  | { classification: "not_invoice"; bill: ExtractedBill; rawResponse: string; model: string };
+
 export interface AzureInvoiceProvider {
   submit(input: { bytes: Uint8Array; mimeType: string }): Promise<{ operationLocation: string }>;
-  poll(input: { operationLocation: string }): Promise<{ bill: ExtractedBill; rawResponse: string; model: string }>;
+  poll(input: { operationLocation: string }): Promise<AzureInvoiceAnalysis>;
 }
 
 export interface AzureDocumentIntelligenceInvoiceProviderOptions {
@@ -58,7 +62,7 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
     this.sleep = options.sleep ?? sleepWithAbort;
   }
 
-  async extract(input: { bytes: Uint8Array; mimeType: string }): Promise<{ bill: ExtractedBill; rawResponse: string; model: string }> {
+  async extract(input: { bytes: Uint8Array; mimeType: string }): Promise<AzureInvoiceAnalysis> {
     const submitted = await this.submit(input);
     return this.poll({ operationLocation: submitted.operationLocation });
   }
@@ -80,7 +84,7 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
     }
   }
 
-  async poll(input: { operationLocation: string }): Promise<{ bill: ExtractedBill; rawResponse: string; model: string }> {
+  async poll(input: { operationLocation: string }): Promise<AzureInvoiceAnalysis> {
     const abort = new AbortController();
     const timeout = setTimeout(() => abort.abort(), this.timeoutMs);
     try {
@@ -106,7 +110,7 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
     return sameOriginOperationUrl(location, this.endpoint);
   }
 
-  private async pollRequest(operationUrl: URL, signal: AbortSignal): Promise<{ bill: ExtractedBill; rawResponse: string; model: string }> {
+  private async pollRequest(operationUrl: URL, signal: AbortSignal): Promise<AzureInvoiceAnalysis> {
     while (true) {
       if (signal.aborted) throw new RetryableExtractionError("Azure Document Intelligence request timeout");
       const response = await this.request(operationUrl, { method: "GET", headers: this.headers(), signal, redirect: "error" });
@@ -124,7 +128,7 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
       }
       if (status === "failed" || status === "cancelled") throw new PermanentJobError("Azure Document Intelligence invoice analysis failed");
       if (status !== "succeeded") throw new AzureMalformedInvoiceOutputError("Azure Document Intelligence returned an invalid operation status", rawResponse);
-      try { return { bill: mapInvoice(payload), rawResponse, model: MODEL_ID }; } catch (error) {
+      try { return parseAzureInvoiceAnalysis(rawResponse); } catch (error) {
         if (error instanceof AzureMalformedInvoiceOutputError) throw new AzureMalformedInvoiceOutputError(error.message, rawResponse);
         throw error;
       }
@@ -155,6 +159,12 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
     const retryAfter = Number(response.headers.get("retry-after"));
     return Number.isFinite(retryAfter) && retryAfter >= 0 ? Math.min(MAX_POLL_INTERVAL_MS, retryAfter * 1_000) : this.pollIntervalMs;
   }
+}
+export function parseAzureInvoiceAnalysis(rawResponse: string): AzureInvoiceAnalysis {
+  const payload = parseJson(rawResponse);
+  if (string(payload.status) !== "succeeded") throw new AzureMalformedInvoiceOutputError("Azure Document Intelligence returned an invalid operation status", rawResponse);
+  const bill = mapInvoice(payload);
+  return bill === null ? { classification: "not_invoice", bill: emptyInvoice(), rawResponse, model: MODEL_ID } : { classification: "invoice", bill, rawResponse, model: MODEL_ID };
 }
 
 function parseAzureEndpoint(value: string): URL {
@@ -258,20 +268,23 @@ function typedMoney(field: Record<string, unknown> | null): { amount: number | n
   const value = field?.type === "currency" && field.valueCurrency && typeof field.valueCurrency === "object" && !Array.isArray(field.valueCurrency) ? field.valueCurrency as Record<string, unknown> : null;
   const amount = typedAmount(value?.amount);
   const hasTypedAmount = value !== null && Object.prototype.hasOwnProperty.call(value, "amount");
-  return { amount: amount ?? (!hasTypedAmount && field?.type === "currency" ? localizedContentAmount(field.content) : null), currency: typeof value?.currencyCode === "string" && /^[A-Z]{3}$/.test(value.currencyCode) ? value.currencyCode : null };
+  const content = !hasTypedAmount && field?.type === "currency" ? localizedContentMoney(field.content) : null;
+  return { amount: amount ?? content?.amount ?? null, currency: typeof value?.currencyCode === "string" && /^[A-Z]{3}$/.test(value.currencyCode) ? value.currencyCode : content?.currency ?? null };
 }
 function typedAmount(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value !== "string") return null;
-  return parseLocalizedAmount(value, { allowSign: true, allowExponent: true, allowCurrencyCode: false });
+  return parseLocalizedAmount(value, { allowSign: true, allowExponent: true });
 }
-function localizedContentAmount(value: unknown): number | null {
+function localizedContentMoney(value: unknown): { amount: number; currency: string | null } | null {
   if (typeof value !== "string") return null;
-  return parseLocalizedAmount(value, { allowSign: false, allowExponent: false, allowCurrencyCode: true });
+  const match = /^(.*?)(?:\s*([A-Z]{3}))?$/.exec(value);
+  if (!match) return null;
+  const amount = parseLocalizedAmount(match[1]!, { allowSign: false, allowExponent: false });
+  return amount === null ? null : { amount, currency: match[2] ?? null };
 }
-function parseLocalizedAmount(value: string, options: { allowSign: boolean; allowExponent: boolean; allowCurrencyCode: boolean }): number | null {
+function parseLocalizedAmount(value: string, options: { allowSign: boolean; allowExponent: boolean }): number | null {
   let normalized = value.replace(/\u066b/g, ".").replace(/\u066c/g, ",").replace(/[\u0660-\u0669\u06f0-\u06f9]/g, (digit) => String(digit.charCodeAt(0) % 16));
-  if (options.allowCurrencyCode) normalized = normalized.replace(/\s+[A-Za-z]{3}$/, "");
   const match = normalized.match(new RegExp(`^(${options.allowSign ? "[+-]?" : ""})(\\d[\\d.,]*?)${options.allowExponent ? "([eE][+-]?\\d+)?" : ""}$`));
   if (!match) return null;
   const sign = match[1]!;
@@ -294,18 +307,31 @@ function normalizeSeparators(value: string): string | null {
   const separator = dot >= 0 ? "." : ",";
   const parts = value.split(separator);
   if (parts.some((part) => !/^\d+$/.test(part))) return null;
-  if (parts.length > 2 || parts[1]!.length === 3) return parts.slice(1).every((part) => part.length === 3) ? parts.join("") : null;
+  if (parts.length > 2) return parts.slice(1).every((part) => part.length === 3) ? parts.join("") : null;
+  if (parts[1]!.length === 3) return null;
   return `${parts[0]}.${parts[1]}`;
 }
 function getField(fields: Record<string, unknown>, key: string): Record<string, unknown> | null {
   const value = fields[key];
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
-function mapInvoice(payload: Record<string, unknown>): ExtractedBill {
+function emptyInvoice(): ExtractedBill {
+  const evidence = { confidence: null, sourceText: null };
+  return {
+    schemaVersion: "1", vendorName: null, invoiceNumber: null, invoiceDate: null, currency: null,
+    subtotal: null, vat: null, total: null, description: null,
+    fields: {
+      vendorName: evidence, invoiceNumber: evidence, invoiceDate: evidence, currency: evidence,
+      subtotal: evidence, vat: evidence, total: evidence, description: evidence,
+    },
+  };
+}
+function mapInvoice(payload: Record<string, unknown>): ExtractedBill | null {
   const analysis = record(payload.analyzeResult, "Azure Document Intelligence response is missing analysis result");
   if (!Array.isArray(analysis.documents)) throw new AzureMalformedInvoiceOutputError("Azure Document Intelligence response has invalid documents", "");
-  const document = analysis.documents[0];
-  const fields = document && typeof document === "object" && !Array.isArray(document) ? (document as Record<string, unknown>).fields : null;
+  if (analysis.documents.length === 0) return null;
+  const documents = analysis.documents.map((document) => record(document, "Azure Document Intelligence response has invalid document"));
+  const fields = documents[0]!.fields ?? null;
   if (fields !== null && (typeof fields !== "object" || Array.isArray(fields))) throw new AzureMalformedInvoiceOutputError("Azure Document Intelligence invoice fields are invalid", "");
   const azureFields = (fields ?? {}) as Record<string, unknown>;
   const vendor = getField(azureFields, "VendorName");

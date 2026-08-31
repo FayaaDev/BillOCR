@@ -36,7 +36,7 @@ test("review detail renders an accessible image-original preview while PDFs reta
   expect(html).toContain('<html lang="ar" dir="rtl">');
   expect(html).toContain('src="/review/assets/theme.js"');
   expect(html).toContain('<main class="review-page review-detail">'); expect(html).toContain('class="queue-back" href="/review"'); expect(html).toContain('class="status-badge">تحتاج إلى مراجعة</span>');
-  expect(html).toContain('class="original-actions"'); expect(html).toContain('id="original-preview-trigger" href="/review/bills/review-bill/original"'); expect(html).toContain('<dialog id="original-preview-dialog" aria-labelledby="original-preview-title">'); expect(html).toContain('id="original-preview-close"'); expect(html).toContain('إغلاق عرض الأصل'); expect(html).toContain('id="original-preview-image"'); expect(html).toContain('src="/review/assets/client.js" defer'); expect(html).toContain('href="/review/bills/review-bill/original?download=1"'); expect(html).not.toContain('>Evidence</h2>'); expect(html).not.toContain('Immutable extraction data and review history.'); expect(html).not.toContain('Immutable model output'); expect(html).not.toContain('Confidence'); expect(html).not.toContain('Validation issues'); expect(html).not.toContain('Provenance'); expect(html).not.toContain('Audit events');
+   expect(html).toContain('class="original-actions"'); expect(html).toContain('id="original-preview-trigger" href="/review/bills/review-bill/original"'); expect(html).toContain('<dialog id="original-preview-dialog" aria-labelledby="original-preview-title">'); expect(html).toContain('id="original-preview-close"'); expect(html).toContain('إغلاق عرض الأصل'); expect(html).toContain('id="original-preview-image"'); expect(html).toContain('src="/review/assets/client.js" defer'); expect(html).toContain('href="/review/bills/review-bill/original?download=1"'); expect(html).not.toContain('بيانات النموذج الأصلية'); expect(html).not.toContain('>Evidence</h2>'); expect(html).not.toContain('Immutable extraction data and review history.'); expect(html).not.toContain('Immutable model output'); expect(html).not.toContain('Confidence'); expect(html).not.toContain('Validation issues'); expect(html).not.toContain('Provenance'); expect(html).not.toContain('Audit events');
   database.sqlite.query("UPDATE bills SET mime_type = 'application/pdf' WHERE id = ?").run(id);
   const pdf = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
   const pdfHtml = await pdf.text();
@@ -51,9 +51,9 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   const html = await shell.text();
   expect(html).toContain('<html lang="ar" dir="rtl">'); expect(html).toContain('<title>قائمة المراجعة</title>');
   expect(shell.headers.get("content-security-policy")).toContain("script-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("style-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("connect-src 'self'");
-  expect(html).toContain('<div id="root"></div>'); expect(html).toContain('src="/review/assets/theme.js"'); expect(html).toContain('src="/review/assets/client.js"'); expect(html).toContain('href="/review/assets/client.css"'); expect(html).not.toContain("review-bill"); expect(html).not.toContain("<unsafe>");
+  expect(html).toContain('<a class="button-link" href="/review/export.csv">تصدير CSV</a>'); expect(html).toContain('<div id="root"></div>'); expect(html).toContain('src="/review/assets/theme.js"'); expect(html).toContain('src="/review/assets/client.js"'); expect(html).toContain('href="/review/assets/client.css"'); expect(html).not.toContain("review-bill"); expect(html).not.toContain("<unsafe>");
   const api = await handleReviewRequest(new Request("http://x/review/api/bills", { headers: basic() }), database, config);
-  expect(api.headers.get("content-type")).toContain("application/json"); expect(api.headers.get("cache-control")).toBe("no-store"); expect(await api.json()).toEqual([{ id, status: "needs_review", originalFilename: null, receivedAt: "2026-08-01T00:00:00.000Z", updatedAt: expect.any(String) }]);
+   expect(api.headers.get("content-type")).toContain("application/json"); expect(api.headers.get("cache-control")).toBe("no-store"); expect(await api.json()).toEqual([{ id, status: "needs_review", displayStatus: "needs_review", source: "whatsapp", batchId: null, originalFilename: null, receivedAt: "2026-08-01T00:00:00.000Z", updatedAt: expect.any(String) }]);
   const apiPost = await handleReviewRequest(new Request("http://x/review/api/bills", { method: "POST", headers: basic() }), database, config);
   expect(apiPost.status).toBe(405); expect(apiPost.headers.get("allow")).toBe("GET");
   const script = await handleReviewRequest(new Request("http://x/review/assets/client.js", { headers: basic() }), database, config, assetDir);
@@ -68,6 +68,32 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   expect((await handleReviewRequest(new Request("http://x/review/assets/client.css", { method: "POST", headers: basic() }), database, config)).status).toBe(405);
 });
 
+test("completed-invoice CSV export is authenticated, uses reviewed data, and excludes incomplete records", async () => {
+  const batch = database.createAdminUploadBatch({ idempotencyKey: "csv-batch", originalFilename: "invoices.zip" }).batch;
+  const create = (index: number, state: "complete" | "not_invoice" | "failed", status: "approved" | "failed" = "approved") => {
+    const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: index, entryPath: `invoice-${index}.pdf` }).item;
+    const bill = database.createBillWithInitialJobs({ id: `csv-${index}`, whatsappMessageId: `admin-upload:${batch.id}:${index}`, whatsappGroupId: "admin-upload", whatsappSenderId: "csv-sender", attachmentIndex: 0, receivedAt: "2026-08-02T00:00:00.000Z", mimeType: "application/pdf", originalPath: join(dir, "originals", "bill.png"), contentSha256: "b".repeat(64), source: "admin_upload", sourceIdentity: `admin-upload:${batch.id}:${index}`, extractionPolicy: "azure_only", classification: state === "not_invoice" ? "not_invoice" : "invoice", batchItemId: item.id }, [{ type: "extract", idempotencyKey: `extract:csv-${index}` }]).bill;
+    database.sqlite.query("UPDATE bills SET status = ? WHERE id = ?").run(status, bill.id);
+    database.sqlite.query("UPDATE admin_upload_batch_items SET state = ? WHERE id = ?").run(state, item.id);
+    database.sqlite.query("INSERT INTO extractions (id,bill_id,schema_version,normalized_json,raw_provider_response,created_at,updated_at) VALUES (?,?, '1', ?, 'provider raw data must not export', 'now', 'now')").run(`csv-extraction-${index}`, bill.id, JSON.stringify({ schemaVersion: "1", vendorName: "=Raw vendor", invoiceNumber: "RAW", invoiceDate: "2026-08-02", currency: "USD", subtotal: 9, vat: 1, total: 10, description: "raw", fields: {} }));
+    return bill;
+  };
+  const complete = create(0, "complete");
+  database.sqlite.query("INSERT INTO effective_bill_data (bill_id,normalized_json,revision,updated_at) VALUES (?, ?, 1, 'now')").run(complete.id, JSON.stringify({ schemaVersion: "1", vendorName: "=Reviewed, Inc.", invoiceNumber: "\"INV\"\n1", invoiceDate: "2026-08-03", currency: "USD", subtotal: 9, vat: 1, total: 10, description: "@reviewed", fields: {} }));
+  create(1, "not_invoice");
+  create(2, "failed");
+  create(3, "complete", "failed");
+
+  expect((await handleReviewRequest(new Request("http://x/review/export.csv"), database, config)).status).toBe(401);
+  const response = await handleReviewRequest(new Request("http://x/review/export.csv", { headers: basic() }), database, config);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+  expect(response.headers.get("content-disposition")).toBe('attachment; filename="completed-invoices.csv"');
+  expect(await response.text()).toBe("\uFEFFBill ID,Received date,Vendor,Invoice number,Invoice date,Subtotal,VAT,Total,Currency,Description,Sender\r\ncsv-0,2026-08-02,\"'=Reviewed, Inc.\",\"\"\"INV\"\"\n1\",2026-08-03,9,1,10,USD,'@reviewed,csv-sender\r\n");
+  const post = await handleReviewRequest(new Request("http://x/review/export.csv", { method: "POST", headers: basic() }), database, config);
+  expect(post.status).toBe(405); expect(post.headers.get("allow")).toBe("GET");
+});
+
 test("CSRF-protected corrected approval preserves model output and is exactly once", async () => {
   const detail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
   const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; if (!csrf) throw new Error("missing csrf");
@@ -77,6 +103,17 @@ test("CSRF-protected corrected approval preserves model output and is exactly on
   expect(database.getReviewEvents(id)).toMatchObject([{ reason: null, note: null }]); expect(database.getEffectiveExtraction(id)?.vendorName).toBe("Vendor");
   expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(409);
   expect(database.getReviewEvents(id)).toHaveLength(1); expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) count FROM jobs WHERE type = 'project_to_sheet'").get()?.count).toBe(1);
+});
+
+test("crafted NotInvoice approval POST makes no canonical or audit mutation", async () => {
+  database.sqlite.query("UPDATE bills SET classification = 'not_invoice', status = 'failed', manual_review_required = 1 WHERE id = ?").run(id);
+  database.sqlite.query("INSERT INTO validation_issues (id,bill_id,field,code,message,severity,observed_value,created_at) VALUES ('issue',?,'total','total_mismatch','mismatch','blocking','null','now')").run(id);
+  const detail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
+  const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; if (!csrf) throw new Error("missing csrf");
+  const before = database.getBill(id); const events = database.getReviewEvents(id); const issues = database.getValidationIssues(id); const effective = database.getEffectiveExtraction(id);
+  const form = new URLSearchParams({ csrf, contentRevision: "1", reviewRevision: "0", action: "approve", vendorName: "crafted", invoiceDate: "2026-08-01", total: "10" });
+  expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(409);
+  expect(database.getBill(id)).toEqual(before); expect(database.getReviewEvents(id)).toEqual(events); expect(database.getValidationIssues(id)).toEqual(issues); expect(database.getEffectiveExtraction(id)).toEqual(effective);
 });
 
 test("review approval accepts an extraction-length description", async () => {
@@ -132,6 +169,39 @@ test("stale rejection sync repairs a reapproved current projection after clearin
   expect(database.getJob(repair!.id)?.state).toBe("succeeded"); expect([...rows.values()].filter((values) => values[13] === id && values[14] === 2)).toHaveLength(1); expect(database.getBill(id)?.status).toBe("approved");
 });
 
+test("reclassification schedules revision-current cleanup when NotInvoice cleanup is still pending", async () => {
+  database.sqlite.query("UPDATE bills SET status = 'approved', classification = 'invoice', content_revision = 1 WHERE id = ?").run(id);
+  database.sqlite.query("INSERT INTO provider_projection_metadata (id,bill_id,provider,projection_key,external_id,created_at,updated_at) VALUES ('reclassify-sheet',?,'sheets',?,'3','now','now')").run(id, id);
+  expect(database.overrideClassification({ billId: id, reviewerId: "alice", action: "mark_not_invoice", expectedContentRevision: 1, expectedReviewRevision: 0 })).toBe(true);
+  expect(database.overrideClassification({ billId: id, reviewerId: "alice", action: "reclassify_invoice", expectedContentRevision: 2, expectedReviewRevision: 1 })).toBe(true);
+  const rows = [3];
+  const sheets: SheetsAdapter = { initializeLedger: async () => undefined, findRowByBillId: async () => rows[0] ?? null, findRowsByBillId: async () => [...rows], clearRows: async () => { rows.length = 0; }, appendRow: async () => 4, updateRow: async () => undefined };
+  const worker = new JobWorker(database, { sync_review_correction: createReviewCorrectionSyncHandler(database, sheets) }, { maxAttempts: 1, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 }, "reclassify", createLogger("error"));
+  expect(await worker.runOnce()).toBe(true); // stale NotInvoice revision cannot clear the newer review state.
+  expect(rows).toEqual([3]);
+  expect(await worker.runOnce()).toBe(true); // current reclassification revision removes the old projection.
+  expect(rows).toEqual([]);
+  expect(database.getBill(id)).toMatchObject({ classification: "invoice", status: "needs_review" });
+});
+
+test("NotInvoice cleanup removes a Sheets row appended before projection persistence, then reclassification remains revision-safe", async () => {
+  database.sqlite.query("UPDATE bills SET status = 'approved', classification = 'invoice', content_revision = 1 WHERE id = ?").run(id);
+  database.sqlite.query("INSERT INTO provider_projection_metadata (id,bill_id,provider,projection_key,external_id,external_url,created_at,updated_at) VALUES ('drive',?,'drive',?,'drive-file','https://drive.example/file','now','now')").run(id, id);
+  database.ensureCurrentProjectionJob(id);
+  const rows = new Map<number, (string | number | null)[]>();
+  const sheets: SheetsAdapter = { initializeLedger: async () => undefined, findRowByBillId: async () => null, findRowsByBillId: async (billId) => [...rows.entries()].filter(([, values]) => values[13] === billId).map(([row]) => row), appendRow: async (values) => { rows.set(3, [...values]); throw new Error("process died after append"); }, updateRow: async () => undefined, clearRows: async (targets) => { for (const row of targets) rows.delete(row); } };
+  const policy = { maxAttempts: 1, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 };
+  await new JobWorker(database, { project_to_sheet: createSheetsProjectionHandler(database, sheets) }, policy, "crashed", createLogger("error")).runOnce();
+  expect(rows.size).toBe(1); expect(database.getProjectionMetadata("sheets", id)).toBeNull();
+  expect(database.overrideClassification({ billId: id, reviewerId: "alice", action: "mark_not_invoice", expectedContentRevision: 1, expectedReviewRevision: 0 })).toBe(true);
+  expect(database.overrideClassification({ billId: id, reviewerId: "alice", action: "reclassify_invoice", expectedContentRevision: 2, expectedReviewRevision: 1 })).toBe(true);
+  const sync = new JobWorker(database, { sync_review_correction: createReviewCorrectionSyncHandler(database, sheets) }, policy, "cleanup", createLogger("error"));
+  await sync.runOnce(); // stale NotInvoice revision cannot clear the newer reclassification state.
+  expect(rows.size).toBe(1);
+  await sync.runOnce();
+  expect(rows.size).toBe(0); expect(database.getBill(id)).toMatchObject({ classification: "invoice", status: "needs_review" });
+});
+
 test("permanent extraction failure renders a corrective form and can be approved", async () => {
   database.sqlite.query("DELETE FROM extractions WHERE bill_id = ?").run(id);
   database.sqlite.query("INSERT INTO extractions (id,bill_id,schema_version,normalized_json,provider_model,prompt_schema_version,requested_at,completed_at,error_details,created_at,updated_at) VALUES ('failed',?,'1',NULL,'model','schema','2026-08-01','2026-08-02','malformed provider output','now','now')").run(id);
@@ -150,4 +220,42 @@ test("manual approval bypasses automated factual validation", async () => {
   const form = new URLSearchParams({ csrf, contentRevision: "1", reviewRevision: "0", action: "approve", vendorName: "Vendor", invoiceNumber: "N", invoiceDate: "2026-08-01", currency: "NOT", subtotal: "9", vat: "1", total: "20", description: "ok" });
   expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(303);
   expect(database.getBill(id)?.status).toBe("approved");
+});
+
+test("unified queue filters sources, batches, Complete, and NotInvoice", async () => {
+  const batch = database.createAdminUploadBatch({ idempotencyKey: "review-filter-batch", originalFilename: "upload.zip" }).batch;
+  const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 0, entryPath: "not-invoice.pdf" }).item;
+  const uploaded = database.createBillWithInitialJobs({ id: "not-invoice", whatsappMessageId: "admin-review", whatsappGroupId: "admin-upload", whatsappSenderId: "admin-upload", attachmentIndex: 0, receivedAt: "2026-08-03T00:00:00.000Z", mimeType: "application/pdf", originalPath: join(dir, "originals", "bill.png"), contentSha256: "c".repeat(64), source: "admin_upload", sourceIdentity: "admin-review", extractionPolicy: "azure_only", classification: "not_invoice", batchItemId: item.id }, [{ type: "extract", idempotencyKey: "extract:admin-review" }]).bill;
+  database.sqlite.query("UPDATE bills SET status = 'failed' WHERE id = ?").run(uploaded.id);
+  const all = await handleReviewRequest(new Request("http://x/review/api/bills?source=admin_upload&batch=" + batch.id + "&status=not_invoice", { headers: basic() }), database, config);
+  expect(await all.json()).toMatchObject([{ id: uploaded.id, source: "admin_upload", batchId: batch.id, displayStatus: "NotInvoice" }]);
+  database.sqlite.query("UPDATE bills SET status = 'approved', classification = 'invoice' WHERE id = ?").run(id);
+  const complete = await handleReviewRequest(new Request("http://x/review/api/bills?source=whatsapp&status=complete", { headers: basic() }), database, config);
+  expect(await complete.json()).toMatchObject([{ id, displayStatus: "Complete" }]);
+  expect((await handleReviewRequest(new Request("http://x/review/api/bills?source=wrong", { headers: basic() }), database, config)).status).toBe(400);
+});
+
+test("classification overrides are CSRF and revision guarded, audited, and remove stale Sheets work", async () => {
+  database.sqlite.query("UPDATE bills SET status = 'approved', classification = 'invoice', content_revision = 1 WHERE id = ?").run(id);
+  database.sqlite.query("INSERT INTO provider_projection_metadata (id,bill_id,provider,projection_key,external_id,created_at,updated_at) VALUES ('override-sheet',?,'sheets',?,'4','now','now')").run(id, id);
+  const detail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
+  const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; if (!csrf) throw new Error("missing csrf");
+  const post = (body: URLSearchParams) => handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body }), database, config);
+  expect((await post(new URLSearchParams({ csrf: "bad", contentRevision: "1", reviewRevision: "0", action: "mark_not_invoice" }))).status).toBe(400);
+  expect((await post(new URLSearchParams({ csrf, contentRevision: "0", reviewRevision: "0", action: "mark_not_invoice" }))).status).toBe(409);
+  expect((await post(new URLSearchParams({ csrf, contentRevision: "1", reviewRevision: "0", action: "mark_not_invoice" }))).status).toBe(303);
+  expect(database.getBill(id)).toMatchObject({ classification: "not_invoice", status: "failed", contentRevision: 2, reviewRevision: 1 });
+  expect(database.getReviewEvents(id).at(-1)).toMatchObject({ reviewerId: "alice", action: "mark_not_invoice" });
+  expect(database.listJobsForBill(id).some((job) => job.type === "sync_review_correction" && job.state === "pending")).toBe(true);
+  const notInvoiceDetail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
+  const notInvoiceHtml = await notInvoiceDetail.text();
+  expect(notInvoiceHtml).not.toContain('value="approve"');
+  const notInvoiceCsrf = /name="csrf" value="([^"]+)"/.exec(notInvoiceHtml)?.[1]; if (!notInvoiceCsrf) throw new Error("missing csrf");
+  expect((await post(new URLSearchParams({ csrf: notInvoiceCsrf, contentRevision: "2", reviewRevision: "1", action: "approve", vendorName: "Vendor", invoiceNumber: "N", invoiceDate: "2026-08-01", currency: "USD", subtotal: "9", vat: "1", total: "10", description: "ok" }))).status).toBe(409);
+  const stale = new URLSearchParams({ csrf, contentRevision: "1", reviewRevision: "0", action: "reclassify_invoice" });
+  expect((await post(stale)).status).toBe(409);
+  const reclassifyDetail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
+  const fresh = /name="csrf" value="([^"]+)"/.exec(await reclassifyDetail.text())?.[1]; if (!fresh) throw new Error("missing csrf");
+  expect((await post(new URLSearchParams({ csrf: fresh, contentRevision: "2", reviewRevision: "1", action: "reclassify_invoice" }))).status).toBe(303);
+  expect(database.getBill(id)).toMatchObject({ classification: "invoice", status: "needs_review" });
 });

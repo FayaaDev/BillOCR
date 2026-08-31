@@ -16,7 +16,7 @@ The service writes the current QR token only to `${WHATSAPP_AUTH_PATH}/pairing-q
 
 For handwritten bills, send JPEG, PNG, or WebP images as WhatsApp documents/files when possible to avoid WhatsApp image recompression. Frame the bill clearly and minimize glare.
 
-Set `MISTRAL_ENABLED=false` to use Azure Document Intelligence as the only extraction provider; Mistral credentials are not required in this mode. Set `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` to the HTTPS origin of the Document Intelligence resource and set `AZURE_DOCUMENT_INTELLIGENCE_API_KEY` privately. When Mistral is enabled, Azure remains the fallback for missing or low-confidence `vendorName`, `invoiceDate`, or `total` evidence according to `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default `0.80`). At least one extraction provider must be enabled.
+Set `MISTRAL_ENABLED=false` to use Azure Document Intelligence as the only extraction provider; Mistral credentials are not required in this mode. Set `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` to the HTTPS origin of the Document Intelligence resource and set `AZURE_DOCUMENT_INTELLIGENCE_API_KEY` privately. `AZURE_ENABLED` defaults to `true`; when enabled, both values are required. `AZURE_MAX_RESPONSE_BYTES` defaults to `2097152` (2 MiB) and is an integer of at least `1`; `AZURE_REQUEST_TIMEOUT_MS` defaults to `60000` ms and is an integer of at least `1`; `AZURE_POLL_INTERVAL_MS` defaults to `500` ms and is an integer of at least `0`; and `OCR_FALLBACK_CONFIDENCE_THRESHOLD` defaults to `0.80` and must be in the inclusive range `0`–`1`. When Mistral is enabled, Azure remains the fallback for missing or low-confidence `vendorName`, `invoiceDate`, or `total` evidence according to that threshold. At least one extraction provider must be enabled.
 
 Google projections use exactly one `GOOGLE_AUTH_MODE`:
 
@@ -32,6 +32,18 @@ Google projections use exactly one `GOOGLE_AUTH_MODE`:
 For either mode, restart the service after changing credentials, inspect failures with `bun run ops failed-jobs`, then retry only the affected retryable jobs with `bun run ops retry <job-id>`. Refresh-token credentials and Desktop client JSON are secrets: keep them in `secrets/`, never commit them, and revoke them from the Google account if exposed.
 
 The review queue is `http://127.0.0.1:3000/review`; it is Basic-auth protected. Put it behind a TLS-terminating authenticated reverse proxy in any non-local deployment.
+
+## Admin ZIP uploads
+
+The Basic-auth-protected admin dashboard at `http://127.0.0.1:3000/admin` can upload a `.zip` archive through `POST /admin/api/zip`. The browser obtains a separate admin-ZIP CSRF token from `GET /admin/api/overview`, sends the ZIP with that token and an opaque upload ID, then shows upload progress. The endpoint accepts `application/zip` or `application/x-zip-compressed` only and returns `202 Accepted` with a batch ID. `GET /admin/api/zip/:batchId` returns the safe batch status; the UI polls it every two seconds until no entry is queued or processing.
+
+ZIP upload availability is controlled solely by `AZURE_ENABLED`: when Azure is disabled, the dashboard disables upload and the POST endpoint returns `503`; it does not disclose provider credentials or provider error bodies. There are no ZIP environment variables. The fixed limits are 50 MiB compressed ZIP bytes, 200 MiB total expanded entry bytes, 20 MiB per entry, and 500 entries. The parser is the direct runtime dependency [`yauzl`](https://www.npmjs.com/package/yauzl) (`^3.4.0` in `package.json`); Bun bundles the server import normally, so no separate native tool or build setting is required.
+
+Archive enumeration creates durable records before the `202` response; the resulting Azure extraction and review work continues asynchronously. Each supported entry becomes an immutable canonical original and an Azure-only extraction job, while the dashboard reports the batch and per-entry outcomes. Entry paths are never extracted to the filesystem. Encrypted entries, directories, special files, unsafe paths, unsupported bytes, and entries exceeding a limit are recorded as `rejected`; malformed/archive-processing failures are `failed`. Valid entries start `queued`/`processing` and finish as `complete`, `not_invoice`, `rejected`, or `failed`; a batch is `queued`, `processing`, `completed` once no entry remains queued or processing, or `failed` for an archive-processing failure. A ZIP retry with the same upload ID and identical bytes reuses its batch; different bytes are rejected.
+
+Azure may classify a valid uploaded document as `not_invoice`. That is a terminal batch-entry outcome, not an approved invoice, and it creates no Google Sheets projection. It remains visible in review and may be reclassified for manual invoice review. ZIP originals are immutable direct children of `WHATSAPP_ORIGINALS_DIR`; their recorded SHA-256 must match the stored bytes. Upload handling stages and validates archive bytes before publishing a canonical original, and no database transaction is held during archive or provider work.
+
+The authenticated `GET /review/export.csv` download contains approved invoices only. It excludes not-invoice records, unapproved/rejected work, and failed entries; it is not a ZIP batch report.
 
 ## Image preprocessing policy
 

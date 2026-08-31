@@ -74,6 +74,14 @@ test("Azure fallback validates credentials without exposing them and defaults it
   expect(() => loadConfig({ ...validEnvironment(), OCR_FALLBACK_CONFIDENCE_THRESHOLD: "1.01" })).toThrow("OCR_FALLBACK_CONFIDENCE_THRESHOLD");
 });
 
+test("documented Azure response and polling limits retain their defaults and validation bounds", () => {
+  expect(loadConfig(validEnvironment()).azure).toMatchObject({ maxResponseBytes: 2 * 1024 * 1024, requestTimeoutMs: 60_000, pollIntervalMs: 500 });
+  expect(loadConfig({ ...validEnvironment(), AZURE_MAX_RESPONSE_BYTES: "1", AZURE_REQUEST_TIMEOUT_MS: "1", AZURE_POLL_INTERVAL_MS: "0" }).azure).toMatchObject({ maxResponseBytes: 1, requestTimeoutMs: 1, pollIntervalMs: 0 });
+  expect(() => loadConfig({ ...validEnvironment(), AZURE_MAX_RESPONSE_BYTES: "0" })).toThrow("AZURE_MAX_RESPONSE_BYTES");
+  expect(() => loadConfig({ ...validEnvironment(), AZURE_REQUEST_TIMEOUT_MS: "0" })).toThrow("AZURE_REQUEST_TIMEOUT_MS");
+  expect(() => loadConfig({ ...validEnvironment(), AZURE_POLL_INTERVAL_MS: "-1" })).toThrow("AZURE_POLL_INTERVAL_MS");
+});
+
 test("Azure-only mode does not require Mistral credentials", () => {
   const environment = { ...validEnvironment(), MISTRAL_ENABLED: "false", AZURE_ENABLED: "true", AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://azure.example.test", AZURE_DOCUMENT_INTELLIGENCE_API_KEY: "azure-secret" };
   delete (environment as Partial<typeof environment>).MISTRAL_API_KEY;
