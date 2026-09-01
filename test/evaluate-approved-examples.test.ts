@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { rmSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { evaluateApprovedAnnotation, readApprovedFixturePng, runApprovedExampleEvaluation } from "../src/evaluate-approved-examples";
+import { evaluateApprovedInvoice, readApprovedFixturePng, runApprovedExampleEvaluation } from "../src/evaluate-approved-examples";
 
 test("evaluator accepts approved root-relative fixture images and rejects workspace escapes", async () => {
   await expect(readApprovedFixturePng("../../../example3.png")).resolves.toBeInstanceOf(Uint8Array);
@@ -18,21 +18,21 @@ test("evaluator rejects a symlink even when its target is a safe workspace image
 
 test("evaluator treats model-supplied confidence without native evidence as informational", () => {
   const expected = { vendorName: "Al-Anzi Lathe", invoiceNumber: "0427", invoiceDate: "2026-08-26", currency: null, subtotal: 70, vat: null, total: 70, description: null };
-  const annotation = { schemaVersion: "1", ...expected, fields: { vendorName: { confidence: 0.99, sourceText: "Al-Anzi Lathe" }, invoiceDate: { confidence: 0.99, sourceText: "26/08/2026" }, total: { confidence: 0.99, sourceText: "Total: 70" } } };
-  expect(evaluateApprovedAnnotation(annotation, expected, new Date("2026-08-29T00:00:00.000Z"))).toMatchObject({ differences: [], decision: "approved", issues: [], passed: true });
-  const lowConfidence = evaluateApprovedAnnotation({ ...annotation, fields: { ...annotation.fields, total: { confidence: 0, sourceText: "Total: 70" } } }, expected, new Date("2026-08-29T00:00:00.000Z"));
+  const invoice = { schemaVersion: "1", ...expected, fields: { vendorName: { confidence: 0.99, sourceText: "Al-Anzi Lathe" }, invoiceDate: { confidence: 0.99, sourceText: "26/08/2026" }, total: { confidence: 0.99, sourceText: "Total: 70" } } };
+  expect(evaluateApprovedInvoice(invoice, expected, new Date("2026-08-29T00:00:00.000Z"))).toMatchObject({ differences: [], decision: "approved", issues: [], passed: true });
+  const lowConfidence = evaluateApprovedInvoice({ ...invoice, fields: { ...invoice.fields, total: { confidence: 0, sourceText: "Total: 70" } } }, expected, new Date("2026-08-29T00:00:00.000Z"));
   expect(lowConfidence).toMatchObject({ decision: "approved", passed: true });
 });
 
 test("evaluator emits six sanitized records for original, sharp, and opencv variants", async () => {
-  const providerCalls: Array<{ bytes: Uint8Array; idempotencyKey: string }> = [];
+  const submitCalls: Array<{ bytes: Uint8Array; mimeType: string }> = [];
+  const pollCalls: string[] = [];
   const preprocessCalls: Array<{ bytes: Uint8Array; mimeType: string; mode?: "auto" | "sharp" | "opencv" }> = [];
   const expected = {
     "example3.json": { vendorName: "Al-Anzi Lathe", invoiceNumber: "0427", invoiceDate: "2026-08-26", currency: null, subtotal: 70, vat: null, total: 70, description: null },
     "example4.json": { vendorName: "Car electrical & A/C", invoiceNumber: "0062", invoiceDate: "2024-08-26", currency: null, subtotal: 200, vat: null, total: 200, description: "5184" },
   } as const;
   const records = await runApprovedExampleEvaluation({
-    runToken: "test-run",
     preprocessor: {
       preprocess: async (input) => {
         preprocessCalls.push(input);
@@ -40,11 +40,15 @@ test("evaluator emits six sanitized records for original, sharp, and opencv vari
       },
     },
     provider: {
-      extract: async (input) => {
-        providerCalls.push(input);
-        const name = input.idempotencyKey.includes(":example3.json:") ? "example3.json" : "example4.json";
+      submit: async (input) => {
+        submitCalls.push(input);
+        return { operationLocation: `https://azure.example.test/operations/${submitCalls.length}` };
+      },
+      poll: async ({ operationLocation }) => {
+        pollCalls.push(operationLocation);
+        const name = pollCalls.length <= 3 ? "example3.json" : "example4.json";
         const value = expected[name];
-        return { annotation: { schemaVersion: "1", ...value, fields: { vendorName: { confidence: 0.99, sourceText: value.vendorName }, invoiceDate: { confidence: 0.99, sourceText: value.invoiceDate }, total: { confidence: 0.99, sourceText: String(value.total) } } }, rawResponse: "provider response", model: "test-model" };
+        return { classification: "invoice", bill: { schemaVersion: "1", ...value, fields: { vendorName: { confidence: 0.99, sourceText: value.vendorName }, invoiceDate: { confidence: 0.99, sourceText: value.invoiceDate }, total: { confidence: 0.99, sourceText: String(value.total) } } }, rawResponse: "provider response", model: "prebuilt-invoice" };
       },
     },
   });
@@ -56,29 +60,23 @@ test("evaluator emits six sanitized records for original, sharp, and opencv vari
     expect.objectContaining({ fixture: "example3.json", variant: "opencv", mode: "opencv", dimensions: { width: 100, height: 200 } }),
   ]));
   expect(preprocessCalls.map(({ mode }) => mode)).toEqual(["sharp", "opencv", "sharp", "opencv"]);
-  expect(providerCalls).toHaveLength(6);
-  expect(providerCalls.map(({ idempotencyKey }) => idempotencyKey)).toEqual([
-    "approved-evaluation:extracted-bill-v4:test-run:example3.json:original",
-    "approved-evaluation:extracted-bill-v4:test-run:example3.json:sharp",
-    "approved-evaluation:extracted-bill-v4:test-run:example3.json:opencv",
-    "approved-evaluation:extracted-bill-v4:test-run:example4.json:original",
-    "approved-evaluation:extracted-bill-v4:test-run:example4.json:sharp",
-    "approved-evaluation:extracted-bill-v4:test-run:example4.json:opencv",
+  expect(submitCalls).toHaveLength(6);
+  expect(pollCalls).toEqual([
+    "https://azure.example.test/operations/1", "https://azure.example.test/operations/2", "https://azure.example.test/operations/3",
+    "https://azure.example.test/operations/4", "https://azure.example.test/operations/5", "https://azure.example.test/operations/6",
   ]);
-  await expect(readApprovedFixturePng("../../../example3.png")).resolves.toEqual(providerCalls[0]!.bytes);
-  await expect(readApprovedFixturePng("../../../example4.png")).resolves.toEqual(providerCalls[3]!.bytes);
+  await expect(readApprovedFixturePng("../../../example3.png")).resolves.toEqual(submitCalls[0]!.bytes);
+  await expect(readApprovedFixturePng("../../../example4.png")).resolves.toEqual(submitCalls[3]!.bytes);
   for (const record of records) expect(Object.keys(record).sort()).toEqual(["decision", "differences", "dimensions", "fixture", "issues", "mode", "variant"]);
   expect(JSON.stringify(records)).not.toContain("provider response");
-  expect(JSON.stringify(records)).not.toContain("test-model");
-  expect(JSON.stringify(records)).not.toContain("test-run");
+  expect(JSON.stringify(records)).not.toContain("prebuilt-invoice");
 });
 
 test("evaluator reports failed preprocessing locally without calling the provider", async () => {
   let calls = 0;
   const records = await runApprovedExampleEvaluation({
-    runToken: "test-run",
     preprocessor: { preprocess: async () => null },
-    provider: { extract: async () => { calls++; throw new Error("must not run"); } },
+    provider: { submit: async () => { calls++; throw new Error("must not run"); }, poll: async () => { throw new Error("must not run"); } },
   });
 
   expect(calls).toBe(2);

@@ -6,8 +6,8 @@
 
 ## Unresolved release risks
 
-- No live Mistral, Google, or WhatsApp provider verification was performed. Mock contracts may differ from production APIs, OAuth policy, quota, or permissions.
-- Mistral idempotency is required for the unavoidable crash-after-provider-effect window; the API's real retention/scope must be confirmed before production replay.
+- No live Azure, Google, or WhatsApp provider verification was performed. Mock contracts may differ from production APIs, OAuth policy, quota, or permissions.
+- Azure submission and polling state are persisted for the unavoidable crash-after-provider-effect window; Azure operation retention and replay behavior must be confirmed before production replay.
 - Baileys is an RC dependency and WhatsApp can revoke/log out the dedicated account or change protocol behavior.
 - Google Drive/Sheets have no shared transaction. Reserved Drive IDs and hidden Sheet bill IDs compensate for lost responses and concurrent workers, but external/manual Sheet edits and provider consistency lag still require reconciliation.
 - SQLite plus originals is single-host storage. The backup command creates a consistent DB snapshot then copies originals, but it is not a distributed point-in-time backup; use one host, durable volume snapshots, and restore drills.

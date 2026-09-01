@@ -13,7 +13,7 @@ The system must treat the database—not WhatsApp, Drive, or Sheets—as the can
 - Listen to one WhatsApp group through a dedicated WhatsApp account using Baileys.
 - Accept image and PDF attachments, with an optional message caption.
 - Persist the exact incoming attachment and message metadata before processing.
-- Extract structured bill data with using Mistral OCR 4.1 / Document AI. ref:https://docs.mistral.ai/studio/document-processing/overview?utm_source=chatgpt.com
+- Extract structured bill data with Azure Document Intelligence `prebuilt-invoice`.
 - Validate extracted values deterministically and route uncertain records to review.
 - Upload the unmodified original attachment to Google Drive.
 - Append or update an idempotent row in Google Sheets with a Drive link.
@@ -46,7 +46,7 @@ Each implementation agent works only within its assigned scope, writes or update
 | Coordinator | Maintains this plan, sequencing, contracts, and acceptance status. | Integrated implementation and release checklist. |
 | Foundation agent | Application setup, configuration validation, SQLite schema, migrations, and job runner. | Durable records and idempotent job claiming. |
 | WhatsApp agent | Baileys connection, group filtering, attachment download, and ingestion transaction. | One persisted bill per unique WhatsApp message attachment. |
-| Extraction agent | Vision-model request with Mistral OCR 4.1 / Document A, strict schema parsing, retries, and extraction persistence. | Valid structured extraction or a reviewable failure. |
+| Extraction agent | Azure Document Intelligence `prebuilt-invoice` request, strict schema parsing, retries, and extraction persistence. | Valid structured extraction or a reviewable failure. |
 | Validation agent | Deterministic validation and review-routing rules. | Field-level issues and an explicit status decision. |
 | Google integration agent | Drive archival and Sheets projection, both idempotent. | Original Drive file and exactly one corresponding sheet row. |
 | Review UI agent | Minimal authenticated page to inspect originals, edit extracted fields, and resolve records. | Corrections saved to the database and re-projected to Sheets. |
@@ -82,7 +82,7 @@ The uniqueness constraint is `(whatsappMessageId, attachment index)`; retain the
 
 ### Extraction response
 
-The model receives the original document as an image or PDF, plus the caption when present. It must return JSON matching a versioned schema. Do not use free-form model prose as a data source.
+The Azure provider receives only the original document bytes and MIME type, then calls Azure Document Intelligence `prebuilt-invoice`. The application maps and validates Azure's untrusted output into the versioned schema below. Do not use free-form provider prose as a data source.
 
 ```ts
 type ExtractedBill = {
@@ -103,7 +103,7 @@ type ExtractedBill = {
 };
 ```
 
-`null` means unknown; agents must not invent values. The persisted extraction also includes the raw provider response, model name, prompt/schema version, request timestamp, and error details when applicable.
+`null` means unknown; agents must not invent values. The persisted extraction also includes the raw provider response, model name, normalization/schema version, request timestamp, and error details when applicable.
 
 ### Job record
 
@@ -152,15 +152,15 @@ Supported job types: `extract`, `archive_to_drive`, `project_to_sheet`, and `syn
 - Redelivering the same WhatsApp event creates no duplicate record or jobs.
 - A restart between download and processing leaves a recoverable persisted bill.
 
-### Phase 2 — Model extraction with Mistral OCR 4.1 Document AI extraction
+### Phase 2 — Azure Document Intelligence extraction
 
 **Owner:** Extraction agent
 
-1. Claim `extract` jobs and submit the original attachment directly to Mistral OCR 4.1 / Document AI.
-2. Request only the `ExtractedBill` JSON schema; include explicit instructions for Arabic and English text, handwriting, tables, and unknown values.
-3. Validate the provider response against the schema before persistence.
+1. Claim `extract` jobs and submit the original attachment directly to Azure Document Intelligence `prebuilt-invoice`.
+2. Submit only the verified original bytes and MIME type to Azure Document Intelligence `prebuilt-invoice`; do not send captions or custom `ExtractedBill` schema instructions.
+3. Map and validate Azure's untrusted response into `ExtractedBill` before persistence.
 4. Store raw output and normalized parsed output separately for auditability.
-5. Treat timeouts, rate limits, and transient provider errors as retryable; malformed schema output becomes a reviewable extraction failure after the retry policy is exhausted.
+5. Treat timeouts, rate limits, and transient provider errors as retryable; malformed Azure output becomes a reviewable extraction failure after the retry policy is exhausted.
 
 **Acceptance checks**
 

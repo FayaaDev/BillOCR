@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an opt-in, bounded in-memory image preprocessing derivative before Mistral OCR so handwritten bill photos are easier to read while the persisted original remains immutable.
+**Goal:** Add an opt-in, bounded in-memory image preprocessing derivative before Azure Document Intelligence so handwritten bill photos are easier to read while the persisted original remains immutable.
 
-**Architecture:** `createExtractJobHandler` continues to obtain the attachment only through `readVerifiedOriginal`, then asks an injected `ImagePreprocessor` for a PNG derivative. A dedicated Worker performs all Sharp/OpenCV CPU work and is terminated on timeout; any preprocessing failure returns the exact verified bytes to Mistral. PDFs bypass preprocessing and no derivative is written or persisted. New job keys durably select the original or preprocessing policy, while the provider idempotency key includes the selected input SHA-256 so byte-identical replay reuses a key and different request bytes never reuse one key.
+**Architecture:** `createExtractJobHandler` continues to obtain the attachment only through `readVerifiedOriginal`, then asks an injected `ImagePreprocessor` for a PNG derivative. A dedicated Worker performs all Sharp/OpenCV CPU work and is terminated on timeout; any preprocessing failure returns the exact verified bytes to Azure Document Intelligence. PDFs bypass preprocessing and no derivative is written or persisted. New job keys durably select the original or preprocessing policy, while the provider idempotency key includes the selected input SHA-256 so byte-identical replay reuses a key and different request bytes never reuse one key.
 
 **Tech Stack:** Bun 1.2, TypeScript, `sharp@0.35.4`, `@techstark/opencv-js@5.0.0-release.1` (OpenCV WASM), Bun Worker, Bun test, Docker `oven/bun:1.2-slim`.
 
@@ -32,7 +32,7 @@ export const IMAGE_PREPROCESSING_VERSION = "sharp-opencv-v1";
 | `src/config.ts` | Add only the enabled flag and worker timeout setting. |
 | `src/image-preprocessing.ts` | Public interface, constants, source/dist-safe Worker client, MIME bypass/fallback policy, and safe metadata. |
 | `src/image-preprocessing-worker.ts` | Isolated Sharp/OpenCV decode, page detection/rectification, enhancement, and PNG encoding. |
-| `src/extraction.ts` | Inject preprocessing after verified-original read, select request bytes, hash them into provider idempotency, and call Mistral. |
+| `src/extraction.ts` | Inject preprocessing after verified-original read, select request bytes, hash them into provider idempotency, and call Azure Document Intelligence. |
 | `src/whatsapp-ingestion.ts` | Persist the selected input policy in newly created extraction job idempotency keys. |
 | `src/server.ts` | Compose the enabled production preprocessor and permit injected test preprocessor. |
 | `src/evaluate-approved-examples.ts` | Authorized-only three-variant, two-fixture evaluator. |
@@ -74,7 +74,7 @@ Expected: both commands exit 0, `package.json` contains exact versions, and the 
 
 - [ ] **Step 2: Add a failing local compatibility-spike test before writing the worker.**
 
-In `test/deployment.test.ts`, add an offline subprocess test that imports both modules and exercises every OpenCV API needed by the production algorithm:
+In `test/deployment.test.ts`, add an offline subprocess test that imports both modules and exercises every OpenCV API needed by the evaluator algorithm:
 
 ```ts
 test("Bun imports Sharp and OpenCV WASM APIs required by preprocessing", async () => {
@@ -196,7 +196,7 @@ imagePreprocessing: {
 },
 ```
 
-Add this disabled-by-default block after Mistral settings in `.env.example`:
+Add this disabled-by-default block after Azure settings in `.env.example`:
 
 ```dotenv
 # In-memory OCR photo derivative. Originals are never modified or stored as derivatives.
@@ -222,7 +222,7 @@ type WorkerRequest = { bytes: ArrayBuffer; mimeType: string; mode: "auto" | "sha
 type WorkerResponse = { ok: true; bytes: ArrayBuffer; mode: "sharp" | "opencv"; width: number; height: number } | { ok: false };
 ```
 
-`preprocess` defaults missing `input.mode` to `"auto"`. Production omits it. The evaluator passes `"sharp"` and `"opencv"`; `"opencv"` still falls back to Sharp if no quadrilateral passes confidence, returning mode `"sharp"`.
+`preprocess` defaults missing `input.mode` to `"auto"`. Production explicitly passes `"sharp"`; OpenCV is evaluator-only. The evaluator passes `"sharp"` and `"opencv"`; `"opencv"` still falls back to Sharp if no quadrilateral passes confidence, returning mode `"sharp"`.
 
 - [ ] **Step 5: Run the configuration tests.**
 
@@ -298,7 +298,7 @@ cv.findContours(merged, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_S
 
 Delete `kernel` and `merged` with every other OpenCV allocation. `RETR_EXTERNAL`, reduced analysis resolution, close/dilate merging, and `CHAIN_APPROX_SIMPLE` reduce contour materialization before the existing 200-candidate inspection cap; the adversarial stress and container ceiling verify the remaining native/WASM allocation risk.
 
-When `request.mode === "sharp"`, skip grayscale, contours, and perspective rectification completely; enhance the full oriented working image and return mode `"sharp"`. For `"auto"` and `"opencv"`, run the same geometry path: for each contour, calculate `cv.contourArea`, `cv.arcLength`, and `cv.approxPolyDP`. Accept the largest contour only when it is convex, has four points, area ratio in `[0.25, 0.98]`, non-self-intersecting ordered corners, all edge lengths are at least 5% of analysis long edge, and its two diagonals are each at least 15% of that edge. Order points as top-left, top-right, bottom-right, bottom-left using sum/difference, map them by `workingWidth / analysisWidth` and `workingHeight / analysisHeight`, and rectify with `cv.getPerspectiveTransform` plus `cv.warpPerspective` into an RGBA white page. Return mode `"opencv"` when rectified; otherwise enhance the full oriented image and return mode `"sharp"`. This makes production `auto` byte-equivalent to the evaluator's forced `opencv` request for the same dependency versions and input.
+When `request.mode === "sharp"`, skip grayscale, contours, and perspective rectification completely; enhance the full oriented working image and return mode `"sharp"`. Production uses this Sharp-only path. For evaluator-only `"auto"` and `"opencv"` requests, run the same geometry path: for each contour, calculate `cv.contourArea`, `cv.arcLength`, and `cv.approxPolyDP`. Accept the largest contour only when it is convex, has four points, area ratio in `[0.25, 0.98]`, non-self-intersecting ordered corners, all edge lengths are at least 5% of analysis long edge, and its two diagonals are each at least 15% of that edge. Order points as top-left, top-right, bottom-right, bottom-left using sum/difference, map them by `workingWidth / analysisWidth` and `workingHeight / analysisHeight`, and rectify with `cv.getPerspectiveTransform` plus `cv.warpPerspective` into an RGBA white page. Return mode `"opencv"` when rectified; otherwise enhance the full oriented image and return mode `"sharp"`.
 
 Every OpenCV allocation must be declared before use and deleted in one `finally`, including `Mat`, `MatVector`, contour Mats obtained with `contours.get(i)`, kernel, points, transform, and destination. Delete each contour Mat inside the loop's own `finally` and all outer allocations in the function `finally`. The `finally` must run on malformed input and OpenCV exceptions. Inspect at most the 200 largest external contours after area sorting. Document the allocation estimate for the 8-megapixel Sharp input cap, 600-pixel analysis cap, and 1800-pixel RGBA working/output caps; this is a dimensional/concurrency bound, not a guaranteed JavaScript RSS ceiling. Only one preprocessing Worker may exist because the durable `JobWorker` handles one claimed job at a time. Run the Docker Worker smoke with `--memory=256m`; production Compose uses a 512 MiB service ceiling.
 
@@ -344,7 +344,7 @@ const preprocessor = { preprocess: async () => ({ bytes: derivative, mimeType: "
 
 Create one test where the provider receives `derivative` and `mimeType: "image/png"`, another where `preprocess` returns `null` or throws and the provider receives the byte-for-byte verified original and original MIME, and a PDF test where the fake’s `preprocess` call count is zero. Assert the original file bytes and SHA-256 remain unchanged in all cases.
 
-Add a fence test with a `context.assertLease` spy whose sequence is recorded; it must observe an assertion immediately before `provider.extract`, after preprocessing returns. Assert byte-identical first-run/replay inputs produce the same provider key, derivative and original-fallback bytes produce different keys, and the provider key never embeds raw bytes.
+Add a fence test with a `context.assertLease` spy whose sequence is recorded; it must observe an assertion immediately before `provider.submit`, after preprocessing returns. Assert byte-identical first-run/replay inputs produce the same provider key, derivative and original-fallback bytes produce different keys, and the provider key never embeds raw bytes.
 
 Add an explicit crash/replay limitation test: first make preprocessing return a derivative and the provider throw after recording its request, then make preprocessing return `null` on replay. Assert the second call uses the verified original and a different input-hash key. This may incur two provider calls, but it must never send different bytes under one idempotency key.
 
@@ -376,10 +376,10 @@ if (job.idempotencyKey.endsWith(`:${IMAGE_PREPROCESSING_VERSION}`) && isPreproce
 const inputHash = createHash("sha256").update(providerBytes).digest("hex");
 const providerIdempotencyKey = `${context.idempotencyKey}:input:${inputHash}`;
 context.assertLease();
-const result = await provider.extract({ bytes: providerBytes, mimeType: providerMimeType, caption: bill.caption, idempotencyKey: providerIdempotencyKey });
+const submission = await provider.submit({ bytes: providerBytes, mimeType: providerMimeType });
 ```
 
-This derivation preserves provider idempotency for identical request bytes and prevents one key from representing both a derivative and fallback original after timeout/failure. Do not persist mode/dimensions, do not alter `EXTRACTION_PROMPT_VERSION`, and do not add image/raw/provider error logging. The comment is the complete rationale for the intentional catch; no error object is read or logged.
+Azure Document Intelligence `prebuilt-invoice` receives only those bytes and MIME type; the application later polls, maps, and validates its untrusted response. This derivation preserves durable invocation identity for identical request bytes and prevents one key from representing both a derivative and fallback original after timeout/failure. Do not persist mode/dimensions, do not alter `EXTRACTION_PROMPT_VERSION`, and do not add image/raw/provider error logging. The comment is the complete rationale for the intentional catch; no error object is read or logged.
 
 - [ ] **Step 4: Compose only when the feature is enabled and retain service injection.**
 
@@ -393,7 +393,7 @@ In `src/whatsapp-ingestion.ts`, add an `extractionInputVersion: "original" | typ
 
 Add ingestion tests proving disabled/new jobs end in `:original`, enabled/new jobs end in `:sharp-opencv-v1`, and replay/reconciliation never rewrites an existing job key. This uses the already-durable idempotency key rather than a schema migration.
 
-Add a `test/server.test.ts` case that starts the service with a fake image preprocessor and a fake Mistral provider, enqueues a PNG fixture, and asserts the fake was called for a tagged job. Add the disabled-config case proving newly ingested jobs use `:original` and the provider receives original bytes even though a lazy preprocessor instance is available. Add a rollback case proving an existing `:sharp-opencv-v1` job still invokes preprocessing when the current new-job flag is disabled.
+Add a `test/server.test.ts` case that starts the service with a fake image preprocessor and a fake Azure provider, enqueues a PNG fixture, and asserts the fake was called for a tagged job. Add the disabled-config case proving newly ingested jobs use `:original` and the provider receives original bytes even though a lazy preprocessor instance is available. Add a rollback case proving an existing `:sharp-opencv-v1` job still invokes preprocessing when the current new-job flag is disabled.
 
 - [ ] **Step 5: Run focused durability and server tests.**
 
@@ -403,7 +403,7 @@ Expected: PASS. Successful preprocessing changes only the provider input; failur
 
 #### Provider idempotency limitation
 
-No input selection is persisted before the external call in this phase. If Mistral accepts a derivative and the process crashes before SQLite persists the response, a later attempt whose preprocessing times out can send the verified original under a different input-hash key, resulting in a duplicate bill request. This is preferable to reusing one key for different bodies and is consistent with the repository's existing documented Mistral idempotency limitation. Eliminating the duplicate possibility requires a database migration or durable derivative persistence and is explicitly deferred; the crash/replay test above locks in the bounded behavior.
+No input selection is persisted before the external call in this phase. If Azure accepts a derivative and the process crashes before SQLite persists the response, a later attempt whose preprocessing times out can send the verified original under a different input-hash key, resulting in a duplicate bill request. This is preferable to reusing one key for different bodies. Eliminating the duplicate possibility requires a database migration or durable derivative persistence and is explicitly deferred; the crash/replay test above locks in the bounded behavior.
 
 ### Task 5: Make the approved-example evaluator a safe, deterministic A/B gate
 
@@ -434,7 +434,7 @@ Expected: FAIL because the evaluator currently emits one record per fixture and 
 
 - [ ] **Step 3: Implement exactly three variants and sanitized, unique provider keys.**
 
-In `src/evaluate-approved-examples.ts`, process `const variants = ["original", "sharp", "opencv"] as const` for each existing fixture. Use the original fixture bytes unchanged for `original`; call `WorkerImagePreprocessor` in forced `sharp` and `opencv` modes for the other two. If a transform returns `null`, emit a local `needs_review` result with an issue `{ code: "evaluator_preprocessing_failure", field: null }` and do not call Mistral for that variant, preserving the no-leak output schema.
+In `src/evaluate-approved-examples.ts`, process `const variants = ["original", "sharp", "opencv"] as const` for each existing fixture. Use the original fixture bytes unchanged for `original`; call `WorkerImagePreprocessor` in forced `sharp` and `opencv` modes for the other two. If a transform returns `null`, emit a local `needs_review` result with an issue `{ code: "evaluator_preprocessing_failure", field: null }` and do not call Azure for that variant, preserving the no-leak output schema.
 
 For each provider call construct only this sanitized key:
 
@@ -456,7 +456,7 @@ if (Bun.env.APPROVED_EXAMPLE_EVALUATION_AUTHORIZED !== "true") throw new Error("
 
 - [ ] **Step 4: Add the release decision rule to the README.**
 
-Document `IMAGE_PREPROCESSING_VERSION=sharp-opencv-v1` as release/job-policy metadata (not an environment setting), `IMAGE_PREPROCESSING_ENABLED=false`, the 8,000 ms timeout, JPEG/PNG/WebP-only derivative behavior, PDF passthrough, no original writes, and the three evaluation modes. State that production always uses fixed `auto` behavior, equivalent to the evaluator's `opencv` request (rectify when a reliable quadrilateral exists, otherwise Sharp-only). A release may enable production only when that `opencv`/auto candidate has zero false approvals, fewer than the baseline 12 aggregate exact-field differences, and no more than 5 differences for `example3` or 7 for `example4`; otherwise leave production disabled. The Sharp-only result is diagnostic and cannot be selected by configuration in this phase.
+Document `IMAGE_PREPROCESSING_VERSION=sharp-opencv-v1` as release/job-policy metadata (not an environment setting), `IMAGE_PREPROCESSING_ENABLED=false`, the 8,000 ms timeout, JPEG/PNG/WebP-only derivative behavior, PDF passthrough, no original writes, and the three evaluation modes. State that production always uses fixed Sharp-only behavior (orientation, enhancement, and resize) and OpenCV is evaluator-only. A release may enable production only when the Sharp-only candidate has zero false approvals, fewer than the baseline 12 aggregate exact-field differences, and no more than 5 differences for `example3` or 7 for `example4`; otherwise leave production disabled.
 
 - [ ] **Step 5: Run offline evaluator tests only.**
 
@@ -478,7 +478,7 @@ Add this operational sequence verbatim in the preprocessing section:
 ```markdown
 1. Keep `IMAGE_PREPROCESSING_ENABLED=false`; deploy and confirm `bun run verify-build` plus the container import/health smoke. Existing jobs retain their durable `:original` policy.
 2. With written authorization, run `APPROVED_EXAMPLE_EVALUATION_AUTHORIZED=true bun run evaluate:approved-examples`; retain only its six sanitized JSON decision lines in the release record.
-3. Enable only when the fixed `opencv`/auto candidate passes the gate. Newly ingested jobs receive `:sharp-opencv-v1`; existing `:original` jobs remain original-input jobs, so rollout does not change their request bytes.
+3. Enable only when the fixed Sharp-only candidate passes the gate. Newly ingested jobs receive `:sharp-opencv-v1`; existing `:original` jobs remain original-input jobs, so rollout does not change their request bytes.
 4. Monitor `needs_review` rate and extraction processing latency against the pre-enable interval.
 5. To roll back, first pause ingestion and the worker, record jobs already carrying `:sharp-opencv-v1`, set `IMAGE_PREPROCESSING_ENABLED=false`, and restart. Existing preprocessing-policy jobs remain deterministic derivative/fallback jobs and new jobs use `:original`; do not rewrite job keys. The input SHA-256 suffix prevents one provider key from being reused for different bytes.
 ```
@@ -491,7 +491,7 @@ Keep `test/deployment.test.ts` limited to static assertions that do not require 
 bun -e 'import sharp from "sharp"; import { WorkerImagePreprocessor } from "./dist/image-preprocessing.js"; const bytes=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).png().toBuffer(); const result=await new WorkerImagePreprocessor({timeoutMs:8000}).preprocess({bytes,mimeType:"image/png",mode:"sharp"}); if(!result||result.bytes[0]!==137)process.exit(1)'
 ```
 
-The container health smoke starts the service with `WHATSAPP_ENABLED=false`, `GOOGLE_ENABLED=false`, test-only required configuration, and an empty database, waits for `GET /health` to return 200, and stops it. No extraction jobs exist, so it cannot send WhatsApp, Mistral, Drive, or Sheets requests.
+The container health smoke starts the service with `WHATSAPP_ENABLED=false`, `GOOGLE_ENABLED=false`, Azure test configuration, and an empty database, waits for `GET /health` to return 200, and stops it. No extraction jobs exist, so it cannot send WhatsApp, Azure, Drive, or Sheets requests.
 
 Add `mem_limit: 512m` to the `bill-ledger` service in `docker-compose.yml`. Add a static deployment assertion for that exact value and run `docker compose config` during the Docker verification step so unsupported/invalid Compose syntax fails before rollout.
 
@@ -508,7 +508,7 @@ Run the host built-artifact command from Step 2, then:
 ```bash
 docker build -t bill-ledger-preprocessing-smoke .
 docker run --rm --memory=256m --entrypoint bun bill-ledger-preprocessing-smoke -e 'import sharp from "sharp"; import { WorkerImagePreprocessor } from "./dist/image-preprocessing.js"; const bytes=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).png().toBuffer(); const result=await new WorkerImagePreprocessor({timeoutMs:8000}).preprocess({bytes,mimeType:"image/png",mode:"sharp"}); if(!result||result.bytes[0]!==137)process.exit(1)'
-docker run --rm --name bill-ledger-preprocessing-health -e APP_HOST=127.0.0.1 -e APP_PORT=3000 -e APP_DATA_DIR=/data -e WHATSAPP_ENABLED=false -e WHATSAPP_GROUP_ID=test@g.us -e WHATSAPP_AUTH_PATH=/data/whatsapp-auth -e MISTRAL_API_KEY=test -e MISTRAL_MODEL=test -e GOOGLE_ENABLED=false -e REVIEW_USERNAME=test -e REVIEW_PASSWORD=test -e IMAGE_PREPROCESSING_ENABLED=true bill-ledger-preprocessing-smoke sh -c 'bun dist/server.js & pid=$!; bun -e '\''for(let i=0;i<50;i++){try{const r=await fetch("http://127.0.0.1:3000/health");if(r.ok){process.exit(0)}}catch{}await Bun.sleep(100)}process.exit(1)'\''; code=$?; kill $pid; wait $pid || true; exit $code'
+docker run --rm --name bill-ledger-preprocessing-health -e APP_HOST=127.0.0.1 -e APP_PORT=3000 -e APP_DATA_DIR=/data -e WHATSAPP_ENABLED=false -e WHATSAPP_GROUP_ID=test@g.us -e WHATSAPP_AUTH_PATH=/data/whatsapp-auth -e AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=https://azure.test -e AZURE_DOCUMENT_INTELLIGENCE_API_KEY=test -e GOOGLE_ENABLED=false -e REVIEW_USERNAME=test -e REVIEW_PASSWORD=test -e IMAGE_PREPROCESSING_ENABLED=true bill-ledger-preprocessing-smoke sh -c 'bun dist/server.js & pid=$!; bun -e '\''for(let i=0;i<50;i++){try{const r=await fetch("http://127.0.0.1:3000/health");if(r.ok){process.exit(0)}}catch{}await Bun.sleep(100)}process.exit(1)'\''; code=$?; kill $pid; wait $pid || true; exit $code'
 docker compose config >/dev/null
 git diff --check
 ```
@@ -526,7 +526,7 @@ Expected: the Docker build-time layer initializes both external modules, the run
 
 ## Self-review
 
-- [x] **Spec coverage:** Tasks 1–3 cover pinned dependencies, Bun/Docker proof, WASM readiness, source/dist Worker resolution, external bundling, decode/time/size/pixel bounds, Sharp/OpenCV pipeline, cleanup, modes, and no colored-handwriting destruction. Tasks 2 and 4 cover configuration, immutable verified-original ordering, Worker termination/fallback, PDF bypass, durable input policy, lease fencing, and input-hash idempotency. Tasks 5–6 cover the measured baseline, six-call authorized evaluator, output redaction, fixed-auto release gate, retry-safe rollout/rollback, docs, and final verification.
+- [x] **Spec coverage:** Tasks 1–3 cover pinned dependencies, Bun/Docker proof, WASM readiness, source/dist Worker resolution, external bundling, decode/time/size/pixel bounds, Sharp/OpenCV evaluator pipeline, cleanup, modes, and no colored-handwriting destruction. Tasks 2 and 4 cover configuration, immutable verified-original ordering, Worker termination/fallback, PDF bypass, durable input policy, lease fencing, and input-hash idempotency. Tasks 5–6 cover the measured baseline, six-call authorized evaluator, output redaction, fixed Sharp-only release gate, retry-safe rollout/rollback, docs, and final verification.
 - [x] **Scope check:** The plan explicitly excludes persistence, database migrations, multi-pass OCR, original writes, and currency removal.
 - [x] **Placeholder scan:** No `TBD`, `TODO`, deferred implementation marker, or unspecified test/code step is used; the unmeasured live baseline is explicitly and truthfully stated because this plan must not call providers.
 - [x] **Type consistency:** `ImagePreprocessor.preprocess`, its optional request mode, `PreprocessedImage`, `WorkerImagePreprocessor`, modes (`original`, `sharp`, `opencv`), `IMAGE_PREPROCESSING_VERSION`, Worker factory, and config names are identical throughout the tasks.

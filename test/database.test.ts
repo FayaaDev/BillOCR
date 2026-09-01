@@ -19,7 +19,7 @@ describe("migrations", () => {
   test("apply on a fresh database and safely reapply", () => {
     database.close();
     const reopened = new BillDatabase(path);
-    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(14);
+    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(15);
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'validation_issues'").get()?.name).toBe("validation_issues");
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'extraction_invocations'").get()?.name).toBe("extraction_invocations");
     reopened.close();
@@ -34,16 +34,22 @@ describe("migrations", () => {
     expect(await first.exited).toBe(0);
     expect(await second.exited).toBe(0);
     database = new BillDatabase(path);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(14);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(15);
   });
 
-  test("upgrades a v9 database with existing extraction records without changing canonical data", () => {
+  test("upgrades a v9 database by removing legacy extraction records", () => {
     database.close();
     rmSync(path, { force: true });
     const legacy = new SqliteDatabase(path, { create: true, strict: true });
     legacy.exec(`PRAGMA foreign_keys = ON;
       CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
-      CREATE TABLE bills (id TEXT PRIMARY KEY);
+      CREATE TABLE bills (
+        id TEXT PRIMARY KEY, whatsapp_message_id TEXT NOT NULL, whatsapp_group_id TEXT NOT NULL, whatsapp_sender_id TEXT NOT NULL,
+        attachment_index INTEGER NOT NULL, received_at TEXT NOT NULL, caption TEXT, original_filename TEXT, mime_type TEXT NOT NULL,
+        original_path TEXT NOT NULL, content_sha256 TEXT NOT NULL, status TEXT NOT NULL, drive_file_id TEXT, sheet_row_key TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, content_revision INTEGER NOT NULL DEFAULT 0, review_revision INTEGER NOT NULL DEFAULT 0,
+        manual_review_required INTEGER NOT NULL DEFAULT 0, UNIQUE (whatsapp_message_id, attachment_index)
+      );
       CREATE TABLE jobs (id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id));
       CREATE TABLE extractions (
         id TEXT PRIMARY KEY, bill_id TEXT NOT NULL UNIQUE REFERENCES bills(id), schema_version TEXT NOT NULL,
@@ -57,7 +63,8 @@ describe("migrations", () => {
       );`);
     const appliedAt = "2026-08-30T00:00:00.000Z";
     for (let version = 1; version <= 9; version += 1) legacy.query("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, appliedAt);
-    legacy.query("INSERT INTO bills (id) VALUES (?)").run("legacy-bill");
+    legacy.query(`INSERT INTO bills (id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, mime_type, original_path, content_sha256, status, created_at, updated_at)
+      VALUES (?, 'legacy-message', 'legacy-group', 'legacy-sender', 0, ?, 'image/png', '/originals/legacy.png', ?, 'received', ?, ?)`).run("legacy-bill", appliedAt, "d".repeat(64), appliedAt, appliedAt);
     legacy.query("INSERT INTO jobs (id, bill_id) VALUES (?, ?)").run("legacy-job", "legacy-bill");
     legacy.query("INSERT INTO extractions (id, bill_id, schema_version, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run("legacy-extraction", "legacy-bill", "1", JSON.stringify({ schemaVersion: "1", vendorName: "Legacy" }), "legacy raw", "legacy-model", "1", appliedAt, appliedAt, null, appliedAt, appliedAt);
@@ -66,9 +73,90 @@ describe("migrations", () => {
     legacy.close();
 
     database = new BillDatabase(path);
-    expect(database.getExtraction("legacy-bill")).toMatchObject({ normalized: { vendorName: "Legacy" }, selectedProvider: null, fallbackStatus: null });
-    expect(database.sqlite.query<{ provider: string }, [string]>("SELECT provider FROM extraction_attempts WHERE id = ?").get("legacy-attempt")?.provider).toBe("mistral");
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(14);
+    expect(database.getExtraction("legacy-bill")).toBeNull();
+    expect(database.sqlite.query("SELECT * FROM extraction_attempts WHERE id = ?").get("legacy-attempt")).toBeNull();
+    expect(database.getBill("legacy-bill")?.extractionPolicy).toBe("azure_only");
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(15);
+  });
+
+  test("upgrades v14 provenance to Azure-only while retaining Azure records and foreign keys", () => {
+    database.close();
+    rmSync(path, { force: true });
+    const legacy = new SqliteDatabase(path, { create: true, strict: true });
+    const appliedAt = "2026-08-30T00:00:00.000Z";
+    legacy.exec(`PRAGMA foreign_keys = ON;
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE bills (
+        id TEXT PRIMARY KEY, whatsapp_message_id TEXT NOT NULL, whatsapp_group_id TEXT NOT NULL, whatsapp_sender_id TEXT NOT NULL, attachment_index INTEGER NOT NULL,
+        received_at TEXT NOT NULL, caption TEXT, original_filename TEXT, mime_type TEXT NOT NULL, original_path TEXT NOT NULL, content_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL, drive_file_id TEXT, sheet_row_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        content_revision INTEGER NOT NULL DEFAULT 0, review_revision INTEGER NOT NULL DEFAULT 0, manual_review_required INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'whatsapp', source_identity TEXT, extraction_policy TEXT NOT NULL DEFAULT 'mistral_with_azure_fallback' CHECK (extraction_policy IN ('mistral_with_azure_fallback','azure_only')),
+        classification TEXT NOT NULL DEFAULT 'unclassified', batch_item_id TEXT, UNIQUE (whatsapp_message_id, attachment_index)
+      );
+      CREATE TABLE jobs (id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id));
+      CREATE TABLE extraction_attempts (
+        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), job_id TEXT NOT NULL REFERENCES jobs(id), job_attempt INTEGER NOT NULL,
+        provider_model TEXT, requested_at TEXT NOT NULL, completed_at TEXT NOT NULL, outcome TEXT NOT NULL, raw_provider_response TEXT, error_details TEXT,
+        created_at TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'mistral' CHECK (provider IN ('mistral','azure'))
+      );
+      CREATE TABLE extraction_invocations (
+        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), job_id TEXT NOT NULL REFERENCES jobs(id), job_attempt INTEGER NOT NULL CHECK (job_attempt >= 1),
+        provider TEXT NOT NULL CHECK (provider IN ('mistral','azure')), idempotency_key TEXT NOT NULL, provider_model TEXT, prompt_schema_version TEXT,
+        requested_at TEXT NOT NULL, completed_at TEXT, outcome TEXT NOT NULL CHECK (outcome IN ('requested','succeeded','failed')),
+        raw_provider_response TEXT, error_details TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (job_id, job_attempt, provider)
+      );
+      CREATE TABLE extractions (
+        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL UNIQUE REFERENCES bills(id), schema_version TEXT NOT NULL, normalized_json TEXT, raw_provider_response TEXT,
+        provider_model TEXT, prompt_schema_version TEXT, requested_at TEXT, error_details TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        completed_at TEXT, selected_provider TEXT CHECK (selected_provider IN ('mistral','azure')),
+        fallback_status TEXT CHECK (fallback_status IN ('not_needed','pending','succeeded','failed')), selected_invocation_id TEXT REFERENCES extraction_invocations(id)
+      );
+      CREATE TABLE azure_extraction_operations (
+        id TEXT PRIMARY KEY, invocation_id TEXT NOT NULL UNIQUE REFERENCES extraction_invocations(id), bill_id TEXT NOT NULL REFERENCES bills(id),
+        job_id TEXT NOT NULL REFERENCES jobs(id), operation_location TEXT UNIQUE, state TEXT NOT NULL, normalized_json TEXT, raw_provider_response TEXT,
+        provider_model TEXT, last_error TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );`);
+    for (let version = 1; version <= 14; version += 1) legacy.query("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, appliedAt);
+    for (const [id, policy] of [["legacy-bill", "mistral_with_azure_fallback"], ["mixed-bill", "azure_only"], ["azure-bill", "azure_only"]] as Array<[string, string]>) {
+      legacy.query(`INSERT INTO bills (id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, mime_type, original_path, content_sha256, status, created_at, updated_at, source_identity, extraction_policy)
+        VALUES (?, ?, 'group', 'sender', 0, ?, 'application/pdf', '/originals/file.pdf', ?, 'received', ?, ?, ?, ?)`).run(id, id, appliedAt, "c".repeat(64), appliedAt, appliedAt, id, policy);
+      legacy.query("INSERT INTO jobs (id, bill_id) VALUES (?, ?)").run(`${id}-job`, id);
+    }
+    for (const [id, billId, provider, selectedProvider] of [["legacy-invocation", "legacy-bill", "mistral", "mistral"], ["mixed-invocation", "mixed-bill", "mistral", "azure"], ["azure-invocation", "azure-bill", "azure", "azure"]] as Array<[string, string, string, string]>) {
+      legacy.query(`INSERT INTO extraction_invocations (id, bill_id, job_id, job_attempt, provider, idempotency_key, requested_at, outcome, created_at, updated_at)
+        VALUES (?, ?, ?, 1, ?, ?, ?, 'succeeded', ?, ?)`).run(id, billId, `${billId}-job`, provider, `${id}-key`, appliedAt, appliedAt, appliedAt);
+      legacy.query(`INSERT INTO extraction_attempts (id, bill_id, job_id, job_attempt, provider, requested_at, completed_at, outcome, created_at)
+        VALUES (?, ?, ?, 1, ?, ?, ?, 'succeeded', ?)`).run(`${id}-attempt`, billId, `${billId}-job`, provider, appliedAt, appliedAt, appliedAt);
+      legacy.query(`INSERT INTO extractions (id, bill_id, schema_version, created_at, updated_at, selected_provider, fallback_status, selected_invocation_id)
+        VALUES (?, ?, '1', ?, ?, ?, 'succeeded', ?)`).run(`${id}-extraction`, billId, appliedAt, appliedAt, selectedProvider, id);
+    }
+    legacy.query(`INSERT INTO azure_extraction_operations (id, invocation_id, bill_id, job_id, operation_location, state, created_at, updated_at)
+      VALUES ('legacy-operation', 'legacy-invocation', 'legacy-bill', 'legacy-bill-job', 'https://azure.example/legacy', 'succeeded', ?, ?),
+             ('azure-operation', 'azure-invocation', 'azure-bill', 'azure-bill-job', 'https://azure.example/azure', 'succeeded', ?, ?)`)
+      .run(appliedAt, appliedAt, appliedAt, appliedAt);
+    legacy.close();
+
+    database = new BillDatabase(path);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(15);
+    expect(database.sqlite.query("SELECT * FROM extractions WHERE bill_id = 'legacy-bill'").get()).toBeNull();
+    expect(database.sqlite.query("SELECT * FROM extraction_attempts WHERE bill_id = 'legacy-bill'").get()).toBeNull();
+    expect(database.sqlite.query("SELECT * FROM extraction_invocations WHERE bill_id = 'legacy-bill'").get()).toBeNull();
+    expect(database.sqlite.query("SELECT * FROM azure_extraction_operations WHERE bill_id = 'legacy-bill'").get()).toBeNull();
+    expect(database.sqlite.query("SELECT * FROM extractions WHERE bill_id = 'mixed-bill'").get()).toBeNull();
+    expect(database.sqlite.query("SELECT * FROM extraction_invocations WHERE bill_id = 'mixed-bill'").get()).toBeNull();
+    expect(database.sqlite.query<{ extraction_policy: string }, []>("SELECT extraction_policy FROM bills WHERE id = 'legacy-bill'").get()?.extraction_policy).toBe("azure_only");
+    expect(database.sqlite.query("SELECT * FROM extractions WHERE bill_id = 'azure-bill'").get()).not.toBeNull();
+    expect(database.sqlite.query("SELECT * FROM extraction_attempts WHERE bill_id = 'azure-bill'").get()).not.toBeNull();
+    expect(database.sqlite.query("SELECT * FROM extraction_invocations WHERE bill_id = 'azure-bill'").get()).not.toBeNull();
+    expect(database.sqlite.query("SELECT * FROM azure_extraction_operations WHERE bill_id = 'azure-bill'").get()).not.toBeNull();
+    expect(database.sqlite.query<{ name: string }, []>("SELECT name FROM pragma_table_info('extractions') WHERE name = 'fallback_status'").get()).toBeNull();
+    expect(() => database.sqlite.query("UPDATE bills SET extraction_policy = 'mistral_with_azure_fallback' WHERE id = 'azure-bill'").run()).toThrow();
+    expect(() => database.sqlite.query("UPDATE extractions SET selected_provider = 'mistral' WHERE bill_id = 'azure-bill'").run()).toThrow();
+    expect(() => database.sqlite.query("UPDATE extraction_attempts SET provider = 'mistral' WHERE bill_id = 'azure-bill'").run()).toThrow();
+    expect(() => database.sqlite.query("UPDATE extraction_invocations SET provider = 'mistral' WHERE id = 'azure-invocation'").run()).toThrow();
+    expect(database.sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(() => database.sqlite.query("DELETE FROM bills WHERE id = 'azure-bill'").run()).toThrow();
   });
 
   test("upgrades historical WhatsApp identity, jobs, foreign keys, and projections without loss", () => {
@@ -93,6 +181,28 @@ describe("migrations", () => {
       CREATE TABLE provider_projection_metadata (
         id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), provider TEXT NOT NULL, projection_key TEXT NOT NULL,
         external_id TEXT, external_url TEXT, metadata_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (provider, projection_key)
+      );
+      CREATE TABLE extractions (
+        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL UNIQUE REFERENCES bills(id), schema_version TEXT NOT NULL, normalized_json TEXT,
+        raw_provider_response TEXT, provider_model TEXT, prompt_schema_version TEXT, requested_at TEXT, error_details TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, selected_provider TEXT,
+        fallback_status TEXT, selected_invocation_id TEXT REFERENCES extraction_invocations(id)
+      );
+      CREATE TABLE extraction_attempts (
+        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), job_id TEXT NOT NULL REFERENCES jobs(id), job_attempt INTEGER NOT NULL,
+        provider_model TEXT, requested_at TEXT NOT NULL, completed_at TEXT NOT NULL, outcome TEXT NOT NULL, raw_provider_response TEXT,
+        error_details TEXT, created_at TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'mistral'
+      );
+      CREATE TABLE extraction_invocations (
+        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), job_id TEXT NOT NULL REFERENCES jobs(id), job_attempt INTEGER NOT NULL,
+        provider TEXT NOT NULL, idempotency_key TEXT NOT NULL, provider_model TEXT, prompt_schema_version TEXT, requested_at TEXT NOT NULL,
+        completed_at TEXT, outcome TEXT NOT NULL, raw_provider_response TEXT, error_details TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE (job_id, job_attempt, provider)
+      );
+      CREATE TABLE azure_extraction_operations (
+        id TEXT PRIMARY KEY, invocation_id TEXT NOT NULL UNIQUE REFERENCES extraction_invocations(id), bill_id TEXT NOT NULL REFERENCES bills(id),
+        job_id TEXT NOT NULL REFERENCES jobs(id), operation_location TEXT UNIQUE, state TEXT NOT NULL, normalized_json TEXT,
+        raw_provider_response TEXT, provider_model TEXT, last_error TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );`);
     for (let version = 1; version <= 13; version += 1) legacy.query("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, appliedAt);
     legacy.query(`INSERT INTO bills (id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, caption, original_filename, mime_type, original_path, content_sha256, status, drive_file_id, sheet_row_key, created_at, updated_at, content_revision, review_revision, manual_review_required)
@@ -103,7 +213,7 @@ describe("migrations", () => {
     legacy.close();
 
     database = new BillDatabase(path);
-    expect(database.getBill("legacy-whatsapp")).toMatchObject({ whatsappMessageId: "wamid.legacy", attachmentIndex: 2, status: "approved", driveFileId: "drive-legacy", sheetRowKey: "sheet-legacy", contentRevision: 7, reviewRevision: 3, source: "whatsapp", sourceIdentity: "legacy-whatsapp", extractionPolicy: "mistral_with_azure_fallback", classification: "unclassified", batchItemId: null });
+    expect(database.getBill("legacy-whatsapp")).toMatchObject({ whatsappMessageId: "wamid.legacy", attachmentIndex: 2, status: "approved", driveFileId: "drive-legacy", sheetRowKey: "sheet-legacy", contentRevision: 7, reviewRevision: 3, source: "whatsapp", sourceIdentity: "legacy-whatsapp", extractionPolicy: "azure_only", classification: "unclassified", batchItemId: null });
     expect(database.getJob("legacy-job")).toMatchObject({ billId: "legacy-whatsapp", state: "succeeded" });
     expect(database.getProjectionMetadata("sheets", "legacy-whatsapp")).toMatchObject({ billId: "legacy-whatsapp", externalId: "sheet-legacy" });
   });
@@ -142,11 +252,11 @@ describe("dashboard metrics", () => {
   });
 });
 
-describe("dual-provider extraction provenance", () => {
+describe("Azure extraction provenance", () => {
   test("begins only an identity-matched claimed invocation and reports duplicate creation", () => {
     const bill = database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "identity-job" }]).bill;
     const job = database.claimNextJob("worker", policy)!;
-    const request = { billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral" as const, idempotencyKey: job.idempotencyKey, requestedAt: new Date().toISOString() };
+    const request = { billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure" as const, idempotencyKey: job.idempotencyKey, requestedAt: new Date().toISOString() };
     const first = database.beginExtractionInvocation(request);
     if (!first) throw new Error("expected invocation");
     expect(first.created).toBe(true);
@@ -161,15 +271,13 @@ describe("dual-provider extraction provenance", () => {
     expect(database.beginExtractionInvocation({ ...request, billId: archiveBill.id, jobId: archiveJob.id, leaseToken: archiveJob.leaseToken, jobAttempt: archiveJob.attempts, idempotencyKey: archiveJob.idempotencyKey })).toBeNull();
   });
 
-  test("audits every provider invocation and retains resumable Azure operation state", () => {
+  test("audits one Azure invocation and retains resumable operation state", () => {
     const bill = database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "provenance-job" }]).bill;
     const job = database.claimNextJob("worker", policy)!;
     const requestedAt = "2026-08-30T00:00:00.000Z";
-    const mistral = database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral", idempotencyKey: job.idempotencyKey, providerModel: "mistral-model", promptSchemaVersion: "1", requestedAt });
     const azure = database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", idempotencyKey: job.idempotencyKey, providerModel: "azure-model", promptSchemaVersion: "1", requestedAt });
-    if (!mistral || !azure) throw new Error("expected durable invocations");
-    expect(mistral.created).toBe(true); expect(azure.created).toBe(true);
-    expect(database.finishExtractionInvocation({ invocationId: mistral.invocation.id, jobId: job.id, leaseToken: job.leaseToken, outcome: "failed", completedAt: "2026-08-30T00:00:01.000Z", rawProviderResponse: null, errorDetails: "low confidence" })).toBe(true);
+    if (!azure) throw new Error("expected durable Azure invocation");
+    expect(azure.created).toBe(true);
     const operation = database.persistAzureExtractionOperation({ invocationId: azure.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, operationLocation: "https://azure.example/operations/1" });
     expect(operation).toMatchObject({ invocationId: azure.invocation.id, state: "submitted" });
     expect(database.listResumableAzureExtractionOperations()).toMatchObject([{ invocationId: azure.invocation.id, operationLocation: "https://azure.example/operations/1" }]);
@@ -177,12 +285,11 @@ describe("dual-provider extraction provenance", () => {
     expect(database.persistAzureExtractionOperation({ invocationId: azure.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, operationLocation: "https://azure.example/operations/1", state: "submitted" })).toBeNull();
     expect(database.getAzureExtractionOperation(azure.invocation.id)).toMatchObject({ state: "succeeded" });
     expect(database.finishExtractionInvocation({ invocationId: azure.invocation.id, jobId: job.id, leaseToken: job.leaseToken, outcome: "succeeded", completedAt: "2026-08-30T00:00:02.000Z", rawProviderResponse: "azure response", errorDetails: null })).toBe(true);
-    expect(database.getExtractionInvocations(bill.id)).toMatchObject([{ provider: "mistral", outcome: "failed" }, { provider: "azure", outcome: "succeeded" }]);
+    expect(database.getExtractionInvocations(bill.id)).toMatchObject([{ provider: "azure", outcome: "succeeded" }]);
     const normalized = { schemaVersion: "1" as const, vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-30", currency: "USD", subtotal: 1, vat: 0, total: 1, description: null, fields: {} };
-    expect(database.persistCanonicalExtractionSuccess({ invocationId: azure.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral", idempotencyKey: job.idempotencyKey, normalized, rawProviderResponse: "azure response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt, completedAt: "2026-08-30T00:00:02.000Z" })).toBe(false);
-    expect(database.persistCanonicalExtractionSuccess({ invocationId: azure.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", idempotencyKey: job.idempotencyKey, normalized, rawProviderResponse: "azure response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt, completedAt: "2026-08-30T00:00:02.000Z" })).toBe(true);
-    expect(database.persistExtractionSuccess({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral", normalized: { ...normalized, vendorName: "Replacement" }, rawProviderResponse: "mistral response", providerModel: "mistral-model", promptSchemaVersion: "1", requestedAt, completedAt: "2026-08-30T00:00:03.000Z" })).toBe(false);
-    expect(database.getExtraction(bill.id)).toMatchObject({ selectedProvider: "azure", fallbackStatus: "succeeded", selectedInvocationId: azure.invocation.id, normalized: { vendorName: "Vendor" } });
+    expect(database.persistCanonicalExtractionSuccess({ invocationId: azure.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, idempotencyKey: job.idempotencyKey, normalized, rawProviderResponse: "azure response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt, completedAt: "2026-08-30T00:00:02.000Z" })).toBe(true);
+    expect(database.persistCanonicalExtractionSuccess({ invocationId: azure.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, idempotencyKey: job.idempotencyKey, normalized: { ...normalized, vendorName: "Replacement" }, rawProviderResponse: "replacement response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt, completedAt: "2026-08-30T00:00:03.000Z" })).toBe(false);
+    expect(database.getExtraction(bill.id)).toMatchObject({ selectedProvider: "azure", selectedInvocationId: azure.invocation.id, normalized: { vendorName: "Vendor" } });
   });
 
   test("persists Azure operation state only while its invocation is requested", () => {
@@ -212,7 +319,7 @@ describe("dual-provider extraction provenance", () => {
     expect(database.finishAzureExtractionOperation({ invocationId: begun.invocation.id, jobId: second.id, leaseToken: second.leaseToken, state: "succeeded", completedAt: new Date().toISOString() })).toBe(true);
     expect(database.finishExtractionInvocation({ invocationId: begun.invocation.id, jobId: second.id, leaseToken: second.leaseToken, outcome: "succeeded", completedAt: new Date().toISOString(), rawProviderResponse: "azure response", errorDetails: null })).toBe(true);
     const normalized = { schemaVersion: "1" as const, vendorName: "Resumed vendor", invoiceNumber: null, invoiceDate: "2026-08-30", currency: "USD", subtotal: 1, vat: 0, total: 1, description: null, fields: {} };
-    expect(database.persistCanonicalExtractionSuccess({ invocationId: begun.invocation.id, billId: bill.id, jobId: second.id, leaseToken: second.leaseToken, jobAttempt: first.attempts, provider: "azure", idempotencyKey: first.idempotencyKey, normalized, rawProviderResponse: "azure response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt: start.toISOString(), completedAt: new Date().toISOString() })).toBe(true);
+    expect(database.persistCanonicalExtractionSuccess({ invocationId: begun.invocation.id, billId: bill.id, jobId: second.id, leaseToken: second.leaseToken, jobAttempt: first.attempts, idempotencyKey: first.idempotencyKey, normalized, rawProviderResponse: "azure response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt: start.toISOString(), completedAt: new Date().toISOString() })).toBe(true);
     expect(database.getExtraction(bill.id)).toMatchObject({ selectedInvocationId: begun.invocation.id, selectedProvider: "azure", normalized: { vendorName: "Resumed vendor" } });
     expect(database.getExtractionInvocations(bill.id)).toHaveLength(1);
     expect(database.sqlite.query<{ count: number }, [string]>("SELECT count(*) AS count FROM azure_extraction_operations WHERE bill_id = ?").get(bill.id)?.count).toBe(1);
@@ -228,10 +335,10 @@ describe("dual-provider extraction provenance", () => {
     expect(database.claimNextJob("replacement-worker", policy, reapedAt)).toBeNull();
     const replacement = database.claimNextJob("replacement-worker", policy, new Date(reapedAt.getTime() + policy.retryBaseMs))!;
     expect(replacement.leaseToken).not.toBe(job.leaseToken);
-    expect(database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "mistral", idempotencyKey: job.idempotencyKey, requestedAt: new Date().toISOString() })).toBeNull();
+    expect(database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", idempotencyKey: job.idempotencyKey, requestedAt: new Date().toISOString() })).toBeNull();
     expect(database.persistAzureExtractionOperation({ invocationId: invocation.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, operationLocation: "https://azure.example/operations/stale" })).toBeNull();
     expect(database.finishExtractionInvocation({ invocationId: invocation.invocation.id, jobId: job.id, leaseToken: job.leaseToken, outcome: "failed", completedAt: new Date().toISOString(), rawProviderResponse: null, errorDetails: "stale" })).toBe(false);
-    expect(database.persistExtractionSuccess({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", normalized: { schemaVersion: "1", vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-30", currency: "USD", subtotal: 1, vat: 0, total: 1, description: null, fields: {} }, rawProviderResponse: "response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt: new Date().toISOString(), completedAt: new Date().toISOString() })).toBe(false);
+    expect(database.persistCanonicalExtractionSuccess({ invocationId: invocation.invocation.id, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, idempotencyKey: job.idempotencyKey, normalized: { schemaVersion: "1", vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-30", currency: "USD", subtotal: 1, vat: 0, total: 1, description: null, fields: {} }, rawProviderResponse: "response", providerModel: "azure-model", promptSchemaVersion: "1", requestedAt: new Date().toISOString(), completedAt: new Date().toISOString() })).toBe(false);
     expect(database.getExtraction(bill.id)).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import type { AdminUploadBatch, AdminUploadBatchItem, AdminUploadBatchStatusCounts, AzureExtractionOperation, BeginExtractionInvocationResult, Bill, BillClassification, BillSource, ClaimedJob, CreateBillInput, DashboardMetrics, EffectiveBillData, ExtractedBill, Extraction, ExtractionFallbackStatus, ExtractionInvocation, ExtractionPolicy, ExtractionProvider, InitialJobInput, Job, JobState, JobTransition, JobType, ProviderProjectionMetadata, ReviewEvent, ValidationIssue } from "./contracts";
+import type { AdminUploadBatch, AdminUploadBatchItem, AdminUploadBatchStatusCounts, AzureExtractionOperation, BeginExtractionInvocationResult, Bill, BillClassification, BillSource, ClaimedJob, CreateBillInput, DashboardMetrics, EffectiveBillData, ExtractedBill, Extraction, ExtractionInvocation, ExtractionPolicy, ExtractionProvider, InitialJobInput, Job, JobState, JobTransition, JobType, ProviderProjectionMetadata, ReviewEvent, ValidationIssue } from "./contracts";
 import { applyMigrations } from "./migrations";
 import { jobTypes } from "./contracts";
 
@@ -16,7 +16,7 @@ type BillRow = {
   source: BillSource; source_identity: string; extraction_policy: ExtractionPolicy; classification: BillClassification; batch_item_id: string | null;
 };
 type JobTransitionRow = { id: string; job_id: string; from_state: JobState | null; to_state: JobState; reason: string; created_at: string };
-type ExtractionRow = { id: string; bill_id: string; schema_version: string; selected_provider: ExtractionProvider | null; fallback_status: ExtractionFallbackStatus | null; selected_invocation_id: string | null; normalized_json: string | null; raw_provider_response: string | null; provider_model: string | null; prompt_schema_version: string | null; requested_at: string | null; completed_at: string | null; error_details: string | null; created_at: string; updated_at: string };
+type ExtractionRow = { id: string; bill_id: string; schema_version: string; selected_provider: ExtractionProvider | null; selected_invocation_id: string | null; normalized_json: string | null; raw_provider_response: string | null; provider_model: string | null; prompt_schema_version: string | null; requested_at: string | null; completed_at: string | null; error_details: string | null; created_at: string; updated_at: string };
 type ExtractionInvocationRow = { id: string; bill_id: string; job_id: string; job_attempt: number; provider: ExtractionProvider; idempotency_key: string; provider_model: string | null; prompt_schema_version: string | null; requested_at: string; completed_at: string | null; outcome: ExtractionInvocation["outcome"]; raw_provider_response: string | null; error_details: string | null; created_at: string; updated_at: string };
 type AzureExtractionOperationRow = { id: string; invocation_id: string; bill_id: string; job_id: string; operation_location: string | null; state: AzureExtractionOperation["state"]; normalized_json: string | null; raw_provider_response: string | null; provider_model: string | null; last_error: string | null; completed_at: string | null; created_at: string; updated_at: string };
 type ValidationIssueRow = { id: string; bill_id: string; field: string | null; code: string; message: string; severity: ValidationIssue["severity"]; observed_value: string | null; created_at: string };
@@ -37,7 +37,7 @@ function toJobTransition(row: JobTransitionRow): JobTransition {
   return { id: row.id, jobId: row.job_id, fromState: row.from_state, toState: row.to_state, reason: row.reason, createdAt: row.created_at };
 }
 function toExtraction(row: ExtractionRow): Extraction {
-  return { id: row.id, billId: row.bill_id, schemaVersion: row.schema_version, selectedProvider: row.selected_provider, fallbackStatus: row.fallback_status, selectedInvocationId: row.selected_invocation_id, normalized: row.normalized_json ? JSON.parse(row.normalized_json) as ExtractedBill : null, rawProviderResponse: row.raw_provider_response, providerModel: row.provider_model, promptSchemaVersion: row.prompt_schema_version, requestedAt: row.requested_at, completedAt: row.completed_at, errorDetails: row.error_details, createdAt: row.created_at, updatedAt: row.updated_at };
+  return { id: row.id, billId: row.bill_id, schemaVersion: row.schema_version, selectedProvider: row.selected_provider, selectedInvocationId: row.selected_invocation_id, normalized: row.normalized_json ? JSON.parse(row.normalized_json) as ExtractedBill : null, rawProviderResponse: row.raw_provider_response, providerModel: row.provider_model, promptSchemaVersion: row.prompt_schema_version, requestedAt: row.requested_at, completedAt: row.completed_at, errorDetails: row.error_details, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 function toExtractionInvocation(row: ExtractionInvocationRow): ExtractionInvocation {
   return { id: row.id, billId: row.bill_id, jobId: row.job_id, jobAttempt: row.job_attempt, provider: row.provider, idempotencyKey: row.idempotency_key, providerModel: row.provider_model, promptSchemaVersion: row.prompt_schema_version, requestedAt: row.requested_at, completedAt: row.completed_at, outcome: row.outcome, rawProviderResponse: row.raw_provider_response, errorDetails: row.error_details, createdAt: row.created_at, updatedAt: row.updated_at };
@@ -94,7 +94,7 @@ export class BillDatabase {
     const billId = input.id ?? randomUUID();
     const source = input.source ?? "whatsapp";
     const sourceIdentity = input.sourceIdentity ?? `whatsapp:${input.whatsappMessageId}:${input.attachmentIndex}`;
-    const extractionPolicy = input.extractionPolicy ?? "mistral_with_azure_fallback";
+    const extractionPolicy = input.extractionPolicy ?? "azure_only";
     const classification = input.classification ?? "unclassified";
     if (!sourceIdentity) throw new Error("Bill source identity is required");
     if (source === "whatsapp" && input.batchItemId) throw new Error("WhatsApp bill cannot link an admin-upload batch item");
@@ -655,51 +655,46 @@ export class BillDatabase {
     this.sqlite.query("UPDATE bills SET status = 'extracting', updated_at = ? WHERE id = ? AND status = 'received'").run(now, billId);
   }
 
-  persistExtractionSuccess(input: { billId: string; jobId: string; leaseToken: string; jobAttempt: number; normalized: ExtractedBill; rawProviderResponse: string; providerModel: string; promptSchemaVersion: string; requestedAt: string; completedAt: string; provider?: ExtractionProvider; fallbackStatus?: ExtractionFallbackStatus }): boolean {
-    return this.sqlite.transaction(() => {
-      const now = new Date().toISOString();
-      const provider = input.provider ?? "mistral";
-      const owned = this.leaseOwned(input.jobId, input.leaseToken, now);
-      if (!owned) return false;
-      this.recordExtractionAttempt({ ...input, provider, outcome: "succeeded", errorDetails: null });
-      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, selected_provider, fallback_status, selected_invocation_id, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-        ON CONFLICT(bill_id) DO UPDATE SET schema_version = excluded.schema_version, selected_provider = excluded.selected_provider, fallback_status = excluded.fallback_status, selected_invocation_id = NULL, normalized_json = excluded.normalized_json, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = NULL, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
-        .run(randomUUID(), input.billId, input.normalized.schemaVersion, provider, input.fallbackStatus ?? (provider === "azure" ? "succeeded" : "not_needed"), JSON.stringify(input.normalized), input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, now, now);
-       if (result.changes === 1) this.sqlite.query("UPDATE bills SET content_revision = content_revision + 1, updated_at = ? WHERE id = ?").run(now, input.billId);
-       return result.changes === 1;
-    })();
-  }
-
   /** Selects canonical output only from a successful, identity-matched durable invocation. */
-  persistCanonicalExtractionSuccess(input: { invocationId: string; billId: string; jobId: string; leaseToken: string; jobAttempt: number; provider: ExtractionProvider; idempotencyKey: string; normalized: ExtractedBill; rawProviderResponse: string; providerModel: string; promptSchemaVersion: string; requestedAt: string; completedAt: string; fallbackStatus?: ExtractionFallbackStatus }): boolean {
+  persistCanonicalExtractionSuccess(input: { invocationId: string; billId: string; jobId: string; leaseToken: string; jobAttempt: number; idempotencyKey: string; normalized: ExtractedBill; rawProviderResponse: string; providerModel: string; promptSchemaVersion: string; requestedAt: string; completedAt: string }): boolean {
     return this.sqlite.transaction(() => {
       const now = new Date().toISOString();
       if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
-      const invocation = this.sqlite.query<{ value: number }, [string, string, string, number, ExtractionProvider, string]>(`SELECT 1 AS value FROM extraction_invocations
-        WHERE id = ? AND bill_id = ? AND job_id = ? AND job_attempt = ? AND provider = ? AND idempotency_key = ? AND outcome = 'succeeded'`).get(input.invocationId, input.billId, input.jobId, input.jobAttempt, input.provider, input.idempotencyKey);
+      const invocation = this.sqlite.query<{ value: number }, [string, string, string, number, string]>(`SELECT 1 AS value FROM extraction_invocations
+        WHERE id = ? AND bill_id = ? AND job_id = ? AND job_attempt = ? AND provider = 'azure' AND idempotency_key = ? AND outcome = 'succeeded'`).get(input.invocationId, input.billId, input.jobId, input.jobAttempt, input.idempotencyKey);
       if (!invocation) return false;
-      this.recordExtractionAttempt({ ...input, outcome: "succeeded", errorDetails: null });
-      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, selected_provider, fallback_status, selected_invocation_id, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-        ON CONFLICT(bill_id) DO UPDATE SET schema_version = excluded.schema_version, selected_provider = excluded.selected_provider, fallback_status = excluded.fallback_status, selected_invocation_id = excluded.selected_invocation_id, normalized_json = excluded.normalized_json, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = NULL, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL OR (excluded.selected_provider = 'azure' AND extractions.selected_provider = 'mistral' AND extractions.fallback_status = 'pending')`)
-        .run(randomUUID(), input.billId, input.normalized.schemaVersion, input.provider, input.fallbackStatus ?? (input.provider === "azure" ? "succeeded" : "not_needed"), input.invocationId, JSON.stringify(input.normalized), input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, now, now);
+      this.recordExtractionAttempt({ ...input, provider: "azure", outcome: "succeeded", errorDetails: null });
+      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, selected_provider, selected_invocation_id, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
+        VALUES (?, ?, ?, 'azure', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        ON CONFLICT(bill_id) DO UPDATE SET schema_version = excluded.schema_version, selected_provider = excluded.selected_provider, selected_invocation_id = excluded.selected_invocation_id, normalized_json = excluded.normalized_json, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = NULL, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
+        .run(randomUUID(), input.billId, input.normalized.schemaVersion, input.invocationId, JSON.stringify(input.normalized), input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, now, now);
       if (result.changes === 1) this.sqlite.query("UPDATE bills SET content_revision = content_revision + 1, updated_at = ? WHERE id = ?").run(now, input.billId);
       return result.changes === 1;
     })();
   }
 
-  persistExtractionFailure(input: { billId: string; jobId: string; leaseToken: string; jobAttempt: number; rawProviderResponse: string | null; providerModel: string | null; promptSchemaVersion: string; requestedAt: string; completedAt: string; errorDetails: string; status?: "needs_review" | "failed"; provider?: ExtractionProvider; fallbackStatus?: ExtractionFallbackStatus }): boolean {
+  persistExtractionFailure(input: { billId: string; jobId: string; leaseToken: string; jobAttempt: number; rawProviderResponse: string | null; providerModel: string | null; promptSchemaVersion: string; requestedAt: string; completedAt: string; errorDetails: string; status?: "needs_review" | "failed"; supersedeApproved?: boolean }): boolean {
     return this.sqlite.transaction(() => {
       const now = new Date().toISOString();
-      const provider = input.provider ?? "mistral";
       if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
-      this.recordExtractionAttempt({ ...input, provider, outcome: "failed" });
-      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, selected_provider, fallback_status, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
-        VALUES (?, ?, '1', NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(bill_id) DO UPDATE SET fallback_status = excluded.fallback_status, normalized_json = NULL, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = excluded.error_details, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
-        .run(randomUUID(), input.billId, input.fallbackStatus ?? (provider === "azure" ? "failed" : "pending"), input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, input.errorDetails, now, now);
-      if (input.status) this.sqlite.query("UPDATE bills SET status = ?, updated_at = ? WHERE id = ? AND status = 'extracting'").run(input.status, now, input.billId);
+      this.recordExtractionAttempt({ ...input, provider: "azure", outcome: "failed" });
+      const result = this.sqlite.query(`INSERT INTO extractions (id, bill_id, schema_version, selected_provider, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at)
+        VALUES (?, ?, '1', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bill_id) DO UPDATE SET normalized_json = NULL, raw_provider_response = excluded.raw_provider_response, provider_model = excluded.provider_model, prompt_schema_version = excluded.prompt_schema_version, requested_at = excluded.requested_at, completed_at = excluded.completed_at, error_details = excluded.error_details, updated_at = excluded.updated_at WHERE extractions.normalized_json IS NULL`)
+        .run(randomUUID(), input.billId, input.rawProviderResponse, input.providerModel, input.promptSchemaVersion, input.requestedAt, input.completedAt, input.errorDetails, now, now);
+      if (input.status === "needs_review" && input.supersedeApproved) {
+        const bill = this.getBill(input.billId);
+        if (bill && (bill.status === "approved" || bill.status === "extracting")) {
+          const contentRevision = bill.contentRevision + 1;
+          const reviewRevision = bill.reviewRevision + 1;
+          const superseded = this.sqlite.query("UPDATE bills SET status = 'needs_review', manual_review_required = 1, content_revision = ?, review_revision = ?, updated_at = ? WHERE id = ? AND status = ?").run(contentRevision, reviewRevision, now, input.billId, bill.status);
+          if (superseded.changes === 1) {
+            this.sqlite.query("INSERT INTO review_events (id, bill_id, reviewer_id, action, previous_values, corrected_values, created_at) VALUES (?, ?, 'system', 'extraction_callback_failed', ?, ?, ?)").run(randomUUID(), input.billId, JSON.stringify({ status: bill.status }), JSON.stringify({ status: "needs_review" }), now);
+            this.invalidatePendingProjectJobs(input.billId, now);
+            if (bill.status === "approved") this.activateReviewSyncJob(input.billId, reviewRevision, now);
+          }
+        }
+      } else if (input.status) this.sqlite.query("UPDATE bills SET status = ?, updated_at = ? WHERE id = ? AND status = 'extracting'").run(input.status, now, input.billId);
       if (input.status === "failed") {
         const bill = this.getBill(input.billId);
         if (bill?.batchItemId) {
@@ -707,18 +702,6 @@ export class BillDatabase {
           this.completeAdminUploadBatchIfTerminal(bill.batchItemId, now);
         }
       }
-      return result.changes === 1;
-    })();
-  }
-
-  /** Keeps the Mistral result available for review when Azure fallback cannot complete. */
-  persistAzureFallbackFailure(input: { billId: string; jobId: string; leaseToken: string; errorDetails: string }): boolean {
-    return this.sqlite.transaction(() => {
-      const now = new Date().toISOString();
-      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
-      const result = this.sqlite.query(`UPDATE extractions SET fallback_status = 'failed', error_details = ?, updated_at = ?
-        WHERE bill_id = ? AND selected_provider = 'mistral' AND fallback_status = 'pending' AND normalized_json IS NOT NULL`).run(input.errorDetails, now, input.billId);
-      if (result.changes === 1) this.sqlite.query("UPDATE bills SET status = 'needs_review', manual_review_required = 1, updated_at = ? WHERE id = ?").run(now, input.billId);
       return result.changes === 1;
     })();
   }

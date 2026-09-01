@@ -7,7 +7,7 @@ import type { AppConfig } from "../src/config";
 import { startService, type RunningService } from "../src/server";
 import type { WhatsAppAdminTransport, WhatsAppTransport } from "../src/baileys-transport";
 import type { IncomingWhatsAppMessage } from "../src/whatsapp-ingestion";
-import type { MistralOcrProvider } from "../src/extraction";
+import { parseAzureExtractedBill } from "../src/extraction";
 import type { AzureInvoiceProvider } from "../src/azure-invoice";
 import type { DriveAdapter, DriveFile, SheetsAdapter } from "../src/google-projections";
 import { BillDatabase } from "../src/database";
@@ -20,7 +20,7 @@ beforeEach(() => {
   directory = realpathSync(mkdtempSync(join(tmpdir(), "bill-server-")));
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "ledger.sqlite"), logLevel: "error",
-    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
+    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, azure: { endpoint: "https://azure.example.test", apiKey: "azure-secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" },
     validation: { currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 },
     jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
@@ -40,8 +40,8 @@ test("startService preserves an injected Azure provider instead of constructing 
   const azureProvider: AzureInvoiceProvider = { submit: async () => ({ operationLocation: "https://azure.example.test/operation" }), poll: async () => { throw new Error("not called"); } };
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "azure-injected.sqlite"), logLevel: "error",
-    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 },
-    azure: { enabled: true, endpoint: "not-a-url", apiKey: "secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
+    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 },
+    azure: { endpoint: "not-a-url", apiKey: "secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" },
     validation: { currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
   };
@@ -57,7 +57,7 @@ test("startService exposes authenticated safe ZIP failures and reconciles staged
   writeFileSync(join(staging, "manifest.json"), JSON.stringify({ version: 1, sourceId, originalFilename: "restart.zip", contentSha256: createHash("sha256").update(emptyZip).digest("hex"), zipPath: join(staging, "upload.zip") }));
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "zip.sqlite"), logLevel: "error",
-    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: true, endpoint: "https://azure.test", apiKey: "secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .8 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 }, google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 },
+    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, azure: { endpoint: "https://azure.test", apiKey: "secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 }, google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 },
   };
   service = startService(config, {}, { azureProvider: { submit: async () => ({ operationLocation: "unused" }), poll: async () => { throw new Error("unused"); } } });
   const auth = { authorization: `Basic ${btoa("reviewer:secret")}` };
@@ -76,7 +76,7 @@ test("startup closes its database when HTTP construction fails", async () => {
   let closes = 0;
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "failed.sqlite"), logLevel: "error",
-    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
+    whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, azure: { endpoint: "https://azure.example.test", apiKey: "azure-secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" },
     validation: { currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 },
     jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
@@ -92,7 +92,7 @@ test("service starts and stops an injected WhatsApp transport when enabled", asy
   const transport: WhatsAppTransport = { start: async () => { started += 1; }, stop: async () => { stopped += 1; } };
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "transport.sqlite"), logLevel: "error",
-    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, azure: { endpoint: "https://azure.example.test", apiKey: "azure-secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" },
     validation: { currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 },
     jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
@@ -124,7 +124,7 @@ test("admin preserves connecting during a pairing restart so the client does not
   };
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "connecting.sqlite"), logLevel: "error",
-    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, azure: { endpoint: "https://azure.example.test", apiKey: "azure-secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
   };
   service = startService(config, {}, { whatsappTransport: transport });
@@ -143,7 +143,7 @@ test("shutdown drains an in-flight WhatsApp ingestion before closing the databas
   const transport: WhatsAppTransport = { start: async (handler) => { receive = handler; }, stop: async () => undefined };
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "drain.sqlite"), logLevel: "error",
-    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, azure: { endpoint: "https://azure.example.test", apiKey: "azure-secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" },
     validation: { currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
   };
@@ -161,7 +161,7 @@ test("shutdown drains an in-flight WhatsApp ingestion before closing the databas
   expect(stopped).toBe(true);
 });
 
-test("startService wires production ingestion, extraction, validation, and Drive handlers for reviewable Mistral output", async () => {
+test("startService wires production ingestion, extraction, validation, and Drive handlers for reviewable Azure output", async () => {
   await service.shutdown();
   let receive: ((message: IncomingWhatsAppMessage) => Promise<void>) | undefined;
   let stopped = false; let database: BillDatabase | undefined; const fixture = readFileSync(join(import.meta.dir, "fixtures", "english.png"));
@@ -177,18 +177,19 @@ test("startService wires production ingestion, extraction, validation, and Drive
     findLedgerRows: async (billId) => [...rows].flatMap(([row, value]) => value[13] === billId ? [{ row, revision: Number(value[14]) }] : []),
     appendRow: async (values) => { rows.set(2, values); return 2; }, updateRow: async (row, values) => { rows.set(row, values); }, clearRows: async (targets) => { targets.forEach((row) => rows.delete(row)); },
   };
-  const provider: MistralOcrProvider = { extract: async (input) => {
-    expect(input.bytes).toEqual(fixture);
-    const annotation = { schemaVersion: "1" as const, vendorName: "Wired Store", invoiceNumber: "WIRE-1", invoiceDate: "2026-08-27", currency: "USD", subtotal: 10, vat: 1, total: 11, description: "production wiring", fields: { vendorName: { confidence: .99, sourceText: "Wired Store" }, invoiceDate: { confidence: .99, sourceText: "2026-08-27" }, total: { confidence: .99, sourceText: "11" } } };
-    return { annotation, rawResponse: JSON.stringify({ document_annotation: annotation }), model: "mistral-test" };
+  const provider: AzureInvoiceProvider = { submit: async (input) => {
+    expect(input.bytes).toEqual(fixture); return { operationLocation: "https://azure.example.test/operations/wired" };
+  }, poll: async () => {
+    const annotation = { schemaVersion: "1" as const, vendorName: "Wired Store", invoiceNumber: "WIRE-1", invoiceDate: "2026-08-27", currency: "USD", subtotal: 10, vat: 1, total: 12, description: "production wiring", fields: { vendorName: { confidence: .99, sourceText: "Wired Store" }, invoiceDate: { confidence: .99, sourceText: "2026-08-27" }, total: { confidence: .99, sourceText: "12" } } };
+    return { classification: "invoice", bill: parseAzureExtractedBill(annotation), rawResponse: "azure-test-response", model: "prebuilt-invoice" };
   } };
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "wired.sqlite"), logLevel: "error",
-    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 3 * 1024 * 1024 }, mistral: { apiKey: "test", model: "test", maxResponseBytes: 1024, requestTimeoutMs: 1_000 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 3 * 1024 * 1024 }, azure: { endpoint: "https://azure.example.test", apiKey: "azure-secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: true, authMode: "user_oauth", credentialJson: join(directory, "unused.json"), driveFolderId: "root", sheetId: "sheet", sheetName: "Ledger", requestTimeoutMs: 1_000, maxResponseBytes: 1_024 }, review: { username: "reviewer", password: "secret" },
     validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 },
   };
-  service = startService(config, {}, { whatsappTransport: transport, mistralProvider: provider, driveAdapter: drive, sheetsAdapter: sheets, createDatabase: (path) => (database = new BillDatabase(path)) });
+  service = startService(config, {}, { whatsappTransport: transport, azureProvider: provider, driveAdapter: drive, sheetsAdapter: sheets, createDatabase: (path) => (database = new BillDatabase(path)) });
   for (let attempts = 0; !receive && attempts < 50; attempts += 1) await Bun.sleep(2);
   expect(receive).toBeFunction(); expect((await fetch(new URL("health", service.url))).status).toBe(200);
   await receive!({ id: "wired-message", groupId: "group", senderId: "sender", timestamp: "2026-08-27T10:00:00.000Z", caption: "fixture", attachments: [{ kind: "image", mimeType: "image/png", filename: "english.png", download: async () => fixture }] });
@@ -200,7 +201,7 @@ test("startService wires production ingestion, extraction, validation, and Drive
   }
   const bill = database!.findBillsByIdentifier("wired-message")[0]!;
   expect(bill).toMatchObject({ status: "needs_review", driveFileId: "drive-file", sheetRowKey: null });
-  expect(archived.get("drive-file")).toEqual(fixture); expect(database!.getExtraction(bill.id)).toMatchObject({ providerModel: "mistral-test", normalized: expect.objectContaining({ vendorName: "Wired Store" }) });
+  expect(archived.get("drive-file")).toEqual(fixture); expect(database!.getExtraction(bill.id)).toMatchObject({ providerModel: "prebuilt-invoice", normalized: expect.objectContaining({ vendorName: "Wired Store" }) });
   expect([...rows.values()].filter((row) => row[13] === bill.id)).toHaveLength(0);
   await service.shutdown(); expect(stopped).toBe(true);
 });
@@ -214,10 +215,10 @@ test("enabled ingestion tags image jobs and injects preprocessing into extractio
   const received: Uint8Array[] = []; let database: BillDatabase | undefined;
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "preprocess.sqlite"), logLevel: "error",
-    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: true, timeoutMs: 8_000 },
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, azure: { endpoint: "https://azure.example.test", apiKey: "azure-secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0 }, imagePreprocessing: { enabled: true, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 },
   };
-  service = startService(config, {}, { createDatabase: (path) => (database = new BillDatabase(path)), whatsappTransport: { start: async (handler) => { receive = handler; }, stop: async () => undefined }, imagePreprocessor: preprocessor, mistralProvider: { extract: async (input) => { received.push(input.bytes); return { annotation: { schemaVersion: "1", vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-28", currency: null, subtotal: null, vat: null, total: 1, description: null, fields: { vendorName: { confidence: 1, sourceText: "Vendor" }, invoiceDate: { confidence: 1, sourceText: "2026-08-28" }, total: { confidence: 1, sourceText: "1" } } }, rawResponse: "raw", model: "mock" }; } } });
+  service = startService(config, {}, { createDatabase: (path) => (database = new BillDatabase(path)), whatsappTransport: { start: async (handler) => { receive = handler; }, stop: async () => undefined }, imagePreprocessor: preprocessor, azureProvider: { submit: async (input) => { received.push(input.bytes); return { operationLocation: "https://azure.example.test/operations/preprocessed" }; }, poll: async () => ({ classification: "invoice", bill: parseAzureExtractedBill({ schemaVersion: "1", vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-28", currency: null, subtotal: null, vat: null, total: 1, description: null, fields: { vendorName: { confidence: 1, sourceText: "Vendor" }, invoiceDate: { confidence: 1, sourceText: "2026-08-28" }, total: { confidence: 1, sourceText: "1" } } }), rawResponse: "raw", model: "prebuilt-invoice" }) } });
   for (let attempts = 0; !receive && attempts < 20; attempts += 1) await Bun.sleep(1);
   await receive!({ id: "tagged", groupId: "group", senderId: "sender", timestamp: "2026-08-28T00:00:00.000Z", attachments: [{ kind: "image", mimeType: "image/png", download: async () => original }] });
   for (let attempts = 0; received.length === 0 && attempts < 600; attempts += 1) await Bun.sleep(2);
@@ -237,11 +238,11 @@ test("disabled ingestion leaves new jobs original while existing tagged jobs sti
   let receive: ((message: IncomingWhatsAppMessage) => Promise<void>) | undefined; const received: Uint8Array[] = []; let preprocessCalls = 0;
   const config: AppConfig = {
     host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "disabled.sqlite"), logLevel: "error",
-    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
+    whatsapp: { enabled: true, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, azure: { endpoint: "https://azure.example.test", apiKey: "azure-secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 },
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 },
   };
   const annotation = { schemaVersion: "1" as const, vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-28", currency: null, subtotal: null, vat: null, total: 1, description: null, fields: { vendorName: { confidence: 1, sourceText: "Vendor" }, invoiceDate: { confidence: 1, sourceText: "2026-08-28" }, total: { confidence: 1, sourceText: "1" } } };
-  service = startService(config, {}, { createDatabase: () => database, whatsappTransport: { start: async (handler) => { receive = handler; }, stop: async () => undefined }, imagePreprocessor: { preprocess: async () => { preprocessCalls += 1; return { bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 }; } }, mistralProvider: { extract: async (input) => { received.push(input.bytes); return { annotation, rawResponse: "raw", model: "mock" }; } } });
+  service = startService(config, {}, { createDatabase: () => database, whatsappTransport: { start: async (handler) => { receive = handler; }, stop: async () => undefined }, imagePreprocessor: { preprocess: async () => { preprocessCalls += 1; return { bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 }; } }, azureProvider: { submit: async (input) => { received.push(input.bytes); return { operationLocation: "https://azure.example.test/operations/disabled" }; }, poll: async () => ({ classification: "invoice", bill: parseAzureExtractedBill(annotation), rawResponse: "raw", model: "prebuilt-invoice" }) } });
   for (let attempts = 0; !receive && attempts < 20; attempts += 1) await Bun.sleep(1);
   await receive!({ id: "new", groupId: "group", senderId: "sender", timestamp: "2026-08-28T00:00:00.000Z", attachments: [{ kind: "image", mimeType: "image/png", download: async () => original }] });
   for (let attempts = 0; received.length < 2 && attempts < 700; attempts += 1) await Bun.sleep(2);
@@ -249,6 +250,6 @@ test("disabled ingestion leaves new jobs original while existing tagged jobs sti
   expect(received).toContainEqual(derivative);
   expect(received).toContainEqual(original);
   const newBill = database.findBillsByIdentifier("new")[0]!;
-  expect(database.getBill(tagged.id)?.status).toBe("needs_review");
+  expect(database.getBill(tagged.id)?.status).toBe("approved");
   expect(database.sqlite.query<{ idempotency_key: string }, [string]>("SELECT idempotency_key FROM jobs WHERE bill_id = ? AND type = 'extract'").get(newBill.id)?.idempotency_key).toBe(`extract:${newBill.id}:original`);
 });

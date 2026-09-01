@@ -4,9 +4,13 @@ import { realpathSync } from "node:fs";
 export type GoogleConfig =
   | { enabled: false; authMode: "disabled"; credentialJson: null; driveFolderId: null; sheetId: null; sheetName: string; requestTimeoutMs: number; maxResponseBytes: number }
   | { enabled: true; authMode: "service_account" | "user_oauth"; credentialJson: string; driveFolderId: string; sheetId: string; sheetName: string; requestTimeoutMs: number; maxResponseBytes: number };
-export type AzureConfig =
-  | { enabled: false; endpoint: null; apiKey: null; maxResponseBytes: number; requestTimeoutMs: number; pollIntervalMs: number; fallbackConfidenceThreshold: number }
-  | { enabled: true; endpoint: string; apiKey: string; maxResponseBytes: number; requestTimeoutMs: number; pollIntervalMs: number; fallbackConfidenceThreshold: number };
+export interface AzureConfig {
+  endpoint: string;
+  apiKey: string;
+  maxResponseBytes: number;
+  requestTimeoutMs: number;
+  pollIntervalMs: number;
+}
 export interface AppConfig {
   host: string;
   port: number;
@@ -14,7 +18,6 @@ export interface AppConfig {
   databasePath: string;
   logLevel: "debug" | "info" | "warn" | "error";
   whatsapp: { enabled: boolean; groupId: string | null; authPath: string; originalsDir: string; maxAttachmentBytes: number };
-  mistral: { apiKey: string | null; model: string | null; maxResponseBytes: number; requestTimeoutMs: number };
   azure: AzureConfig;
   imagePreprocessing: { enabled: boolean; timeoutMs: number };
   google: GoogleConfig;
@@ -36,11 +39,6 @@ function integer(env: Env, key: string, fallback: number, minimum: number): numb
   if (!Number.isInteger(value) || value < minimum) throw new Error(`${key} must be an integer >= ${minimum}`);
   return value;
 }
-function number(env: Env, key: string, fallback: number, minimum: number, maximum: number): number {
-  const value = Number(env[key] ?? fallback);
-  if (!Number.isFinite(value) || value < minimum || value > maximum) throw new Error(`${key} must be between ${minimum} and ${maximum}`);
-  return value;
-}
 function boolean(env: Env, key: string, fallback: boolean): boolean {
   const value = env[key];
   if (value === undefined) return fallback;
@@ -54,9 +52,22 @@ export function canonicalOriginalsDir(path: string): string { return realpathSyn
 
 /** Validation settings shared by the service and bounded live evaluator. */
 export function loadValidationConfig(env: Env = Bun.env): AppConfig["validation"] {
+  const currencyRoundingTolerance = Number(env.CURRENCY_ROUNDING_TOLERANCE ?? 0.01);
+  if (!Number.isFinite(currencyRoundingTolerance) || currencyRoundingTolerance < 0 || currencyRoundingTolerance > Number.MAX_SAFE_INTEGER) throw new Error(`CURRENCY_ROUNDING_TOLERANCE must be between 0 and ${Number.MAX_SAFE_INTEGER}`);
   return {
-    currencyRoundingTolerance: number(env, "CURRENCY_ROUNDING_TOLERANCE", 0.01, 0, Number.MAX_SAFE_INTEGER),
+    currencyRoundingTolerance,
     maxFutureInvoiceDays: integer(env, "MAX_FUTURE_INVOICE_DAYS", 30, 0),
+  };
+}
+
+/** Azure-only settings for tools that do not start the application service. */
+export function loadAzureConfig(env: Env = Bun.env): AzureConfig {
+  return {
+    endpoint: required(env, "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT"),
+    apiKey: required(env, "AZURE_DOCUMENT_INTELLIGENCE_API_KEY"),
+    maxResponseBytes: integer(env, "AZURE_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1),
+    requestTimeoutMs: integer(env, "AZURE_REQUEST_TIMEOUT_MS", 60_000, 1),
+    pollIntervalMs: integer(env, "AZURE_POLL_INTERVAL_MS", 500, 0),
   };
 }
 
@@ -74,19 +85,7 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
     databasePath: resolve(env.APP_DATABASE_PATH ?? `${dataDir}/bill-ledger.sqlite`),
     logLevel: logLevel as AppConfig["logLevel"],
     whatsapp: { enabled: boolean(env, "WHATSAPP_ENABLED", true), groupId: env.WHATSAPP_GROUP_ID?.trim() || null, authPath: resolve(required(env, "WHATSAPP_AUTH_PATH")), originalsDir: resolve(env.WHATSAPP_ORIGINALS_DIR ?? `${dataDir}/originals`), maxAttachmentBytes: integer(env, "MAX_ATTACHMENT_BYTES", 20 * 1024 * 1024, 1) },
-    mistral: (() => {
-      const enabled = boolean(env, "MISTRAL_ENABLED", true);
-      return { apiKey: enabled ? required(env, "MISTRAL_API_KEY") : null, model: enabled ? required(env, "MISTRAL_MODEL") : null, maxResponseBytes: integer(env, "MISTRAL_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1), requestTimeoutMs: integer(env, "MISTRAL_REQUEST_TIMEOUT_MS", 60_000, 1) };
-    })(),
-    azure: (() => {
-      const enabled = boolean(env, "AZURE_ENABLED", true);
-      const maxResponseBytes = integer(env, "AZURE_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1);
-      const requestTimeoutMs = integer(env, "AZURE_REQUEST_TIMEOUT_MS", 60_000, 1);
-      const pollIntervalMs = integer(env, "AZURE_POLL_INTERVAL_MS", 500, 0);
-      const fallbackConfidenceThreshold = number(env, "OCR_FALLBACK_CONFIDENCE_THRESHOLD", 0.80, 0, 1);
-      if (!enabled) return { enabled: false, endpoint: null, apiKey: null, maxResponseBytes, requestTimeoutMs, pollIntervalMs, fallbackConfidenceThreshold };
-      return { enabled: true, endpoint: required(env, "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT"), apiKey: required(env, "AZURE_DOCUMENT_INTELLIGENCE_API_KEY"), maxResponseBytes, requestTimeoutMs, pollIntervalMs, fallbackConfidenceThreshold };
-    })(),
+    azure: loadAzureConfig(env),
     imagePreprocessing: { enabled: boolean(env, "IMAGE_PREPROCESSING_ENABLED", false), timeoutMs: integer(env, "IMAGE_PREPROCESSING_TIMEOUT_MS", 8_000, 1) },
     google: (() => {
       const enabled = boolean(env, "GOOGLE_ENABLED", false);
@@ -100,6 +99,5 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
     validation: loadValidationConfig(env),
     jobs: { maxAttempts: integer(env, "JOB_MAX_ATTEMPTS", 5, 1), retryBaseMs, retryMaxMs, leaseMs: integer(env, "JOB_LEASE_MS", 60_000, 1) },
   };
-  if (config.mistral.apiKey === null && !config.azure.enabled) throw new Error("At least one extraction provider must be enabled");
   return config;
 }

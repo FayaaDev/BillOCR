@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtractedBill } from "../src/contracts";
+import type { ClaimedJob, ExtractedBill } from "../src/contracts";
 import { BillDatabase } from "../src/database";
 import { createExtractionValidationCallback, parseObservedValue, serializeObservedValue, validateExtractedBill, type ValidationConfig } from "../src/validation";
 import { ISO_4217_DATASET_VERSION, currencyMinorUnits, iso4217MinorUnits, knownIso4217Codes, minorUnitPolicy } from "../src/currency";
@@ -18,6 +18,14 @@ let database: BillDatabase;
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), "bill-validation-")); database = new BillDatabase(join(directory, "ledger.sqlite")); });
 afterEach(() => { database.close(); rmSync(directory, { recursive: true, force: true }); });
 
+function persistAzureExtraction(billId: string, job: ClaimedJob, normalized: ExtractedBill): void {
+  const requestedAt = now.toISOString();
+  const invocation = database.beginExtractionInvocation({ billId, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", idempotencyKey: job.idempotencyKey, providerModel: "azure-mock", promptSchemaVersion: "prebuilt-invoice", requestedAt });
+  if (!invocation) throw new Error("expected Azure invocation");
+  expect(database.finishExtractionInvocation({ invocationId: invocation.invocation.id, jobId: job.id, leaseToken: job.leaseToken, outcome: "succeeded", completedAt: requestedAt, rawProviderResponse: "raw", errorDetails: null })).toBe(true);
+  expect(database.persistCanonicalExtractionSuccess({ invocationId: invocation.invocation.id, billId, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, idempotencyKey: job.idempotencyKey, normalized, rawProviderResponse: "raw", providerModel: "azure-mock", promptSchemaVersion: "prebuilt-invoice", requestedAt, completedAt: requestedAt })).toBe(true);
+}
+
 test("approves valid totals within configured rounding tolerance", () => {
   expect(validateExtractedBill(extracted({ total: 11.009 }), config, now)).toEqual({ decision: "approved", issues: [] });
 });
@@ -26,11 +34,6 @@ test("blocks arithmetic and required fields while confidence remains information
   expect(validateExtractedBill(extracted({ total: 12 }), config, now).issues).toContainEqual(expect.objectContaining({ code: "total_mismatch", field: "total" }));
   expect(validateExtractedBill(extracted({ vendorName: null }), config, now).issues).toContainEqual(expect.objectContaining({ code: "required_field_missing", field: "vendorName" }));
   for (const confidence of [null, 0, 0.01, 0.79, 1]) expect(validateExtractedBill(extracted({ fields: { vendorName: { confidence, sourceText: "Vendor" }, invoiceDate: { confidence, sourceText: "date" }, total: { confidence, sourceText: "11" } } }), config, now)).toEqual({ decision: "approved", issues: [] });
-});
-
-test("blocks a failed Azure fallback even when the Mistral extraction is otherwise valid", () => {
-  const result = validateExtractedBill(extracted(), config, now, { fallbackStatus: "failed" });
-  expect(result).toMatchObject({ decision: "needs_review", issues: [expect.objectContaining({ field: null, code: "azure_fallback_failed", severity: "blocking" })] });
 });
 
 test("blocks invalid dates, unknown currencies, and invalid monetary values defensively", () => {
@@ -79,7 +82,7 @@ test("audits declared zero, three, and four-decimal ISO policy lists", () => {
 test("Phase 2 callback persists and replays one authoritative decision without duplicate jobs or issues", () => {
   const bill = database.createBillWithInitialJobs({ whatsappMessageId: "message", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: now.toISOString(), mimeType: "image/png", originalPath: "/original", contentSha256: "a".repeat(64) }, [{ type: "extract", idempotencyKey: "extract:message" }]).bill;
   const job = database.claimNextJob("worker", { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 })!;
-  database.persistExtractionSuccess({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, normalized: extracted(), rawProviderResponse: "raw", providerModel: "mock", promptSchemaVersion: "1", requestedAt: now.toISOString(), completedAt: now.toISOString() });
+  persistAzureExtraction(bill.id, job, extracted());
   const callback = createExtractionValidationCallback(database, config, () => now);
   callback(bill.id);
   callback(bill.id);
@@ -92,7 +95,7 @@ test("Phase 2 callback persists and replays one authoritative decision without d
 test("needs-review callback persists replacement issues and archives without Sheets projection", () => {
   const bill = database.createBillWithInitialJobs({ whatsappMessageId: "message-2", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: now.toISOString(), mimeType: "image/png", originalPath: "/original", contentSha256: "b".repeat(64) }, [{ type: "extract", idempotencyKey: "extract:message-2" }]).bill;
   const job = database.claimNextJob("worker", { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 })!;
-  database.persistExtractionSuccess({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, normalized: extracted({ total: 20 }), rawProviderResponse: "raw", providerModel: "mock", promptSchemaVersion: "1", requestedAt: now.toISOString(), completedAt: now.toISOString() });
+  persistAzureExtraction(bill.id, job, extracted({ total: 20 }));
   const callback = createExtractionValidationCallback(database, config, () => now);
   callback(bill.id); callback(bill.id);
   expect(database.getBill(bill.id)?.status).toBe("needs_review");
@@ -110,7 +113,7 @@ test("callback rejects a missing extraction without changing a bill to approved"
 test("manual-review supersession is sticky until explicit reviewer approval", () => {
   const bill = database.createBillWithInitialJobs({ whatsappMessageId: "message-4", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: now.toISOString(), mimeType: "image/png", originalPath: "/original", contentSha256: "d".repeat(64) }, [{ type: "extract", idempotencyKey: "extract:message-4" }]).bill;
   const job = database.claimNextJob("worker", { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 })!;
-  database.persistExtractionSuccess({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, normalized: extracted(), rawProviderResponse: "raw", providerModel: "mock", promptSchemaVersion: "1", requestedAt: now.toISOString(), completedAt: now.toISOString() });
+  persistAzureExtraction(bill.id, job, extracted());
   const snapshot = database.getValidationSnapshot(bill.id)!;
   const decision = validateExtractedBill(snapshot.extraction.normalized!, config, now);
   expect(database.supersedeForReview(bill.id, "reviewer")).toBe(true);
@@ -146,7 +149,7 @@ test("MGA uses the two-decimal ISO boundary", () => {
 test("an approved project is invalidated before effect when review starts", () => {
   const bill = database.createBillWithInitialJobs({ whatsappMessageId: "message-5", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: now.toISOString(), mimeType: "image/png", originalPath: "/original", contentSha256: "e".repeat(64) }, [{ type: "extract", idempotencyKey: "extract:message-5" }]).bill;
   const job = database.claimNextJob("worker", { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 })!;
-  database.persistExtractionSuccess({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, normalized: extracted(), rawProviderResponse: "raw", providerModel: "mock", promptSchemaVersion: "1", requestedAt: now.toISOString(), completedAt: now.toISOString() });
+  persistAzureExtraction(bill.id, job, extracted());
   createExtractionValidationCallback(database, config, () => now)(bill.id);
   const revision = database.getBill(bill.id)!.contentRevision;
   expect(database.supersedeForReview(bill.id, "reviewer")).toBe(true);
@@ -158,7 +161,7 @@ test("running old projection keeps its lease while reviewer approval creates one
   const policy = { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 };
   const bill = database.createBillWithInitialJobs({ whatsappMessageId: "message-6", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: now.toISOString(), mimeType: "image/png", originalPath: "/original", contentSha256: "f".repeat(64) }, [{ type: "extract", idempotencyKey: "extract:message-6" }]).bill;
   const extractJob = database.claimNextJob("extractor", policy)!;
-  database.persistExtractionSuccess({ billId: bill.id, jobId: extractJob.id, leaseToken: extractJob.leaseToken, jobAttempt: extractJob.attempts, normalized: extracted(), rawProviderResponse: "raw", providerModel: "mock", promptSchemaVersion: "1", requestedAt: now.toISOString(), completedAt: now.toISOString() });
+  persistAzureExtraction(bill.id, extractJob, extracted());
   createExtractionValidationCallback(database, config, () => now)(bill.id);
   const old = database.claimNextJob("old-worker", policy, new Date(), ["project_to_sheet"])!;
   expect(old.expectedRevision).toBe(1);

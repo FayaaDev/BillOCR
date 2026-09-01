@@ -143,14 +143,83 @@ const migrations = [
       actor TEXT NOT NULL, reason TEXT, content_revision INTEGER NOT NULL, review_revision INTEGER NOT NULL, created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS bill_classification_events_bill_idx ON bill_classification_events(bill_id, created_at);`,
+   `DELETE FROM azure_extraction_operations
+      WHERE invocation_id IN (SELECT id FROM extraction_invocations WHERE provider <> 'azure');
+    DELETE FROM extractions WHERE selected_provider IS NOT 'azure';
+    DELETE FROM extractions
+      WHERE selected_invocation_id IN (SELECT id FROM extraction_invocations WHERE provider <> 'azure');
+    DELETE FROM extraction_attempts WHERE provider <> 'azure';
+   DELETE FROM extraction_invocations WHERE provider <> 'azure';
+   UPDATE bills SET extraction_policy = 'azure_only' WHERE extraction_policy <> 'azure_only';
+
+   CREATE TABLE bills_azure_only (
+     id TEXT PRIMARY KEY, whatsapp_message_id TEXT NOT NULL, whatsapp_group_id TEXT NOT NULL,
+     whatsapp_sender_id TEXT NOT NULL, attachment_index INTEGER NOT NULL CHECK (attachment_index >= 0),
+     received_at TEXT NOT NULL, caption TEXT, original_filename TEXT, mime_type TEXT NOT NULL,
+     original_path TEXT NOT NULL, content_sha256 TEXT NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('received','extracting','needs_review','approved','failed')),
+     drive_file_id TEXT, sheet_row_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+     content_revision INTEGER NOT NULL DEFAULT 0, review_revision INTEGER NOT NULL DEFAULT 0,
+     manual_review_required INTEGER NOT NULL DEFAULT 0,
+     source TEXT NOT NULL DEFAULT 'whatsapp' CHECK (source IN ('whatsapp','admin_upload')),
+     source_identity TEXT, extraction_policy TEXT NOT NULL DEFAULT 'azure_only' CHECK (extraction_policy = 'azure_only'),
+     classification TEXT NOT NULL DEFAULT 'unclassified' CHECK (classification IN ('unclassified','invoice','not_invoice')),
+     batch_item_id TEXT REFERENCES admin_upload_batch_items(id),
+     UNIQUE (whatsapp_message_id, attachment_index)
+   );
+   INSERT INTO bills_azure_only SELECT * FROM bills;
+   DROP TABLE bills;
+   ALTER TABLE bills_azure_only RENAME TO bills;
+   CREATE UNIQUE INDEX bills_source_identity_idx ON bills(source, source_identity) WHERE source_identity IS NOT NULL;
+   CREATE UNIQUE INDEX bills_batch_item_idx ON bills(batch_item_id) WHERE batch_item_id IS NOT NULL;
+
+   CREATE TABLE extractions_azure_only (
+     id TEXT PRIMARY KEY, bill_id TEXT NOT NULL UNIQUE REFERENCES bills(id), schema_version TEXT NOT NULL,
+     normalized_json TEXT, raw_provider_response TEXT, provider_model TEXT, prompt_schema_version TEXT,
+     requested_at TEXT, error_details TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+     completed_at TEXT, selected_provider TEXT CHECK (selected_provider = 'azure'),
+     selected_invocation_id TEXT REFERENCES extraction_invocations(id)
+   );
+   INSERT INTO extractions_azure_only SELECT id, bill_id, schema_version, normalized_json, raw_provider_response,
+     provider_model, prompt_schema_version, requested_at, error_details, created_at, updated_at, completed_at,
+     selected_provider, selected_invocation_id FROM extractions;
+   DROP TABLE extractions;
+   ALTER TABLE extractions_azure_only RENAME TO extractions;
+   CREATE INDEX extractions_selected_invocation_idx ON extractions(selected_invocation_id);
+
+   CREATE TABLE extraction_attempts_azure_only (
+     id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), job_id TEXT NOT NULL REFERENCES jobs(id),
+     job_attempt INTEGER NOT NULL, provider_model TEXT, requested_at TEXT NOT NULL, completed_at TEXT NOT NULL,
+     outcome TEXT NOT NULL CHECK (outcome IN ('succeeded','failed')), raw_provider_response TEXT,
+     error_details TEXT, created_at TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'azure' CHECK (provider = 'azure')
+   );
+   INSERT INTO extraction_attempts_azure_only SELECT * FROM extraction_attempts;
+   DROP TABLE extraction_attempts;
+   ALTER TABLE extraction_attempts_azure_only RENAME TO extraction_attempts;
+   CREATE INDEX extraction_attempts_bill_idx ON extraction_attempts(bill_id, created_at);
+
+   CREATE TABLE extraction_invocations_azure_only (
+     id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), job_id TEXT NOT NULL REFERENCES jobs(id),
+     job_attempt INTEGER NOT NULL CHECK (job_attempt >= 1), provider TEXT NOT NULL CHECK (provider = 'azure'),
+     idempotency_key TEXT NOT NULL, provider_model TEXT, prompt_schema_version TEXT, requested_at TEXT NOT NULL,
+     completed_at TEXT, outcome TEXT NOT NULL CHECK (outcome IN ('requested','succeeded','failed')),
+     raw_provider_response TEXT, error_details TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+     UNIQUE (job_id, job_attempt, provider)
+   );
+   INSERT INTO extraction_invocations_azure_only SELECT * FROM extraction_invocations;
+   DROP TABLE extraction_invocations;
+   ALTER TABLE extraction_invocations_azure_only RENAME TO extraction_invocations;
+   CREATE INDEX extraction_invocations_bill_idx ON extraction_invocations(bill_id, created_at);`,
 ];
 
 export function applyMigrations(db: Database): void {
   db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+  db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+  const applied = db.query<{ version: number }, [number]>("SELECT version FROM schema_migrations WHERE version = ?");
+  const requiresForeignKeysDisabled = !applied.get(migrations.length);
+  if (requiresForeignKeysDisabled) db.exec("PRAGMA foreign_keys = OFF;");
   db.exec("BEGIN IMMEDIATE");
   try {
-    db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
-    const applied = db.query<{ version: number }, [number]>("SELECT version FROM schema_migrations WHERE version = ?");
     const record = db.query<unknown, [number, string]>("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?) ON CONFLICT(version) DO NOTHING");
     migrations.forEach((sql, index) => {
       const version = index + 1;
@@ -158,9 +227,12 @@ export function applyMigrations(db: Database): void {
       db.exec(sql);
       record.run(version, new Date().toISOString());
     });
+    if (requiresForeignKeysDisabled && db.query("PRAGMA foreign_key_check").all().length > 0) throw new Error("Migration introduced foreign-key violations");
     db.exec("COMMIT");
+    if (requiresForeignKeysDisabled) db.exec("PRAGMA foreign_keys = ON;");
   } catch (error) {
     db.exec("ROLLBACK");
+    if (requiresForeignKeysDisabled) db.exec("PRAGMA foreign_keys = ON;");
     throw error;
   }
 }

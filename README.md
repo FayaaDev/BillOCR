@@ -1,6 +1,6 @@
 # Bill Ledger
 
-SQLite is canonical. WhatsApp, Mistral, Azure Document Intelligence, Google Drive, and Google Sheets are retryable projections.
+SQLite is canonical. WhatsApp supplies originals; Azure Document Intelligence performs OCR; Google Drive and Google Sheets are retryable projections.
 
 ## Local setup
 
@@ -16,7 +16,7 @@ The service writes the current QR token only to `${WHATSAPP_AUTH_PATH}/pairing-q
 
 For handwritten bills, send JPEG, PNG, or WebP images as WhatsApp documents/files when possible to avoid WhatsApp image recompression. Frame the bill clearly and minimize glare.
 
-Set `MISTRAL_ENABLED=false` to use Azure Document Intelligence as the only extraction provider; Mistral credentials are not required in this mode. Set `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` to the HTTPS origin of the Document Intelligence resource and set `AZURE_DOCUMENT_INTELLIGENCE_API_KEY` privately. `AZURE_ENABLED` defaults to `true`; when enabled, both values are required. `AZURE_MAX_RESPONSE_BYTES` defaults to `2097152` (2 MiB) and is an integer of at least `1`; `AZURE_REQUEST_TIMEOUT_MS` defaults to `60000` ms and is an integer of at least `1`; `AZURE_POLL_INTERVAL_MS` defaults to `500` ms and is an integer of at least `0`; and `OCR_FALLBACK_CONFIDENCE_THRESHOLD` defaults to `0.80` and must be in the inclusive range `0`–`1`. When Mistral is enabled, Azure remains the fallback for missing or low-confidence `vendorName`, `invoiceDate`, or `total` evidence according to that threshold. At least one extraction provider must be enabled.
+Azure Document Intelligence is the mandatory and sole OCR provider. Set `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` to the HTTPS origin of the Document Intelligence resource and keep `AZURE_DOCUMENT_INTELLIGENCE_API_KEY` private. Both values are required. `AZURE_MAX_RESPONSE_BYTES` defaults to `2097152` (2 MiB) and is an integer of at least `1`; `AZURE_REQUEST_TIMEOUT_MS` defaults to `60000` ms and is an integer of at least `1`; and `AZURE_POLL_INTERVAL_MS` defaults to `500` ms and is an integer of at least `0`.
 
 Google projections use exactly one `GOOGLE_AUTH_MODE`:
 
@@ -37,7 +37,7 @@ The review queue is `http://127.0.0.1:3000/review`; it is Basic-auth protected. 
 
 The Basic-auth-protected admin dashboard at `http://127.0.0.1:3000/admin` can upload a `.zip` archive through `POST /admin/api/zip`. The browser obtains a separate admin-ZIP CSRF token from `GET /admin/api/overview`, sends the ZIP with that token and an opaque upload ID, then shows upload progress. The endpoint accepts `application/zip` or `application/x-zip-compressed` only and returns `202 Accepted` with a batch ID. `GET /admin/api/zip/:batchId` returns the safe batch status; the UI polls it every two seconds until no entry is queued or processing.
 
-ZIP upload availability is controlled solely by `AZURE_ENABLED`: when Azure is disabled, the dashboard disables upload and the POST endpoint returns `503`; it does not disclose provider credentials or provider error bodies. There are no ZIP environment variables. The fixed limits are 50 MiB compressed ZIP bytes, 200 MiB total expanded entry bytes, 20 MiB per entry, and 500 entries. The parser is the direct runtime dependency [`yauzl`](https://www.npmjs.com/package/yauzl) (`^3.4.0` in `package.json`); Bun bundles the server import normally, so no separate native tool or build setting is required.
+Azure is required for ZIP upload processing. There are no ZIP or OCR-provider toggle environment variables. The fixed limits are 50 MiB compressed ZIP bytes, 200 MiB total expanded entry bytes, 20 MiB per entry, and 500 entries. The parser is the direct runtime dependency [`yauzl`](https://www.npmjs.com/package/yauzl) (`^3.4.0` in `package.json`); Bun bundles the server import normally, so no separate native tool or build setting is required.
 
 Archive enumeration creates durable records before the `202` response; the resulting Azure extraction and review work continues asynchronously. Each supported entry becomes an immutable canonical original and an Azure-only extraction job, while the dashboard reports the batch and per-entry outcomes. Entry paths are never extracted to the filesystem. Encrypted entries, directories, special files, unsafe paths, unsupported bytes, and entries exceeding a limit are recorded as `rejected`; malformed/archive-processing failures are `failed`. Valid entries start `queued`/`processing` and finish as `complete`, `not_invoice`, `rejected`, or `failed`; a batch is `queued`, `processing`, `completed` once no entry remains queued or processing, or `failed` for an archive-processing failure. A ZIP retry with the same upload ID and identical bytes reuses its batch; different bytes are rejected.
 
@@ -49,15 +49,15 @@ The authenticated `GET /review/export.csv` download contains approved invoices o
 
 `sharp-opencv-v1` is release/job-policy metadata, not an environment setting. New-job preprocessing is disabled by default with `IMAGE_PREPROCESSING_ENABLED=false`; `IMAGE_PREPROCESSING_TIMEOUT_MS=8000` bounds each derivative attempt. Only JPEG, PNG, and WebP attachments may receive an in-memory derivative. PDFs pass through unchanged, and preprocessing never writes or replaces an original.
 
-The approved-example evaluator compares three modes: `original`, forced `sharp`, and forced `opencv`. Production has no selectable sharp-only mode: its fixed `auto` behavior is equivalent to the evaluator's `opencv` request, rectifying only when it finds a reliable quadrilateral and otherwise using Sharp-only processing.
+The approved-example evaluator compares three modes: `original`, forced `sharp`, and forced `opencv`. Production always uses Sharp-only preprocessing (orientation, enhancement, and resize); OpenCV is evaluator-only and cannot be selected in production.
 
-Enable production only when the `opencv`/auto candidate has zero false approvals, fewer than the baseline 12 aggregate exact-field differences, and at most 5 differences for `example3` and 7 for `example4`. Otherwise leave preprocessing disabled. The Sharp-only result is diagnostic and cannot be selected by configuration in this phase.
+Enable production only when the Sharp-only candidate has zero false approvals, fewer than the baseline 12 aggregate exact-field differences, and at most 5 differences for `example3` and 7 for `example4`. Otherwise leave preprocessing disabled. The OpenCV result is diagnostic and cannot be selected by configuration in this phase.
 
 ### Rollout
 
 1. Keep `IMAGE_PREPROCESSING_ENABLED=false`; deploy and confirm `bun run verify-build` plus the container import/health smoke. Existing jobs retain their durable `:original` policy.
 2. With written authorization, run `APPROVED_EXAMPLE_EVALUATION_AUTHORIZED=true bun run evaluate:approved-examples`; retain only its six sanitized JSON decision lines in the release record.
-3. Enable only when the fixed `opencv`/auto candidate passes the gate. Newly ingested jobs receive `:sharp-opencv-v1`; existing `:original` jobs remain original-input jobs, so rollout does not change their request bytes.
+3. Enable only when the fixed Sharp-only candidate passes the gate. Newly ingested jobs receive `:sharp-opencv-v1`; existing `:original` jobs remain original-input jobs, so rollout does not change their request bytes.
 4. Monitor `needs_review` rate and extraction processing latency against the pre-enable interval.
 5. To roll back, first pause ingestion and the worker, record jobs already carrying `:sharp-opencv-v1`, set `IMAGE_PREPROCESSING_ENABLED=false`, and restart. Existing preprocessing-policy jobs remain deterministic derivative/fallback jobs and new jobs use `:original`; do not rewrite job keys. The input SHA-256 suffix prevents one provider key from being reused for different bytes.
 
@@ -89,18 +89,18 @@ bun run typecheck && bun test && bun run verify-build
 bun -e 'import sharp from "sharp"; import { WorkerImagePreprocessor } from "./dist/image-preprocessing.js"; const bytes = new Uint8Array(await sharp({ create: { width: 64, height: 64, channels: 4, background: "white" } }).png().toBuffer()); const result = await new WorkerImagePreprocessor({ timeoutMs: 8000 }).preprocess({ bytes, mimeType: "image/png", mode: "sharp" }); if (!result || result.mode !== "sharp" || result.width !== 64 || result.height !== 64) process.exit(1);'
 ```
 
-Validate the Compose file separately with `docker compose config --quiet`. For the container smoke, use an empty test database with WhatsApp and Google disabled, while still providing the required non-provider configuration. This direct `docker run` does not load compose `.env` or mount `secrets/`; it must return `/health` 200 and create no jobs or provider calls:
+Validate the Compose file separately with `docker compose config --quiet`. For the container smoke, use an empty test database with WhatsApp and Google disabled and Azure test configuration. This direct `docker run` does not load compose `.env` or mount `secrets/`; it must return `/health` 200 and create no jobs or provider calls:
 
 ```sh
 docker compose config --quiet
 docker build -t bill-ledger-health-smoke .
 set -e; container=; trap 'test -z "$container" || docker stop "$container" >/dev/null 2>&1 || true' EXIT
-container=$(docker run -d --rm -p 3100:3000 -e APP_HOST=0.0.0.0 -e APP_DATA_DIR=/tmp/health-smoke -e APP_DATABASE_PATH=/tmp/health-smoke/bill-ledger.sqlite -e WHATSAPP_ENABLED=false -e WHATSAPP_GROUP_ID=health-smoke@g.us -e WHATSAPP_AUTH_PATH=/tmp/health-smoke/whatsapp-auth -e WHATSAPP_ORIGINALS_DIR=/tmp/health-smoke/originals -e MISTRAL_API_KEY=test -e MISTRAL_MODEL=test -e AZURE_ENABLED=false -e GOOGLE_ENABLED=false -e REVIEW_USERNAME=test -e REVIEW_PASSWORD=test bill-ledger-health-smoke)
+container=$(docker run -d --rm -p 3100:3000 -e APP_HOST=0.0.0.0 -e APP_DATA_DIR=/tmp/health-smoke -e APP_DATABASE_PATH=/tmp/health-smoke/bill-ledger.sqlite -e WHATSAPP_ENABLED=false -e WHATSAPP_GROUP_ID=health-smoke@g.us -e WHATSAPP_AUTH_PATH=/tmp/health-smoke/whatsapp-auth -e WHATSAPP_ORIGINALS_DIR=/tmp/health-smoke/originals -e AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=https://azure.test -e AZURE_DOCUMENT_INTELLIGENCE_API_KEY=test -e GOOGLE_ENABLED=false -e REVIEW_USERNAME=test -e REVIEW_PASSWORD=test bill-ledger-health-smoke)
 curl --fail http://127.0.0.1:3100/health
 ```
 
-Live smoke checklist: pair the dedicated account; send one image and one PDF in the configured group; confirm original bytes on disk before provider work; check `ops inspect` for extraction provenance and job transitions; verify a byte-identical Drive original and one hidden-ID Sheet row; send a duplicate WhatsApp event; test one review correction and one rejection; temporarily deny each provider and confirm a visible retryable job before replaying it.
+Live smoke checklist: pair the dedicated account; send one image and one PDF in the configured group; confirm original bytes on disk before Azure work; check `ops inspect` for Azure extraction provenance and job transitions; verify a byte-identical Drive original and one hidden-ID Sheet row; send a duplicate WhatsApp event; test one review correction and one rejection; temporarily deny Azure and confirm a visible retryable job before replaying it.
 
 ## Security
 
-Never commit `.env`, `secrets/`, WhatsApp auth, SQLite files, originals, backups, or `dist/`. Rotate leaked Mistral/Google/review credentials. Google sharing and a reverse proxy are deployment configuration, not protections provided by the app.
+Never commit `.env`, `secrets/`, WhatsApp auth, SQLite files, originals, backups, or `dist/`. Rotate leaked Azure/Google/review credentials. Google sharing and a reverse proxy are deployment configuration, not protections provided by the app.

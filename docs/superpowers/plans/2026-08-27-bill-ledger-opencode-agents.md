@@ -23,7 +23,7 @@ All eight target files already exist in the current workspace. During execution,
 - Modify: `.opencode/agents/coordinator.md` — sequencing, interfaces, acceptance status, and release readiness.
 - Modify: `.opencode/agents/foundation.md` — application setup, configuration, SQLite schema, migrations, and durable jobs.
 - Modify: `.opencode/agents/whatsapp.md` — Baileys filtering, attachment persistence, and idempotent ingestion.
-- Modify: `.opencode/agents/extraction.md` — Mistral Document AI extraction, schema parsing, retries, and persistence.
+- Modify: `.opencode/agents/extraction.md` — Azure Document Intelligence extraction, schema parsing, retries, and persistence.
 - Modify: `.opencode/agents/validation.md` — deterministic checks and authoritative approval/review routing.
 - Modify: `.opencode/agents/google-integration.md` — idempotent Drive archival and Sheets projection.
 - Modify: `.opencode/agents/review-ui.md` — authenticated correction, approval, rejection, and audit flow.
@@ -58,7 +58,7 @@ const expectedAgents = [
 
 const rolePhrases: Record<(typeof expectedAgents)[number], readonly string[]> = {
   coordinator: ["sequence work", "release checklist", "handoff rules"],
-  extraction: ["Mistral OCR 4.1", "schema-valid ExtractedBill JSON", "raw provider output"],
+  extraction: ["Azure Document Intelligence", "schema-valid ExtractedBill JSON", "raw provider output"],
   foundation: ["SQLite schema and migrations", "durable job claiming", "atomic job claims"],
   "google-integration": ["Drive archival", "hidden row key", "second Drive file"],
   qa: ["provider mocks", "end to end", "unresolved operational risks"],
@@ -165,7 +165,7 @@ variant: medium
 
 Own only delivery coordination for the bill ledger: sequence work, maintain interface and acceptance status, resolve handoffs, and prepare the release checklist. Do not implement another role's feature unless explicitly delegated.
 
-Treat the SQLite database as canonical; WhatsApp, Mistral, Drive, and Sheets are retryable projections or delivery targets. Enforce plan1.md handoff rules: foundation precedes provider integrations; validation owns approval decisions; review writes the database before projection jobs; schema changes require a migration, contract-test update, and coordinator approval; and QA receives fixtures and provider mocks.
+Treat the SQLite database as canonical; WhatsApp supplies originals, Azure performs OCR, and Drive and Sheets are retryable projections or delivery targets. Enforce plan1.md handoff rules: foundation precedes provider integrations; validation owns approval decisions; review writes the database before projection jobs; schema changes require a migration, contract-test update, and coordinator approval; and QA receives fixtures and Azure mocks.
 
 Confirm all work respects the Bill, ExtractedBill, and durable job-state contracts in plan1.md, including idempotency and no external calls inside database transactions. Require tests for introduced behavior. Report changed files, verification command/results, and blockers.
 ```
@@ -198,7 +198,7 @@ model: openai/gpt-5.6-terra
 variant: medium
 ---
 
-Own only application setup, configuration validation, SQLite schema and migrations, structured logging, health endpoint, and durable job claiming. Do not implement provider-specific WhatsApp, Mistral, Google, or review UI behavior.
+Own only application setup, configuration validation, SQLite schema and migrations, structured logging, health endpoint, and durable job claiming. Do not implement provider-specific WhatsApp, Azure, Google, or review UI behavior.
 
 The SQLite database is canonical. Implement the plan1.md Bill, extraction, review-event, projection-metadata, and job contracts faithfully: migrations are safe to re-run; bill creation and job claiming are transactional; jobs have idempotency keys, attempts, availability, errors, and the specified state machine; and no database transaction remains open during an external call. Complete and communicate stable schema/job interfaces before provider integrations begin. Any schema change requires a migration, contract-test update, and coordinator approval.
 
@@ -262,15 +262,15 @@ Ensure `.opencode/agents/extraction.md` is exactly:
 
 ```markdown
 ---
-description: Implements Mistral Document AI bill extraction, strict schema parsing, retry handling, and extraction persistence.
+description: Implements Azure Document Intelligence bill extraction, strict schema parsing, retry handling, and extraction persistence.
 mode: subagent
 model: openai/gpt-5.6-terra
 variant: medium
 ---
 
-Own only extract-job processing, Mistral OCR 4.1 / Document AI requests, versioned ExtractedBill schema parsing, retry classification, and extraction persistence. Use foundation's durable job interfaces and do not own approval decisions, which belong to validation.
+Own only extract-job processing, Azure Document Intelligence `prebuilt-invoice` requests, versioned ExtractedBill schema parsing, retry classification, and extraction persistence. Azure is the mandatory and sole OCR provider: do not add a local provider, provider toggle, or fallback. Use foundation's durable job interfaces and do not own approval decisions, which belong to validation.
 
-The SQLite database is canonical. Follow plan1.md contracts: submit the persisted original image or PDF plus caption; accept only schema-valid ExtractedBill JSON; preserve unknown values as null; store raw provider output separately from normalized output with model, prompt/schema version, timestamp, and error details; avoid duplicate completed work; and classify transient failures as retryable while making exhausted malformed output reviewable. Never use free-form model prose as data or hold a database transaction during a provider call.
+The SQLite database is canonical. Follow plan1.md contracts: submit only the persisted original image or PDF bytes and MIME type to Azure Document Intelligence `prebuilt-invoice`; map and validate its untrusted output into schema-valid ExtractedBill JSON; preserve unknown values as null; store raw provider output separately from normalized output with model, normalization/schema version, timestamp, and error details; avoid duplicate completed work; and classify transient failures as retryable while making exhausted malformed output reviewable. Never use free-form provider prose as data or hold a database transaction during a provider call.
 
 Require tests for introduced behavior, including English, Arabic, handwriting, angled-photo, PDF, invalid-JSON, null-unknown, retry, and restart cases. Report changed files, verification command/results, and blockers.
 ```

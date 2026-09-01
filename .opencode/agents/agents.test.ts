@@ -14,7 +14,7 @@ const expectedAgents = [
 
 const rolePhrases: Record<(typeof expectedAgents)[number], readonly string[]> = {
   coordinator: ["sequence work", "release checklist", "handoff rules"],
-  extraction: ["Mistral OCR 4.1", "schema-valid ExtractedBill JSON", "raw provider output"],
+  extraction: ["schema-valid ExtractedBill JSON", "raw provider output"],
   foundation: ["SQLite schema and migrations", "durable job claiming", "atomic job claims"],
   "google-integration": ["Drive archival", "hidden row key", "second Drive file"],
   qa: ["provider mocks", "end to end", "unresolved operational risks"],

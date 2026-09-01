@@ -6,7 +6,7 @@ export type JobState = (typeof jobStates)[number];
 
 export type BillStatus = "received" | "extracting" | "needs_review" | "approved" | "failed";
 export type BillSource = "whatsapp" | "admin_upload";
-export type ExtractionPolicy = "mistral_with_azure_fallback" | "azure_only";
+export type ExtractionPolicy = "azure_only";
 export type BillClassification = "unclassified" | "invoice" | "not_invoice";
 
 /** Read-only dashboard totals derived from canonical bill and job state. Processed means approved. */
@@ -18,8 +18,7 @@ export interface DashboardMetrics {
   permanentFailureJobs: number;
 }
 
-export type ExtractionProvider = "mistral" | "azure";
-export type ExtractionFallbackStatus = "not_needed" | "pending" | "succeeded" | "failed";
+export type ExtractionProvider = "azure";
 
 /** Native provider evidence for one normalized field. */
 export interface FieldEvidence {
@@ -30,7 +29,6 @@ export interface FieldEvidence {
 /** Provenance for the provider whose result is selected as canonical. */
 export interface ExtractionProvenance {
   selectedProvider: ExtractionProvider;
-  fallbackStatus: ExtractionFallbackStatus;
 }
 
 export interface Bill {
@@ -77,7 +75,6 @@ export interface Extraction {
   billId: string;
   schemaVersion: string;
   selectedProvider: ExtractionProvider | null;
-  fallbackStatus: ExtractionFallbackStatus | null;
   selectedInvocationId: string | null;
   normalized: ExtractedBill | null;
   rawProviderResponse: string | null;

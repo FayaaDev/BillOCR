@@ -4,7 +4,8 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BillDatabase, type RetryPolicy } from "../src/database";
-import { createExtractJobHandler, RetryableExtractionError, type MistralOcrProvider } from "../src/extraction";
+import { type AzureInvoiceProvider } from "../src/azure-invoice";
+import { createExtractJobHandler, RetryableExtractionError } from "../src/extraction";
 import { createDriveArchiveHandler, createSheetsProjectionHandler, type DriveAdapter, type DriveFile, type SheetsAdapter } from "../src/google-projections";
 import { createLogger } from "../src/logger";
 import { createExtractionValidationCallback } from "../src/validation";
@@ -41,11 +42,11 @@ function ingest(bytes: Uint8Array, mimeType = "image/png") {
   const event = { id: "wa-e2e-1", groupId: "group", senderId: "sender", timestamp: "2026-08-27T10:00:00.000Z", caption: "receipt", attachments: [{ kind: mimeType === "application/pdf" ? "document" as const : "image" as const, mimeType, filename: mimeType === "application/pdf" ? "bill.pdf" : "english.png", download: async () => bytes }] };
   return { service, event };
 }
-function worker(provider: MistralOcrProvider, drive: DriveAdapter, sheets: SheetsAdapter) {
+function worker(provider: AzureInvoiceProvider, drive: DriveAdapter, sheets: SheetsAdapter) {
   const validate = createExtractionValidationCallback(database, { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
   return new JobWorker(database, { extract: createExtractJobHandler(database, provider, policy.maxAttempts, validate, { root: join(directory, "originals"), maxBytes: 20 * 1024 * 1024 }), archive_to_drive: createDriveArchiveHandler(database, drive, { driveRootId: "root", originalsRoot: join(directory, "originals") }), project_to_sheet: createSheetsProjectionHandler(database, sheets) }, policy, "e2e", logger);
 }
-function extractWorker(provider: MistralOcrProvider) {
+function extractWorker(provider: AzureInvoiceProvider) {
   const validate = createExtractionValidationCallback(database, { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-28T00:00:00.000Z"));
   return new JobWorker(database, { extract: createExtractJobHandler(database, provider, policy.maxAttempts, validate, { root: join(directory, "originals"), maxBytes: 20 * 1024 * 1024 }) }, policy, "e2e-extract", logger);
 }
@@ -57,19 +58,19 @@ test("public ingest, worker, SQLite, and mocked providers archive a reviewable b
   const bytes = readFileSync(join(import.meta.dir, "fixtures", "english.png")); const { service, event } = ingest(bytes);
   const first = await service.ingest(event); const duplicate = await service.ingest(event); const bill = first.bills[0]!;
   expect(duplicate.bills[0]?.id).toBe(bill.id); expect(database.countJobsForBill(bill.id)).toBe(2);
-  let requests = 0; const provider: MistralOcrProvider = { extract: async (input) => { requests += 1; expect(input.bytes).toEqual(bytes); return { annotation: valid, rawResponse: JSON.stringify({ document_annotation: valid }), model: "mistral-mock" }; } };
+  let requests = 0; const provider: AzureInvoiceProvider = { submit: async (input) => { requests += 1; expect(input.bytes).toEqual(bytes); return { operationLocation: "https://azure.test/operations/1" }; }, poll: async () => ({ classification: "invoice", bill: valid, rawResponse: JSON.stringify(valid), model: "azure-mock" }) };
   const drive = new MemoryDrive(); const sheets = new MemorySheets(); await drain(worker(provider, drive, sheets));
   const stored = database.getBill(bill.id)!; const extraction = database.getExtraction(bill.id)!;
-  expect(stored).toMatchObject({ id: bill.id, whatsappMessageId: "wa-e2e-1", status: "needs_review", driveFileId: "drive-3", sheetRowKey: null });
-  expect(extraction).toMatchObject({ providerModel: "mistral-mock", normalized: expect.objectContaining({ fields: expect.objectContaining({ total: { confidence: null, sourceText: "11.00" } }) }), rawProviderResponse: expect.stringContaining("Fixture Store") });
+  expect(stored).toMatchObject({ id: bill.id, whatsappMessageId: "wa-e2e-1", status: "approved", driveFileId: "drive-3", sheetRowKey: "2" });
+  expect(extraction).toMatchObject({ providerModel: "azure-mock", normalized: expect.objectContaining({ fields: expect.objectContaining({ total: { confidence: .99, sourceText: "11.00" } }) }), rawProviderResponse: expect.stringContaining("Fixture Store") });
   expect(drive.bytes.get(stored.driveFileId!)).toEqual(bytes); expect(createHash("sha256").update(bytes).digest("hex")).toBe(stored.contentSha256);
-  expect([...sheets.rows.values()].filter((row) => row[13] === bill.id)).toHaveLength(0); expect(requests).toBe(1);
+  expect([...sheets.rows.values()].filter((row) => row[13] === bill.id)).toHaveLength(1); expect(requests).toBe(1);
   for (const job of database.listJobsForBill(bill.id)) { expect(job.state).toBe("succeeded"); expect(database.getJobTransitions(job.id).map((transition) => transition.toState)).toContain("succeeded"); }
 });
 
 test("provider exhaustion, restart replay, and lost Drive/Sheets responses stay visible and converge without duplicate effects", async () => {
   const bytes = readFileSync(join(import.meta.dir, "fixtures", "bill.pdf")); const { service, event } = ingest(bytes, "application/pdf"); const bill = (await service.ingest(event)).bills[0]!;
-  let calls = 0; const provider: MistralOcrProvider = { extract: async () => { calls += 1; if (calls === 1) throw new RetryableExtractionError("timeout"); if (calls === 2) throw new RetryableExtractionError("HTTP 429 rate limit"); return { annotation: [], rawResponse: "malformed", model: "mistral-mock" }; } };
+  let calls = 0; const provider: AzureInvoiceProvider = { submit: async () => ({ operationLocation: "https://azure.test/operations/1" }), poll: async () => { calls += 1; if (calls === 1) throw new RetryableExtractionError("timeout"); if (calls === 2) throw new RetryableExtractionError("HTTP 429 rate limit"); return { classification: "invoice", bill: {} as never, rawResponse: "malformed", model: "azure-mock" }; } };
   const drive = new MemoryDrive(); const sheets = new MemorySheets(); const firstWorker = extractWorker(provider);
   await firstWorker.runOnce(); let extract = database.listJobsForBill(bill.id).find((job) => job.type === "extract")!; expect(extract).toMatchObject({ state: "retryable_failure", lastError: "provider_timeout" }); expect(database.requeueJob(extract.id)).toBe(true);
   database.close(); database = new BillDatabase(join(directory, "ledger.sqlite")); // process restart after persisted failure

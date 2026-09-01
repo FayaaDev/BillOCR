@@ -15,7 +15,7 @@ Agent definitions will live in `.opencode/agents/`. Every definition will use `m
 | coordinator | Plan sequencing, interfaces, acceptance status, and release checklist. |
 | foundation | Application setup, configuration, schema, migrations, and jobs. |
 | whatsapp | Baileys listener, group filtering, downloads, and durable ingestion. |
-| extraction | Mistral Document AI extraction, schema parsing, retries, and persistence. |
+| extraction | Azure Document Intelligence extraction, schema parsing, retries, and persistence. |
 | validation | Deterministic checks and approval/review decisions. |
 | google-integration | Idempotent Drive archive and Sheets projection. |
 | review-ui | Authenticated correction and approval page with audit events. |

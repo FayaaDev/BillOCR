@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { loadConfig, loadValidationConfig } from "../src/config";
+import { loadAzureConfig, loadConfig, loadValidationConfig } from "../src/config";
 import { createLogger } from "../src/logger";
 import { readServiceAccountCredential } from "../src/google-projections";
 
 const validEnvironment = () => ({
   APP_DATA_DIR: "./data", WHATSAPP_GROUP_ID: "group", WHATSAPP_AUTH_PATH: "./auth",
-  MISTRAL_API_KEY: "mistral-secret", MISTRAL_MODEL: "mistral-ocr-latest", AZURE_ENABLED: "false",
+  AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://azure.example.test", AZURE_DOCUMENT_INTELLIGENCE_API_KEY: "azure-secret",
   GOOGLE_SERVICE_ACCOUNT_JSON: "./service-account.json", GOOGLE_DRIVE_FOLDER_ID: "folder", GOOGLE_SHEET_ID: "sheet",
   REVIEW_USERNAME: "reviewer", REVIEW_PASSWORD: "review-secret",
 });
@@ -29,7 +29,7 @@ test("image preprocessing is disabled by default and validates its timeout", () 
 
 test("Google projections are opt-in and service-account credentials are shape-validated without exposing values", () => {
   expect(loadConfig({ ...validEnvironment(), GOOGLE_ENABLED: "false" }).google).toMatchObject({ enabled: false, credentialJson: null });
-  expect(() => loadConfig({ APP_DATA_DIR: "./data", WHATSAPP_GROUP_ID: "group", WHATSAPP_AUTH_PATH: "./auth", MISTRAL_API_KEY: "key", MISTRAL_MODEL: "model", AZURE_ENABLED: "false", REVIEW_USERNAME: "reviewer", REVIEW_PASSWORD: "token", GOOGLE_ENABLED: "true" })).toThrow("GOOGLE_SERVICE_ACCOUNT_JSON");
+  expect(() => loadConfig({ APP_DATA_DIR: "./data", WHATSAPP_GROUP_ID: "group", WHATSAPP_AUTH_PATH: "./auth", AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://azure.example.test", AZURE_DOCUMENT_INTELLIGENCE_API_KEY: "azure-secret", REVIEW_USERNAME: "reviewer", REVIEW_PASSWORD: "token", GOOGLE_ENABLED: "true" })).toThrow("GOOGLE_SERVICE_ACCOUNT_JSON");
   expect(() => readServiceAccountCredential('{"client_email":"service@example.test"}')).toThrow("requires client_email and private_key");
 });
 
@@ -54,45 +54,35 @@ test("standalone validation configuration preserves production defaults and over
   expect(loadValidationConfig({ CURRENCY_ROUNDING_TOLERANCE: "0.02", MAX_FUTURE_INVOICE_DAYS: "7" })).toEqual({ currencyRoundingTolerance: 0.02, maxFutureInvoiceDays: 7 });
 });
 
-test("configuration validates byte and provider timeout limits", () => {
-  expect(loadConfig({ ...validEnvironment(), MAX_ATTACHMENT_BYTES: "10", MISTRAL_MAX_RESPONSE_BYTES: "11", MISTRAL_REQUEST_TIMEOUT_MS: "12" })).toMatchObject({ whatsapp: { maxAttachmentBytes: 10 }, mistral: { maxResponseBytes: 11, requestTimeoutMs: 12 } });
+test("configuration validates byte and Azure timeout limits", () => {
+  expect(loadConfig({ ...validEnvironment(), MAX_ATTACHMENT_BYTES: "10", AZURE_MAX_RESPONSE_BYTES: "11", AZURE_REQUEST_TIMEOUT_MS: "12" })).toMatchObject({ whatsapp: { maxAttachmentBytes: 10 }, azure: { maxResponseBytes: 11, requestTimeoutMs: 12 } });
   expect(() => loadConfig({ ...validEnvironment(), MAX_ATTACHMENT_BYTES: "0" })).toThrow("MAX_ATTACHMENT_BYTES");
-  expect(() => loadConfig({ ...validEnvironment(), MISTRAL_REQUEST_TIMEOUT_MS: "0" })).toThrow("MISTRAL_REQUEST_TIMEOUT_MS");
+  expect(() => loadConfig({ ...validEnvironment(), AZURE_REQUEST_TIMEOUT_MS: "0" })).toThrow("AZURE_REQUEST_TIMEOUT_MS");
 });
 
-test("Azure fallback validates credentials without exposing them and defaults its threshold to 0.80", () => {
-  expect(loadConfig(validEnvironment()).azure).toEqual({ enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 2 * 1024 * 1024, requestTimeoutMs: 60_000, pollIntervalMs: 500, fallbackConfidenceThreshold: 0.80 });
+test("Azure credentials are mandatory", () => {
   const secret = "azure-secret-must-not-appear";
-  expect(loadConfig({ ...validEnvironment(), AZURE_ENABLED: "true", AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://azure.example.test", AZURE_DOCUMENT_INTELLIGENCE_API_KEY: secret })).toMatchObject({ azure: { enabled: true, endpoint: "https://azure.example.test", fallbackConfidenceThreshold: 0.80 } });
+  const config = loadConfig({ ...validEnvironment(), AZURE_DOCUMENT_INTELLIGENCE_API_KEY: secret });
+  expect(config.azure).toEqual({ endpoint: "https://azure.example.test", apiKey: secret, maxResponseBytes: 2 * 1024 * 1024, requestTimeoutMs: 60_000, pollIntervalMs: 500 });
   try {
-    loadConfig({ ...validEnvironment(), AZURE_ENABLED: "true", AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://azure.example.test" });
+    loadConfig({ ...validEnvironment(), AZURE_DOCUMENT_INTELLIGENCE_API_KEY: "" });
     throw new Error("expected Azure credential validation to fail");
   } catch (error) {
     expect(String(error)).toContain("AZURE_DOCUMENT_INTELLIGENCE_API_KEY");
     expect(String(error)).not.toContain(secret);
   }
-  expect(() => loadConfig({ ...validEnvironment(), OCR_FALLBACK_CONFIDENCE_THRESHOLD: "1.01" })).toThrow("OCR_FALLBACK_CONFIDENCE_THRESHOLD");
-});
-
-test("documented Azure response and polling limits retain their defaults and validation bounds", () => {
-  expect(loadConfig(validEnvironment()).azure).toMatchObject({ maxResponseBytes: 2 * 1024 * 1024, requestTimeoutMs: 60_000, pollIntervalMs: 500 });
-  expect(loadConfig({ ...validEnvironment(), AZURE_MAX_RESPONSE_BYTES: "1", AZURE_REQUEST_TIMEOUT_MS: "1", AZURE_POLL_INTERVAL_MS: "0" }).azure).toMatchObject({ maxResponseBytes: 1, requestTimeoutMs: 1, pollIntervalMs: 0 });
+  expect(() => loadConfig({ ...validEnvironment(), AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "" })).toThrow("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT");
   expect(() => loadConfig({ ...validEnvironment(), AZURE_MAX_RESPONSE_BYTES: "0" })).toThrow("AZURE_MAX_RESPONSE_BYTES");
-  expect(() => loadConfig({ ...validEnvironment(), AZURE_REQUEST_TIMEOUT_MS: "0" })).toThrow("AZURE_REQUEST_TIMEOUT_MS");
   expect(() => loadConfig({ ...validEnvironment(), AZURE_POLL_INTERVAL_MS: "-1" })).toThrow("AZURE_POLL_INTERVAL_MS");
 });
 
-test("Azure-only mode does not require Mistral credentials", () => {
-  const environment = { ...validEnvironment(), MISTRAL_ENABLED: "false", AZURE_ENABLED: "true", AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://azure.example.test", AZURE_DOCUMENT_INTELLIGENCE_API_KEY: "azure-secret" };
-  delete (environment as Partial<typeof environment>).MISTRAL_API_KEY;
-  delete (environment as Partial<typeof environment>).MISTRAL_MODEL;
-  expect(loadConfig(environment).mistral).toMatchObject({ apiKey: null, model: null });
-  expect(() => loadConfig({ ...environment, AZURE_ENABLED: "false" })).toThrow("At least one extraction provider must be enabled");
+test("standalone Azure configuration does not require service settings", () => {
+  expect(loadAzureConfig({ AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://azure.example.test", AZURE_DOCUMENT_INTELLIGENCE_API_KEY: "azure-secret" })).toEqual({ endpoint: "https://azure.example.test", apiKey: "azure-secret", maxResponseBytes: 2 * 1024 * 1024, requestTimeoutMs: 60_000, pollIntervalMs: 500 });
 });
 
 test("structured logger redacts secret-valued fields", () => {
   const lines: string[] = [];
-  createLogger("debug", (line) => lines.push(line)).info("provider configured", { mistralApiKey: "do-not-log", nested: { authToken: "also-secret" } });
+  createLogger("debug", (line) => lines.push(line)).info("provider configured", { azureApiKey: "do-not-log", nested: { authToken: "also-secret" } });
   expect(lines).toHaveLength(1);
   expect(lines[0]).toContain("[REDACTED]");
   expect(lines[0]).not.toContain("do-not-log");

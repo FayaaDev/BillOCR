@@ -8,7 +8,7 @@ import type { JobHandlers } from "./contracts";
 import { BackgroundWorkerLoop, JobWorker } from "./worker";
 import { BaileysTransport, type WhatsAppAdminOperations, type WhatsAppTransport } from "./baileys-transport";
 import { WhatsAppIngestionService } from "./whatsapp-ingestion";
-import { createExtractJobHandler, MistralHttpOcrProvider, type MistralOcrProvider } from "./extraction";
+import { createExtractJobHandler } from "./extraction";
 import { IMAGE_PREPROCESSING_VERSION, WorkerImagePreprocessor, type ImagePreprocessor } from "./image-preprocessing";
 import { createExtractionValidationCallback } from "./validation";
 import { createDriveArchiveHandler, createGoogleAdapters, createReviewCorrectionSyncHandler, createSheetsProjectionHandler, type DriveAdapter, type SheetsAdapter } from "./google-projections";
@@ -21,7 +21,6 @@ export interface ServiceDependencies {
   serve?: typeof Bun.serve;
   whatsappTransport?: WhatsAppTransport;
   enableWhatsApp?: boolean;
-  mistralProvider?: MistralOcrProvider;
   azureProvider?: AzureInvoiceProvider;
   imagePreprocessor?: ImagePreprocessor;
   onExtractionPersisted?: (billId: string) => Promise<void> | void;
@@ -56,9 +55,8 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
     await dependencies.onExtractionPersisted?.(billId);
   };
   const imagePreprocessor = dependencies.imagePreprocessor ?? new WorkerImagePreprocessor({ timeoutMs: config.imagePreprocessing.timeoutMs });
-  const azureProvider = dependencies.azureProvider ?? (config.azure.enabled ? new AzureDocumentIntelligenceInvoiceProvider({ endpoint: config.azure.endpoint, apiKey: config.azure.apiKey, maxResponseBytes: config.azure.maxResponseBytes, timeoutMs: config.azure.requestTimeoutMs, pollIntervalMs: config.azure.pollIntervalMs }) : undefined);
-  const mistralProvider = dependencies.mistralProvider ?? (config.mistral.apiKey && config.mistral.model ? new MistralHttpOcrProvider(config.mistral.apiKey, config.mistral.model, config.mistral.maxResponseBytes, config.mistral.requestTimeoutMs) : null);
-  const extractHandler = jobHandlers.extract ?? createExtractJobHandler(database, mistralProvider, config.jobs.maxAttempts, onExtracted, { root: config.whatsapp.originalsDir, maxBytes: config.whatsapp.maxAttachmentBytes }, imagePreprocessor, azureProvider, config.azure.fallbackConfidenceThreshold);
+  const azureProvider = dependencies.azureProvider ?? new AzureDocumentIntelligenceInvoiceProvider({ endpoint: config.azure.endpoint, apiKey: config.azure.apiKey, maxResponseBytes: config.azure.maxResponseBytes, timeoutMs: config.azure.requestTimeoutMs, pollIntervalMs: config.azure.pollIntervalMs });
+  const extractHandler = jobHandlers.extract ?? createExtractJobHandler(database, azureProvider, config.jobs.maxAttempts, onExtracted, { root: config.whatsapp.originalsDir, maxBytes: config.whatsapp.maxAttachmentBytes }, imagePreprocessor);
   let googleHandlers: JobHandlers = {};
   if (config.google.enabled) {
     const adapters = dependencies.driveAdapter && dependencies.sheetsAdapter ? { drive: dependencies.driveAdapter, sheets: dependencies.sheetsAdapter } : createGoogleAdapters(readFileSync(config.google.credentialJson, "utf8"), { driveRootId: config.google.driveFolderId, sheetId: config.google.sheetId, sheetName: config.google.sheetName, requestTimeoutMs: config.google.requestTimeoutMs, maxResponseBytes: config.google.maxResponseBytes });
@@ -88,7 +86,7 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
     zip: (() => {
       const maxCompressedBytes = 50 * 1024 * 1024;
       const ingestion = new AdminZipIngestionService({ database, logger, originalsDir: config.whatsapp.originalsDir, stagingDir: `${config.dataDir}/admin-zip-staging`, limits: { maxCompressedBytes } });
-      return { available: () => config.azure.enabled, maxCompressedBytes, ingest: (input: { sourceId: string; originalFilename: string; bytes: AsyncIterable<Uint8Array> }) => ingestion.ingest(input), status: (batchId: string) => database.getAdminUploadBatchStatus(batchId), reconcilePending: () => ingestion.reconcilePending() };
+      return { available: () => true, maxCompressedBytes, ingest: (input: { sourceId: string; originalFilename: string; bytes: AsyncIterable<Uint8Array> }) => ingestion.ingest(input), status: (batchId: string) => database.getAdminUploadBatchStatus(batchId), reconcilePending: () => ingestion.reconcilePending() };
     })(),
   };
   let server: ReturnType<typeof Bun.serve>;

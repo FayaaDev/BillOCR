@@ -123,7 +123,7 @@ describe("admin ZIP ingestion", () => {
       poll: async ({ operationLocation }) => { const kind = operations.get(operationLocation) ?? ""; if (kind.includes("failure")) throw new PermanentJobError("mock permanent failure"); return kind.includes("not-invoice") ? { classification: "not_invoice", bill: valid, rawResponse: "not-invoice", model: "mock" } : { classification: "invoice", bill: kind.includes("approve") || kind.includes("reject") ? review : valid, rawResponse: "invoice", model: "mock" }; },
     };
     const validate = createExtractionValidationCallback(database, { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-02T00:00:00.000Z"));
-    const worker = new JobWorker(database, { extract: createExtractJobHandler(database, null, 1, validate, { root: join(directory, "originals"), maxBytes: 1024 * 1024 }, undefined, azure) }, { maxAttempts: 1, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 }, "zip-azure", silentLogger);
+    const worker = new JobWorker(database, { extract: createExtractJobHandler(database, azure, 1, validate, { root: join(directory, "originals"), maxBytes: 1024 * 1024 }) }, { maxAttempts: 1, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 }, "zip-azure", silentLogger);
     while (await worker.runOnce()) {}
     expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM jobs WHERE type = 'extract' AND state = 'permanent_failure'").get()?.count).toBe(1);
     const bills = database.sqlite.query<{ id: string; entry_path: string }, []>("SELECT bills.id, item.entry_path FROM bills JOIN admin_upload_batch_items item ON item.id = bills.batch_item_id ORDER BY item.entry_path").all();
@@ -170,7 +170,7 @@ describe("admin ZIP ingestion", () => {
     };
     const validate = createExtractionValidationCallback(database, { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, () => new Date("2026-08-02T00:00:00.000Z"));
     const worker = new JobWorker(database, {
-      extract: createExtractJobHandler(database, null, 3, validate, { root: join(directory, "originals"), maxBytes: 1024 * 1024 }, undefined, azure),
+      extract: createExtractJobHandler(database, azure, 3, validate, { root: join(directory, "originals"), maxBytes: 1024 * 1024 }),
       archive_to_drive: createDriveArchiveHandler(database, drive, { driveRootId: "root", originalsRoot: join(directory, "originals") }),
       project_to_sheet: createSheetsProjectionHandler(database, sheets),
     }, { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 }, "zip-integrated", silentLogger);

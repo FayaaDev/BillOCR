@@ -1,4 +1,4 @@
-import type { ExtractedBill, ExtractionFallbackStatus, ValidationIssue } from "./contracts";
+import type { ExtractedBill, ValidationIssue } from "./contracts";
 import type { BillDatabase } from "./database";
 import { currencyMinorUnits, knownIso4217Codes, toleranceForCurrency } from "./currency";
 
@@ -61,7 +61,7 @@ function validIsoDate(value: string): boolean {
 function utcDay(value: string): number { return Date.parse(`${value}T00:00:00.000Z`); }
 
 /** Pure authoritative validation: all automatic approval decisions originate here. */
-export function validateExtractedBill(extracted: ExtractedBill, config: ValidationConfig, now = new Date(), provenance: { fallbackStatus: ExtractionFallbackStatus | null } = { fallbackStatus: null }): ValidationResult {
+export function validateExtractedBill(extracted: ExtractedBill, config: ValidationConfig, now = new Date()): ValidationResult {
   const issues: ValidationResult["issues"] = [];
   for (const key of ["subtotal", "vat", "total"] as const) {
     const amount = extracted[key];
@@ -76,7 +76,6 @@ export function validateExtractedBill(extracted: ExtractedBill, config: Validati
     else if (utcDay(extracted.invoiceDate) > utcDay(now.toISOString().slice(0, 10)) + config.maxFutureInvoiceDays * 86_400_000) issues.push(issue("invoiceDate", "invoice_date_too_future", "Invoice date is too far in the future.", extracted.invoiceDate));
   }
   if (extracted.currency !== null && !knownIso4217Codes.has(extracted.currency)) issues.push(issue("currency", "currency_unknown", "Currency must be a known ISO 4217 code.", extracted.currency));
-  if (provenance.fallbackStatus === "failed") issues.push(issue(null, "azure_fallback_failed", "Azure fallback failed; this extraction requires manual review.", { fallbackStatus: provenance.fallbackStatus }));
   for (const key of ["vendorName", "invoiceDate", "total"] as const) {
     const value = extracted[key];
     if (value === null || (typeof value === "string" && !value.trim())) {
@@ -92,7 +91,7 @@ export function createExtractionValidationCallback(database: BillDatabase, confi
   return (billId) => {
     const snapshot = database.getValidationSnapshot(billId);
     if (!snapshot) throw new Error("Cannot validate a missing normalized extraction");
-    const result = validateExtractedBill(snapshot.extraction.normalized!, config, clock(), { fallbackStatus: snapshot.extraction.fallbackStatus });
+    const result = validateExtractedBill(snapshot.extraction.normalized!, config, clock());
     database.persistValidationDecision({ billId, expectedContentRevision: snapshot.contentRevision, expectedReviewRevision: snapshot.reviewRevision, decision: result.decision, issues: result.issues });
   };
 }

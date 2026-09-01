@@ -1,10 +1,10 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { EXTRACTION_PROMPT_VERSION, MistralHttpOcrProvider, type MistralOcrProvider, parseProviderExtractedBill } from "./extraction";
+import { AzureDocumentIntelligenceInvoiceProvider, type AzureInvoiceProvider } from "./azure-invoice";
+import { parseAzureExtractedBill } from "./extraction";
 import { WorkerImagePreprocessor, type ImagePreprocessor } from "./image-preprocessing";
 import { validateExtractedBill } from "./validation";
-import { loadValidationConfig } from "./config";
+import { loadAzureConfig, loadValidationConfig } from "./config";
 
 const fixtureDirectory = resolve(import.meta.dir, "../test/fixtures/approved");
 const workspaceRoot = resolve(import.meta.dir, "..");
@@ -47,8 +47,8 @@ function schemaReason(error: unknown): string {
   return "schema";
 }
 type EvaluatorResult = { differences: Array<{ field: Field; expected: ApprovedExpected[Field]; actual: ApprovedExpected[Field] }>; decision: "approved" | "needs_review"; issues: Array<{ code: string; field: string | null }>; passed: boolean };
-export function evaluateApprovedAnnotation(annotation: unknown, expected: ApprovedExpected, now = new Date()): EvaluatorResult {
-  const parsed = parseProviderExtractedBill(annotation);
+export function evaluateApprovedInvoice(bill: unknown, expected: ApprovedExpected, now = new Date()): EvaluatorResult {
+  const parsed = parseAzureExtractedBill(bill);
   const validation = validateExtractedBill(parsed, loadValidationConfig(Bun.env), now);
   const differences = fields.flatMap((field) => Object.is(parsed[field], expected[field]) ? [] : [{ field, expected: expected[field], actual: parsed[field] }]);
   return { differences, decision: validation.decision, issues: validation.issues.map(({ code, field }) => ({ code, field })), passed: differences.length === 0 && validation.decision === "approved" };
@@ -64,9 +64,8 @@ export type ApprovedExampleEvaluationRecord = {
 };
 
 export type ApprovedExampleEvaluationDependencies = {
-  provider: Pick<MistralOcrProvider, "extract">;
+  provider: AzureInvoiceProvider;
   preprocessor: ImagePreprocessor;
-  runToken?: string;
 };
 
 function failureRecord(name: string, variant: Variant, code: string): ApprovedExampleEvaluationRecord {
@@ -74,7 +73,6 @@ function failureRecord(name: string, variant: Variant, code: string): ApprovedEx
 }
 
 export async function runApprovedExampleEvaluation(dependencies: ApprovedExampleEvaluationDependencies): Promise<ApprovedExampleEvaluationRecord[]> {
-  const runToken = dependencies.runToken ?? randomUUID();
   const records: ApprovedExampleEvaluationRecord[] = [];
   for (const name of fixtureNames) {
     let approved: { source: string; expected: ApprovedExpected }; let originalBytes: Uint8Array;
@@ -102,16 +100,16 @@ export async function runApprovedExampleEvaluation(dependencies: ApprovedExample
         dimensions = { width: derivative.width, height: derivative.height };
       }
 
-      let result: Awaited<ReturnType<MistralOcrProvider["extract"]>>;
+      let result: Awaited<ReturnType<AzureInvoiceProvider["poll"]>>;
       try {
-        const idempotencyKey = `approved-evaluation:${EXTRACTION_PROMPT_VERSION}:${runToken}:${name}:${variant}`;
-        result = await dependencies.provider.extract({ bytes, mimeType: "image/png", caption: null, idempotencyKey });
+        const submitted = await dependencies.provider.submit({ bytes, mimeType: "image/png" });
+        result = await dependencies.provider.poll({ operationLocation: submitted.operationLocation });
       } catch {
         records.push(failureRecord(name, variant, "evaluator_provider_failure"));
         continue;
       }
       try {
-        const evaluation = evaluateApprovedAnnotation(result.annotation, approved.expected);
+        const evaluation = evaluateApprovedInvoice(result.bill, approved.expected);
         records.push({ fixture: name, variant, differences: evaluation.differences, decision: evaluation.decision, issues: evaluation.issues, mode, dimensions });
       } catch (error) {
         records.push(failureRecord(name, variant, `evaluator_schema_${schemaReason(error)}`));
@@ -122,9 +120,8 @@ export async function runApprovedExampleEvaluation(dependencies: ApprovedExample
 }
 
 async function main(): Promise<void> {
-  const apiKey = Bun.env.MISTRAL_API_KEY?.trim(); const model = Bun.env.MISTRAL_MODEL?.trim();
-  if (!apiKey || !model) throw new Error("MISTRAL_API_KEY and MISTRAL_MODEL are required");
-  const records = await runApprovedExampleEvaluation({ provider: new MistralHttpOcrProvider(apiKey, model), preprocessor: new WorkerImagePreprocessor({ timeoutMs: 8_000 }) });
+  const azure = loadAzureConfig(Bun.env);
+  const records = await runApprovedExampleEvaluation({ provider: new AzureDocumentIntelligenceInvoiceProvider({ endpoint: azure.endpoint, apiKey: azure.apiKey, maxResponseBytes: azure.maxResponseBytes, timeoutMs: azure.requestTimeoutMs, pollIntervalMs: azure.pollIntervalMs }), preprocessor: new WorkerImagePreprocessor({ timeoutMs: 8_000 }) });
   for (const record of records) console.log(JSON.stringify(record));
   if (records.some((record) => record.decision !== "approved" || record.differences.length > 0)) process.exitCode = 1;
 }
