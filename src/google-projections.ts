@@ -230,7 +230,7 @@ export function ledgerValues(bill: Bill, extraction: ExtractedBill, driveUrl: st
   return [
     bill.receivedAt.slice(0, 10), extraction.vendorName, extraction.invoiceNumber, extraction.invoiceDate,
     extraction.subtotal, extraction.vat, extraction.total, extraction.currency, extraction.description,
-    bill.whatsappSenderId, confidenceSummary(extraction), bill.status, driveUrl, bill.id, bill.contentRevision,
+    bill.sourceSenderId, confidenceSummary(extraction), bill.status, driveUrl, bill.id, bill.contentRevision,
   ];
 }
 

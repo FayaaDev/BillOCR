@@ -20,6 +20,30 @@ test("configuration permits an active WhatsApp connection without an ingestion g
   expect(loadConfig(environment).whatsapp).toMatchObject({ enabled: true, groupId: null });
 });
 
+test("Telegram is disabled by default and does not require a bot token until enabled", () => {
+  expect(loadConfig(validEnvironment()).telegram).toEqual({ enabled: false, botToken: null, groupIds: [], pollTimeoutSeconds: 30, requestTimeoutMs: 35_000, maxResponseBytes: 2 * 1024 * 1024 });
+  expect(() => loadConfig({ ...validEnvironment(), TELEGRAM_ENABLED: "true" })).toThrow("TELEGRAM_BOT_TOKEN");
+});
+
+test("Telegram trims and deduplicates its configured group allowlist", () => {
+  expect(loadConfig({ ...validEnvironment(), TELEGRAM_ENABLED: "true", TELEGRAM_BOT_TOKEN: "telegram-secret", TELEGRAM_GROUP_IDS: " -1001, -1002 , -1001, , " }).telegram).toMatchObject({ enabled: true, groupIds: ["-1001", "-1002"] });
+  expect(loadConfig({ ...validEnvironment(), TELEGRAM_ENABLED: "true", TELEGRAM_BOT_TOKEN: "telegram-secret" }).telegram.groupIds).toEqual([]);
+});
+
+test("Telegram long-poll request and response limits are bounded", () => {
+  const environment = { ...validEnvironment(), TELEGRAM_ENABLED: "true", TELEGRAM_BOT_TOKEN: "telegram-secret", TELEGRAM_POLL_TIMEOUT_SECONDS: "1", TELEGRAM_REQUEST_TIMEOUT_MS: "1001", TELEGRAM_MAX_RESPONSE_BYTES: "3" };
+  expect(loadConfig(environment).telegram).toMatchObject({ pollTimeoutSeconds: 1, requestTimeoutMs: 1001, maxResponseBytes: 3 });
+  expect(() => loadConfig({ ...environment, TELEGRAM_POLL_TIMEOUT_SECONDS: "0" })).toThrow("TELEGRAM_POLL_TIMEOUT_SECONDS");
+  expect(() => loadConfig({ ...environment, TELEGRAM_REQUEST_TIMEOUT_MS: "0" })).toThrow("TELEGRAM_REQUEST_TIMEOUT_MS");
+  expect(() => loadConfig({ ...environment, TELEGRAM_REQUEST_TIMEOUT_MS: "1000" })).toThrow("TELEGRAM_REQUEST_TIMEOUT_MS");
+  expect(() => loadConfig({ ...environment, TELEGRAM_MAX_RESPONSE_BYTES: "0" })).toThrow("TELEGRAM_MAX_RESPONSE_BYTES");
+});
+
+test("shared originals configuration accepts the neutral setting and legacy WhatsApp fallback", () => {
+  expect(loadConfig(validEnvironment()).originals).toEqual({ dir: expect.stringContaining("data/originals"), maxAttachmentBytes: 20 * 1024 * 1024 });
+  expect(loadConfig({ ...validEnvironment(), ORIGINALS_DIR: "./shared-originals", WHATSAPP_ORIGINALS_DIR: "./legacy-originals", MAX_ATTACHMENT_BYTES: "10" }).originals).toEqual({ dir: expect.stringContaining("shared-originals"), maxAttachmentBytes: 10 });
+});
+
 test("image preprocessing is disabled by default and validates its timeout", () => {
   expect(loadConfig(validEnvironment()).imagePreprocessing).toEqual({ enabled: false, timeoutMs: 8_000 });
   expect(loadConfig({ ...validEnvironment(), IMAGE_PREPROCESSING_ENABLED: "true", IMAGE_PREPROCESSING_TIMEOUT_MS: "9" }).imagePreprocessing).toEqual({ enabled: true, timeoutMs: 9 });

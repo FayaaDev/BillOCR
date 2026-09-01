@@ -5,9 +5,18 @@ export const jobStates = ["pending", "running", "succeeded", "retryable_failure"
 export type JobState = (typeof jobStates)[number];
 
 export type BillStatus = "received" | "extracting" | "needs_review" | "approved" | "failed";
-export type BillSource = "whatsapp" | "admin_upload";
+export type BillSource = "whatsapp" | "telegram" | "admin_upload";
 export type ExtractionPolicy = "mistral_with_azure_fallback" | "azure_only";
 export type BillClassification = "unclassified" | "invoice" | "not_invoice";
+
+/**
+ * Stable, unambiguous identity for one attachment in a transport message.
+ * `source` is deliberately not embedded: it is the first half of the database
+ * uniqueness constraint, and keeping it separate permits source-specific lookup.
+ */
+export function transportSourceIdentity(sourceChatId: string, sourceMessageId: string, attachmentIndex: number): string {
+  return JSON.stringify([sourceChatId, sourceMessageId, attachmentIndex]);
+}
 
 /** Read-only dashboard totals derived from canonical bill and job state. Processed means approved. */
 export interface DashboardMetrics {
@@ -35,9 +44,9 @@ export interface ExtractionProvenance {
 
 export interface Bill {
   id: string;
-  whatsappMessageId: string;
-  whatsappGroupId: string;
-  whatsappSenderId: string;
+  sourceMessageId: string;
+  sourceChatId: string;
+  sourceSenderId: string;
   attachmentIndex: number;
   receivedAt: string;
   caption: string | null;
@@ -202,9 +211,15 @@ export interface JobTransition {
 
 export interface CreateBillInput {
   id?: string;
-  whatsappMessageId: string;
-  whatsappGroupId: string;
-  whatsappSenderId: string;
+  sourceMessageId?: string;
+  sourceChatId?: string;
+  sourceSenderId?: string;
+  /** @deprecated Use sourceMessageId. Accepted only to preserve existing callers during transport migration. */
+  whatsappMessageId?: string;
+  /** @deprecated Use sourceChatId. Accepted only to preserve existing callers during transport migration. */
+  whatsappGroupId?: string;
+  /** @deprecated Use sourceSenderId. Accepted only to preserve existing callers during transport migration. */
+  whatsappSenderId?: string;
   attachmentIndex: number;
   receivedAt: string;
   caption?: string | null;

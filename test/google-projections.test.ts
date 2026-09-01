@@ -237,6 +237,11 @@ test("Sheet confidence summary displays unknown when native confidences are null
   expect(ledgerValues(database.getBill(item.id)!, extraction, "https://drive.example/file")[10]).toBe("unknown");
 });
 
+test("Sheet sender column uses generic transport sender metadata", () => {
+  const item = approvedBill(); const telegram = { ...database.getBill(item.id)!, source: "telegram" as const, sourceSenderId: "telegram-sender" };
+  expect(ledgerValues(telegram, database.getExtraction(item.id)!.normalized!, "https://drive.example/file")[9]).toBe("telegram-sender");
+});
+
 test("concurrent Sheet append misses reconcile to one immutable bill row", async () => {
   const item = approvedBill();
   database.sqlite.query("INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, expected_revision, created_at, updated_at) VALUES ('second-project', ?, 'project_to_sheet', 'pending', 'project:bill-immutable:1:second', 0, ?, 1, ?, ?)").run(item.id, new Date().toISOString(), new Date().toISOString(), new Date().toISOString());

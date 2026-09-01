@@ -51,7 +51,7 @@ function corrected(form: URLSearchParams, original: ExtractedBill): ExtractedBil
 }
 function reviewFilters(url: URL): ReviewQueueFilters | null {
   const source = url.searchParams.get("source"); const batchId = url.searchParams.get("batch"); const status = url.searchParams.get("status");
-  if ((source !== null && source !== "whatsapp" && source !== "admin_upload") || (batchId !== null && (!/^[A-Za-z0-9_-]{1,128}$/.test(batchId))) || (status !== null && !["received", "extracting", "needs_review", "approved", "failed", "complete", "not_invoice"].includes(status))) return null;
+  if ((source !== null && source !== "whatsapp" && source !== "telegram" && source !== "admin_upload") || (batchId !== null && (!/^[A-Za-z0-9_-]{1,128}$/.test(batchId))) || (status !== null && !["received", "extracting", "needs_review", "approved", "failed", "complete", "not_invoice"].includes(status))) return null;
   return { ...(source ? { source } : {}), ...(batchId ? { batchId } : {}), ...(status ? { status: status as ReviewQueueFilters["status"] } : {}) };
 }
 const unavailableExtraction = (): ExtractedBill => ({ schemaVersion: "1", vendorName: null, invoiceNumber: null, invoiceDate: null, currency: null, subtotal: null, vat: null, total: null, description: null, fields: {} });
@@ -93,7 +93,7 @@ export async function handleReviewRequest(request: Request, database: BillDataba
   const billId = parts[2]; if (parts[0] !== "review" || parts[1] !== "bills" || !billId || parts.length > 4) return page("غير موجود", "غير موجود", 404);
   const bill = database.getBill(billId); if (!bill) return page("غير موجود", "غير موجود", 404);
   if (request.method === "GET" && parts[3] === "original") {
-    let original: { bytes: Uint8Array; magicMatches: boolean }; try { original = await readVerifiedOriginal({ path: bill.originalPath, root: config.whatsapp.originalsDir, maxBytes: config.whatsapp.maxAttachmentBytes, sha256: bill.contentSha256, mimeType: bill.mimeType, requireMagic: false }); } catch { return page("غير موجود", "غير موجود", 404); }
+    let original: { bytes: Uint8Array; magicMatches: boolean }; try { original = await readVerifiedOriginal({ path: bill.originalPath, root: config.originals.dir, maxBytes: config.originals.maxAttachmentBytes, sha256: bill.contentSha256, mimeType: bill.mimeType, requireMagic: false }); } catch { return page("غير موجود", "غير موجود", 404); }
     const disposition = url.searchParams.get("download") === "1" ? "attachment" : "inline";
     return new Response(new Blob([new Uint8Array(original.bytes)]), { headers: { ...headers, "content-type": original.magicMatches ? bill.mimeType : "application/octet-stream", "content-disposition": `${disposition}; filename="${encodeURIComponent(bill.originalFilename ?? "original")}"` } });
   }

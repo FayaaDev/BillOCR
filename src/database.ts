@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import type { AdminUploadBatch, AdminUploadBatchItem, AdminUploadBatchStatusCounts, AzureExtractionOperation, BeginExtractionInvocationResult, Bill, BillClassification, BillSource, ClaimedJob, CreateBillInput, DashboardMetrics, EffectiveBillData, ExtractedBill, Extraction, ExtractionFallbackStatus, ExtractionInvocation, ExtractionPolicy, ExtractionProvider, InitialJobInput, Job, JobState, JobTransition, JobType, ProviderProjectionMetadata, ReviewEvent, ValidationIssue } from "./contracts";
+import { transportSourceIdentity, type AdminUploadBatch, type AdminUploadBatchItem, type AdminUploadBatchStatusCounts, type AzureExtractionOperation, type BeginExtractionInvocationResult, type Bill, type BillClassification, type BillSource, type ClaimedJob, type CreateBillInput, type DashboardMetrics, type EffectiveBillData, type ExtractedBill, type Extraction, type ExtractionFallbackStatus, type ExtractionInvocation, type ExtractionPolicy, type ExtractionProvider, type InitialJobInput, type Job, type JobState, type JobTransition, type JobType, type ProviderProjectionMetadata, type ReviewEvent, type ValidationIssue } from "./contracts";
 import { applyMigrations } from "./migrations";
 import { jobTypes } from "./contracts";
 
@@ -10,7 +10,7 @@ type JobRow = {
   last_error: string | null; created_at: string; updated_at: string; expected_revision: number | null;
 };
 type BillRow = {
-  id: string; whatsapp_message_id: string; whatsapp_group_id: string; whatsapp_sender_id: string; attachment_index: number;
+  id: string; source_message_id: string; source_chat_id: string; source_sender_id: string; attachment_index: number;
   received_at: string; caption: string | null; original_filename: string | null; mime_type: string; original_path: string;
   content_sha256: string; status: Bill["status"]; drive_file_id: string | null; sheet_row_key: string | null; created_at: string; updated_at: string; content_revision: number; review_revision: number; manual_review_required: number;
   source: BillSource; source_identity: string; extraction_policy: ExtractionPolicy; classification: BillClassification; batch_item_id: string | null;
@@ -31,7 +31,7 @@ function toJob(row: JobRow): Job {
   return { id: row.id, billId: row.bill_id, type: row.type, state: row.state, idempotencyKey: row.idempotency_key, attempts: row.attempts, availableAt: row.available_at, leaseToken: row.lease_token, leaseExpiresAt: row.lease_expires_at, claimedBy: row.claimed_by, claimedAt: row.claimed_at, lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at, expectedRevision: row.expected_revision };
 }
 function toBill(row: BillRow): Bill {
-  return { id: row.id, whatsappMessageId: row.whatsapp_message_id, whatsappGroupId: row.whatsapp_group_id, whatsappSenderId: row.whatsapp_sender_id, attachmentIndex: row.attachment_index, receivedAt: row.received_at, caption: row.caption, originalFilename: row.original_filename, mimeType: row.mime_type, originalPath: row.original_path, contentSha256: row.content_sha256, status: row.status, driveFileId: row.drive_file_id, sheetRowKey: row.sheet_row_key, createdAt: row.created_at, updatedAt: row.updated_at, contentRevision: row.content_revision, reviewRevision: row.review_revision, source: row.source, sourceIdentity: row.source_identity, extractionPolicy: row.extraction_policy, classification: row.classification, batchItemId: row.batch_item_id };
+  return { id: row.id, sourceMessageId: row.source_message_id, sourceChatId: row.source_chat_id, sourceSenderId: row.source_sender_id, attachmentIndex: row.attachment_index, receivedAt: row.received_at, caption: row.caption, originalFilename: row.original_filename, mimeType: row.mime_type, originalPath: row.original_path, contentSha256: row.content_sha256, status: row.status, driveFileId: row.drive_file_id, sheetRowKey: row.sheet_row_key, createdAt: row.created_at, updatedAt: row.updated_at, contentRevision: row.content_revision, reviewRevision: row.review_revision, source: row.source, sourceIdentity: row.source_identity, extractionPolicy: row.extraction_policy, classification: row.classification, batchItemId: row.batch_item_id };
 }
 function toJobTransition(row: JobTransitionRow): JobTransition {
   return { id: row.id, jobId: row.job_id, fromState: row.from_state, toState: row.to_state, reason: row.reason, createdAt: row.created_at };
@@ -93,16 +93,19 @@ export class BillDatabase {
     const now = new Date().toISOString();
     const billId = input.id ?? randomUUID();
     const source = input.source ?? "whatsapp";
-    const sourceIdentity = input.sourceIdentity ?? `whatsapp:${input.whatsappMessageId}:${input.attachmentIndex}`;
+    const sourceMessageId = input.sourceMessageId ?? input.whatsappMessageId;
+    const sourceChatId = input.sourceChatId ?? input.whatsappGroupId;
+    const sourceSenderId = input.sourceSenderId ?? input.whatsappSenderId;
+    if (!sourceMessageId || !sourceChatId || !sourceSenderId) throw new Error("Bill source message, chat, and sender IDs are required");
+    const sourceIdentity = input.sourceIdentity ?? transportSourceIdentity(sourceChatId, sourceMessageId, input.attachmentIndex);
     const extractionPolicy = input.extractionPolicy ?? "mistral_with_azure_fallback";
     const classification = input.classification ?? "unclassified";
     if (!sourceIdentity) throw new Error("Bill source identity is required");
-    if (source === "whatsapp" && input.batchItemId) throw new Error("WhatsApp bill cannot link an admin-upload batch item");
+    if (source !== "admin_upload" && input.batchItemId) throw new Error("Transport bill cannot link an admin-upload batch item");
     if (source === "admin_upload" && !input.batchItemId) throw new Error("Admin-upload bill requires a batch item");
     if (classification === "not_invoice" && initialJobs.some((job) => job.type === "project_to_sheet")) throw new Error("NotInvoice bills cannot create sheet projection jobs");
-    const insertBill = this.sqlite.query(`INSERT INTO bills (id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, caption, original_filename, mime_type, original_path, content_sha256, status, source, source_identity, extraction_policy, classification, batch_item_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
+    const insertBill = this.sqlite.query(`INSERT INTO bills (id, source_message_id, source_chat_id, source_sender_id, attachment_index, received_at, caption, original_filename, mime_type, original_path, content_sha256, status, source, source_identity, extraction_policy, classification, batch_item_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
     const bySource = this.sqlite.query<BillRow, [BillSource, string]>("SELECT * FROM bills WHERE source = ? AND source_identity = ?");
-    const legacyWhatsApp = this.sqlite.query<BillRow, [string, number]>("SELECT * FROM bills WHERE whatsapp_message_id = ? AND attachment_index = ?");
     const insertJob = this.sqlite.query(`INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, 0, ?, ?, ?)`);
     const jobByKey = this.sqlite.query<{ bill_id: string }, [string]>("SELECT bill_id FROM jobs WHERE idempotency_key = ?");
     return this.sqlite.transaction(() => {
@@ -111,14 +114,14 @@ export class BillDatabase {
         if (jobKeys.has(job.idempotencyKey)) throw new Error(`Duplicate required job idempotency key: ${job.idempotencyKey}`);
         jobKeys.add(job.idempotencyKey);
       }
-      const existingBill = bySource.get(source, sourceIdentity) ?? (source === "whatsapp" ? legacyWhatsApp.get(input.whatsappMessageId, input.attachmentIndex) : null);
+      const existingBill = bySource.get(source, sourceIdentity);
       if (source === "admin_upload" && input.batchItemId && !existingBill) {
         const compatible = this.sqlite.query<{ value: number }, [string]>(`SELECT 1 AS value FROM admin_upload_batch_items item
           JOIN admin_upload_batches batch ON batch.id = item.batch_id WHERE item.id = ? AND item.bill_id IS NULL AND item.state = 'queued'`).get(input.batchItemId);
         if (!compatible) throw new Error("Admin-upload batch item is missing or already linked");
       }
-      const result = insertBill.run(billId, input.whatsappMessageId, input.whatsappGroupId, input.whatsappSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, input.mimeType, input.originalPath, input.contentSha256, source, sourceIdentity, extractionPolicy, classification, input.batchItemId ?? null, now, now);
-      const row = existingBill ?? bySource.get(source, sourceIdentity) ?? (source === "whatsapp" ? legacyWhatsApp.get(input.whatsappMessageId, input.attachmentIndex) : null);
+      const result = insertBill.run(billId, sourceMessageId, sourceChatId, sourceSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, input.mimeType, input.originalPath, input.contentSha256, source, sourceIdentity, extractionPolicy, classification, input.batchItemId ?? null, now, now);
+      const row = existingBill ?? bySource.get(source, sourceIdentity);
       if (!row) throw new Error("Bill source identity conflicts with another bill");
       const created = result.changes === 1;
       for (const job of initialJobs) {
@@ -140,9 +143,19 @@ export class BillDatabase {
     })();
   }
 
-  getBillByWhatsAppAttachment(messageId: string, attachmentIndex: number): Bill | null {
-    const row = this.sqlite.query<BillRow, [string, number]>("SELECT * FROM bills WHERE whatsapp_message_id = ? AND attachment_index = ?").get(messageId, attachmentIndex);
+  getBillBySourceIdentity(source: BillSource, sourceIdentity: string): Bill | null {
+    const row = this.sqlite.query<BillRow, [BillSource, string]>("SELECT * FROM bills WHERE source = ? AND source_identity = ?").get(source, sourceIdentity);
     return row ? toBill(row) : null;
+  }
+
+  getTelegramPollingCursor(): number | null {
+    return this.sqlite.query<{ next_update_id: number }, []>("SELECT next_update_id FROM telegram_polling_cursor WHERE id = 1").get()?.next_update_id ?? null;
+  }
+
+  setTelegramPollingCursor(nextUpdateId: number): void {
+    if (!Number.isInteger(nextUpdateId) || nextUpdateId < 0) throw new Error("Telegram polling cursor must be a non-negative integer");
+    const now = new Date().toISOString();
+    this.sqlite.query("INSERT INTO telegram_polling_cursor (id, next_update_id, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET next_update_id = excluded.next_update_id, updated_at = excluded.updated_at").run(nextUpdateId, now);
   }
 
   getBill(id: string): Bill | null {
@@ -399,7 +412,7 @@ export class BillDatabase {
 
   /** Approved admin-upload invoices whose batch entry reached the terminal complete state. */
   listCompletedInvoiceExports(): CompletedInvoiceExportRecord[] {
-    return this.sqlite.query<{ id: string; received_at: string; whatsapp_sender_id: string; normalized_json: string }, []>(`SELECT b.id, b.received_at, b.whatsapp_sender_id,
+    return this.sqlite.query<{ id: string; received_at: string; source_sender_id: string; normalized_json: string }, []>(`SELECT b.id, b.received_at, b.source_sender_id,
       COALESCE(effective.normalized_json, extraction.normalized_json) AS normalized_json
       FROM bills b
       JOIN admin_upload_batch_items item ON item.id = b.batch_item_id AND item.state = 'complete'
@@ -407,7 +420,7 @@ export class BillDatabase {
       LEFT JOIN extractions extraction ON extraction.bill_id = b.id
       WHERE b.status = 'approved' AND b.classification = 'invoice'
         AND COALESCE(effective.normalized_json, extraction.normalized_json) IS NOT NULL
-      ORDER BY b.received_at, b.id`).all().map((row) => ({ id: row.id, receivedAt: row.received_at, senderId: row.whatsapp_sender_id, extraction: JSON.parse(row.normalized_json) as ExtractedBill }));
+      ORDER BY b.received_at, b.id`).all().map((row) => ({ id: row.id, receivedAt: row.received_at, senderId: row.source_sender_id, extraction: JSON.parse(row.normalized_json) as ExtractedBill }));
   }
 
   listReviewBills(filters: ReviewQueueFilters = {}): ReviewQueueBill[] {
@@ -754,13 +767,13 @@ export class BillDatabase {
       .map((row) => ({ id: row.id, originalPath: row.original_path, contentSha256: row.content_sha256, mimeType: row.mime_type }));
   }
 
-  /** Matches the public identifiers operators receive from WhatsApp, Drive, or Sheets. */
+  /** Matches canonical source IDs plus Drive and Sheets projection identifiers. */
   findBillsByIdentifier(identifier: string): Bill[] {
-    return this.sqlite.query<BillRow, [string, string, string, string, string, string]>(`SELECT DISTINCT b.* FROM bills b
+    return this.sqlite.query<BillRow, [string, string, string, string, string, string, string, string, string]>(`SELECT DISTINCT b.* FROM bills b
       LEFT JOIN provider_projection_metadata p ON p.bill_id = b.id
-      WHERE b.id = ? OR b.whatsapp_message_id = ? OR b.drive_file_id = ? OR b.sheet_row_key = ?
-         OR p.external_id = ? OR p.projection_key = ? ORDER BY b.created_at`,
-    ).all(identifier, identifier, identifier, identifier, identifier, identifier).map(toBill);
+      WHERE b.id = ? OR b.source_message_id = ? OR b.source_chat_id = ? OR b.source_sender_id = ? OR b.source_identity = ?
+          OR b.drive_file_id = ? OR b.sheet_row_key = ? OR p.external_id = ? OR p.projection_key = ? ORDER BY b.created_at`,
+    ).all(identifier, identifier, identifier, identifier, identifier, identifier, identifier, identifier, identifier).map(toBill);
   }
 
   /** Explicit, auditable replay. It never requeues completed work or invalidated projections. */

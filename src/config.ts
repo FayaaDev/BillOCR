@@ -7,13 +7,18 @@ export type GoogleConfig =
 export type AzureConfig =
   | { enabled: false; endpoint: null; apiKey: null; maxResponseBytes: number; requestTimeoutMs: number; pollIntervalMs: number; fallbackConfidenceThreshold: number }
   | { enabled: true; endpoint: string; apiKey: string; maxResponseBytes: number; requestTimeoutMs: number; pollIntervalMs: number; fallbackConfidenceThreshold: number };
+export type TelegramConfig =
+  | { enabled: false; botToken: null; groupIds: string[]; pollTimeoutSeconds: number; requestTimeoutMs: number; maxResponseBytes: number }
+  | { enabled: true; botToken: string; groupIds: string[]; pollTimeoutSeconds: number; requestTimeoutMs: number; maxResponseBytes: number };
 export interface AppConfig {
   host: string;
   port: number;
   dataDir: string;
   databasePath: string;
   logLevel: "debug" | "info" | "warn" | "error";
+  originals: { dir: string; maxAttachmentBytes: number };
   whatsapp: { enabled: boolean; groupId: string | null; authPath: string; originalsDir: string; maxAttachmentBytes: number };
+  telegram: TelegramConfig;
   mistral: { apiKey: string | null; model: string | null; maxResponseBytes: number; requestTimeoutMs: number };
   azure: AzureConfig;
   imagePreprocessing: { enabled: boolean; timeoutMs: number };
@@ -48,6 +53,9 @@ function boolean(env: Env, key: string, fallback: boolean): boolean {
   if (value === "false") return false;
   throw new Error(`${key} must be true or false`);
 }
+function csv(env: Env, key: string): string[] {
+  return [...new Set((env[key] ?? "").split(",").map((value) => value.trim()).filter(Boolean))];
+}
 
 /** Resolve this controlled directory once after it has been created; readers never realpath request/DB paths. */
 export function canonicalOriginalsDir(path: string): string { return realpathSync(resolve(path)); }
@@ -67,13 +75,23 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
   if (!levels.has(logLevel)) throw new Error("APP_LOG_LEVEL must be debug, info, warn, or error");
   const retryBaseMs = integer(env, "JOB_RETRY_BASE_MS", 1_000, 1);
   const retryMaxMs = integer(env, "JOB_RETRY_MAX_MS", 300_000, retryBaseMs);
+  const originals = { dir: resolve(env.ORIGINALS_DIR ?? env.WHATSAPP_ORIGINALS_DIR ?? `${dataDir}/originals`), maxAttachmentBytes: integer(env, "MAX_ATTACHMENT_BYTES", 20 * 1024 * 1024, 1) };
   const config: AppConfig = {
     host: env.APP_HOST ?? "127.0.0.1",
     port: integer(env, "APP_PORT", 3_000, 1),
     dataDir,
     databasePath: resolve(env.APP_DATABASE_PATH ?? `${dataDir}/bill-ledger.sqlite`),
     logLevel: logLevel as AppConfig["logLevel"],
-    whatsapp: { enabled: boolean(env, "WHATSAPP_ENABLED", true), groupId: env.WHATSAPP_GROUP_ID?.trim() || null, authPath: resolve(required(env, "WHATSAPP_AUTH_PATH")), originalsDir: resolve(env.WHATSAPP_ORIGINALS_DIR ?? `${dataDir}/originals`), maxAttachmentBytes: integer(env, "MAX_ATTACHMENT_BYTES", 20 * 1024 * 1024, 1) },
+    originals,
+    whatsapp: { enabled: boolean(env, "WHATSAPP_ENABLED", true), groupId: env.WHATSAPP_GROUP_ID?.trim() || null, authPath: resolve(required(env, "WHATSAPP_AUTH_PATH")), originalsDir: originals.dir, maxAttachmentBytes: originals.maxAttachmentBytes },
+    telegram: (() => {
+      const enabled = boolean(env, "TELEGRAM_ENABLED", false);
+      const pollTimeoutSeconds = integer(env, "TELEGRAM_POLL_TIMEOUT_SECONDS", 30, 1);
+      const requestTimeoutMs = integer(env, "TELEGRAM_REQUEST_TIMEOUT_MS", 35_000, 1);
+      if (requestTimeoutMs <= pollTimeoutSeconds * 1_000) throw new Error("TELEGRAM_REQUEST_TIMEOUT_MS must exceed TELEGRAM_POLL_TIMEOUT_SECONDS");
+      const config = { enabled, botToken: enabled ? required(env, "TELEGRAM_BOT_TOKEN") : null, groupIds: csv(env, "TELEGRAM_GROUP_IDS"), pollTimeoutSeconds, requestTimeoutMs, maxResponseBytes: integer(env, "TELEGRAM_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1) };
+      return config as TelegramConfig;
+    })(),
     mistral: (() => {
       const enabled = boolean(env, "MISTRAL_ENABLED", true);
       return { apiKey: enabled ? required(env, "MISTRAL_API_KEY") : null, model: enabled ? required(env, "MISTRAL_MODEL") : null, maxResponseBytes: integer(env, "MISTRAL_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1), requestTimeoutMs: integer(env, "MISTRAL_REQUEST_TIMEOUT_MS", 60_000, 1) };

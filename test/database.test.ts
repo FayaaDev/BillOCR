@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BillDatabase, type RetryPolicy } from "../src/database";
+import { transportSourceIdentity } from "../src/contracts";
+import { applyMigrations } from "../src/migrations";
 
 const policy: RetryPolicy = { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 };
 let directory: string;
@@ -19,7 +21,7 @@ describe("migrations", () => {
   test("apply on a fresh database and safely reapply", () => {
     database.close();
     const reopened = new BillDatabase(path);
-    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(14);
+    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(16);
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'validation_issues'").get()?.name).toBe("validation_issues");
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'extraction_invocations'").get()?.name).toBe("extraction_invocations");
     reopened.close();
@@ -34,7 +36,7 @@ describe("migrations", () => {
     expect(await first.exited).toBe(0);
     expect(await second.exited).toBe(0);
     database = new BillDatabase(path);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(14);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(16);
   });
 
   test("upgrades a v9 database with existing extraction records without changing canonical data", () => {
@@ -43,7 +45,14 @@ describe("migrations", () => {
     const legacy = new SqliteDatabase(path, { create: true, strict: true });
     legacy.exec(`PRAGMA foreign_keys = ON;
       CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
-      CREATE TABLE bills (id TEXT PRIMARY KEY);
+      CREATE TABLE bills (
+        id TEXT PRIMARY KEY, whatsapp_message_id TEXT NOT NULL, whatsapp_group_id TEXT NOT NULL, whatsapp_sender_id TEXT NOT NULL,
+        attachment_index INTEGER NOT NULL, received_at TEXT NOT NULL, caption TEXT, original_filename TEXT, mime_type TEXT NOT NULL,
+        original_path TEXT NOT NULL, content_sha256 TEXT NOT NULL, status TEXT NOT NULL, drive_file_id TEXT, sheet_row_key TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, content_revision INTEGER NOT NULL DEFAULT 0,
+        review_revision INTEGER NOT NULL DEFAULT 0, manual_review_required INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (whatsapp_message_id, attachment_index)
+      );
       CREATE TABLE jobs (id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id));
       CREATE TABLE extractions (
         id TEXT PRIMARY KEY, bill_id TEXT NOT NULL UNIQUE REFERENCES bills(id), schema_version TEXT NOT NULL,
@@ -57,7 +66,9 @@ describe("migrations", () => {
       );`);
     const appliedAt = "2026-08-30T00:00:00.000Z";
     for (let version = 1; version <= 9; version += 1) legacy.query("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, appliedAt);
-    legacy.query("INSERT INTO bills (id) VALUES (?)").run("legacy-bill");
+    legacy.query(`INSERT INTO bills (id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, mime_type, original_path, content_sha256, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run("legacy-bill", "legacy-message", "legacy-group", "legacy-sender", 0, appliedAt, "image/png", "/originals/legacy.png", "a".repeat(64), "received", appliedAt, appliedAt);
     legacy.query("INSERT INTO jobs (id, bill_id) VALUES (?, ?)").run("legacy-job", "legacy-bill");
     legacy.query("INSERT INTO extractions (id, bill_id, schema_version, normalized_json, raw_provider_response, provider_model, prompt_schema_version, requested_at, completed_at, error_details, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run("legacy-extraction", "legacy-bill", "1", JSON.stringify({ schemaVersion: "1", vendorName: "Legacy" }), "legacy raw", "legacy-model", "1", appliedAt, appliedAt, null, appliedAt, appliedAt);
@@ -68,7 +79,7 @@ describe("migrations", () => {
     database = new BillDatabase(path);
     expect(database.getExtraction("legacy-bill")).toMatchObject({ normalized: { vendorName: "Legacy" }, selectedProvider: null, fallbackStatus: null });
     expect(database.sqlite.query<{ provider: string }, [string]>("SELECT provider FROM extraction_attempts WHERE id = ?").get("legacy-attempt")?.provider).toBe("mistral");
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(14);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(16);
   });
 
   test("upgrades historical WhatsApp identity, jobs, foreign keys, and projections without loss", () => {
@@ -103,9 +114,61 @@ describe("migrations", () => {
     legacy.close();
 
     database = new BillDatabase(path);
-    expect(database.getBill("legacy-whatsapp")).toMatchObject({ whatsappMessageId: "wamid.legacy", attachmentIndex: 2, status: "approved", driveFileId: "drive-legacy", sheetRowKey: "sheet-legacy", contentRevision: 7, reviewRevision: 3, source: "whatsapp", sourceIdentity: "legacy-whatsapp", extractionPolicy: "mistral_with_azure_fallback", classification: "unclassified", batchItemId: null });
+    expect(database.getBill("legacy-whatsapp")).toMatchObject({ sourceMessageId: "wamid.legacy", sourceChatId: "group@chat", sourceSenderId: "sender@chat", attachmentIndex: 2, status: "approved", driveFileId: "drive-legacy", sheetRowKey: "sheet-legacy", contentRevision: 7, reviewRevision: 3, source: "whatsapp", sourceIdentity: transportSourceIdentity("group@chat", "wamid.legacy", 2), extractionPolicy: "mistral_with_azure_fallback", classification: "unclassified", batchItemId: null });
     expect(database.getJob("legacy-job")).toMatchObject({ billId: "legacy-whatsapp", state: "succeeded" });
     expect(database.getProjectionMetadata("sheets", "legacy-whatsapp")).toMatchObject({ billId: "legacy-whatsapp", externalId: "sheet-legacy" });
+    const replay = database.createBillWithInitialJobs({ source: "whatsapp", sourceMessageId: "wamid.legacy", sourceChatId: "group@chat", sourceSenderId: "sender@chat", attachmentIndex: 2, receivedAt: appliedAt, mimeType: "application/pdf", originalPath: "/originals/legacy.pdf", contentSha256: "b".repeat(64) }, [{ type: "archive_to_drive", idempotencyKey: "archive:legacy" }]);
+    expect(replay).toMatchObject({ created: false, bill: { id: "legacy-whatsapp" } });
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
+    expect(database.sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  test("restores foreign-key enforcement and rolls back migration setup after a migration failure", () => {
+    database.close();
+    rmSync(path, { force: true });
+    const failed = new SqliteDatabase(path, { create: true, strict: true });
+    failed.exec("PRAGMA foreign_keys = ON; CREATE TABLE bills_rebuilt (id TEXT PRIMARY KEY);");
+    expect(() => applyMigrations(failed)).toThrow();
+    expect(failed.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()?.foreign_keys).toBe(1);
+    expect(failed.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get()).toBeNull();
+    failed.close();
+    rmSync(path, { force: true });
+    database = new BillDatabase(path);
+  });
+
+  test("upgrades deployed ZIP batches and their linked bills without breaking foreign keys", () => {
+    database.close();
+    rmSync(path, { force: true });
+    const legacy = new SqliteDatabase(path, { create: true, strict: true });
+    const appliedAt = "2026-08-30T00:00:00.000Z";
+    legacy.exec(`PRAGMA foreign_keys = ON;
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE admin_upload_batches (id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, original_filename TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE admin_upload_batch_items (id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES admin_upload_batches(id), item_index INTEGER NOT NULL, entry_path TEXT NOT NULL, state TEXT NOT NULL, error_code TEXT, bill_id TEXT REFERENCES bills(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (batch_id, item_index));
+      CREATE TABLE bills (
+        id TEXT PRIMARY KEY, whatsapp_message_id TEXT NOT NULL, whatsapp_group_id TEXT NOT NULL, whatsapp_sender_id TEXT NOT NULL, attachment_index INTEGER NOT NULL,
+        received_at TEXT NOT NULL, caption TEXT, original_filename TEXT, mime_type TEXT NOT NULL, original_path TEXT NOT NULL, content_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL, drive_file_id TEXT, sheet_row_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        content_revision INTEGER NOT NULL DEFAULT 0, review_revision INTEGER NOT NULL DEFAULT 0, manual_review_required INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL, source_identity TEXT, extraction_policy TEXT NOT NULL, classification TEXT NOT NULL, batch_item_id TEXT REFERENCES admin_upload_batch_items(id),
+        UNIQUE (whatsapp_message_id, attachment_index)
+      );`);
+    for (let version = 1; version <= 14; version += 1) legacy.query("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, appliedAt);
+    legacy.query("INSERT INTO admin_upload_batches (id, idempotency_key, original_filename, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run("zip-batch", "admin-zip:legacy", "legacy.zip", "processing", appliedAt, appliedAt);
+    legacy.query("INSERT INTO admin_upload_batch_items (id, batch_id, item_index, entry_path, state, error_code, bill_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run("zip-item", "zip-batch", 0, "nested/receipt.pdf", "processing", null, null, appliedAt, appliedAt);
+    legacy.query(`INSERT INTO bills (id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, mime_type, original_path, content_sha256, status, created_at, updated_at, source, source_identity, extraction_policy, classification, batch_item_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run("zip-bill", "admin-upload:zip-batch:0", "admin-upload", "admin-upload", 0, appliedAt, "application/pdf", "/originals/receipt.pdf", "c".repeat(64), "received", appliedAt, appliedAt, "admin_upload", "admin-upload:zip-batch:0", "azure_only", "unclassified", "zip-item");
+    legacy.query("UPDATE admin_upload_batch_items SET bill_id = ? WHERE id = ?").run("zip-bill", "zip-item");
+    legacy.close();
+
+    database = new BillDatabase(path);
+    expect(database.getBill("zip-bill")).toMatchObject({ source: "admin_upload", sourceMessageId: "admin-upload:zip-batch:0", sourceChatId: "admin-upload", sourceSenderId: "admin-upload", batchItemId: "zip-item", extractionPolicy: "azure_only" });
+    const batchStatus = database.getAdminUploadBatchStatus("zip-batch");
+    expect(batchStatus?.batch).toMatchObject({ originalFilename: "legacy.zip", state: "processing" });
+    expect(batchStatus?.items).toContainEqual(expect.objectContaining({ billId: "zip-bill", entryPath: "nested/receipt.pdf" }));
+    expect(database.sqlite.query<{ id: string }, []>("SELECT id FROM admin_upload_batch_items WHERE bill_id = 'zip-bill'").get()?.id).toBe("zip-item");
+    expect(database.sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 });
 
@@ -259,6 +322,32 @@ test("operator inspection and explicit replay expose only eligible failed jobs",
 });
 
 describe("canonical bill and jobs", () => {
+  test("uses source-scoped, collision-safe identity and permits equal message IDs across chats and transports", () => {
+    const base = { sourceMessageId: "42", sourceSenderId: "sender", attachmentIndex: 0, receivedAt: "2026-08-27T00:00:00.000Z", mimeType: "image/png", originalPath: "/durable/source.png", contentSha256: "d".repeat(64) };
+    const whatsapp = database.createBillWithInitialJobs({ ...base, source: "whatsapp", sourceChatId: "chat-a", sourceIdentity: "chat-a:42:0" }, [{ type: "extract", idempotencyKey: "source-wa" }]);
+    const telegram = database.createBillWithInitialJobs({ ...base, source: "telegram", sourceChatId: "chat-a", sourceIdentity: "chat-a:42:0" }, [{ type: "extract", idempotencyKey: "source-tg" }]);
+    const otherChat = database.createBillWithInitialJobs({ ...base, source: "whatsapp", sourceChatId: "chat-b", sourceIdentity: "chat-b:42:0" }, [{ type: "extract", idempotencyKey: "source-other" }]);
+    expect([whatsapp.bill.id, telegram.bill.id, otherChat.bill.id]).toHaveLength(3);
+    expect(database.getBillBySourceIdentity("telegram", "chat-a:42:0")?.sourceMessageId).toBe("42");
+    expect(database.findBillsByIdentifier("chat-b").map((bill) => bill.id)).toEqual([otherChat.bill.id]);
+    expect(() => database.createBillWithInitialJobs({ ...base, source: "telegram", sourceChatId: "chat-a", sourceIdentity: "telegram-batch", batchItemId: "nope" }, [])).toThrow("Transport bill");
+
+    const ambiguousFirst = database.createBillWithInitialJobs({ ...base, source: "telegram", sourceChatId: "a:b", sourceMessageId: "c", attachmentIndex: 0 }, [{ type: "extract", idempotencyKey: "identity-ambiguous-first" }]);
+    const ambiguousSecond = database.createBillWithInitialJobs({ ...base, source: "telegram", sourceChatId: "a", sourceMessageId: "b:c", attachmentIndex: 0 }, [{ type: "extract", idempotencyKey: "identity-ambiguous-second" }]);
+    expect(ambiguousFirst.bill.id).not.toBe(ambiguousSecond.bill.id);
+    expect(ambiguousFirst.bill.sourceIdentity).not.toBe(ambiguousSecond.bill.sourceIdentity);
+  });
+
+  test("persists a singleton Telegram polling cursor", () => {
+    expect(database.getTelegramPollingCursor()).toBeNull();
+    database.setTelegramPollingCursor(42);
+    database.setTelegramPollingCursor(43);
+    expect(database.getTelegramPollingCursor()).toBe(43);
+    database.close();
+    database = new BillDatabase(path);
+    expect(database.getTelegramPollingCursor()).toBe(43);
+    expect(() => database.setTelegramPollingCursor(-1)).toThrow("non-negative");
+  });
   test("creates a bill and its initial jobs exactly once for a repeated provider event", () => {
     const first = database.createBillWithInitialJobs(input(), jobs());
     const repeated = database.createBillWithInitialJobs(input(), jobs());
@@ -384,7 +473,7 @@ describe("admin-upload source and classification persistence", () => {
     const repeated = database.createBillWithInitialJobs({ ...uploaded, whatsappMessageId: "changed-legacy-value" }, [{ type: "extract", idempotencyKey: `extract:${uploaded.sourceIdentity}` }]);
     expect(first.created).toBe(true); expect(repeated).toMatchObject({ created: false, bill: { id: first.bill.id, source: "admin_upload", sourceIdentity: uploaded.sourceIdentity, extractionPolicy: "azure_only", batchItemId: item.id } });
     expect(database.getAdminUploadBatchStatusCounts(batch.id)).toEqual({ total: 1, queued: 0, processing: 1, complete: 0, notInvoice: 0, rejected: 0, failed: 0 });
-    expect(() => database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "whatsapp-with-batch", batchItemId: item.id }, [{ type: "extract", idempotencyKey: "whatsapp-with-batch" }])).toThrow("WhatsApp");
+    expect(() => database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "whatsapp-with-batch", batchItemId: item.id }, [{ type: "extract", idempotencyKey: "whatsapp-with-batch" }])).toThrow("Transport bill");
     expect(() => database.createBillWithInitialJobs({ ...uploaded, whatsappMessageId: "admin-missing-item", attachmentIndex: 9, sourceIdentity: "other-upload", batchItemId: "missing-item" }, [{ type: "extract", idempotencyKey: "missing-upload-item" }])).toThrow("batch item");
   });
 

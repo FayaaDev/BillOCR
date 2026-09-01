@@ -15,7 +15,15 @@ test("production image ships both bundles and prepares named-volume mount points
 test("deployment resource and preprocessing worker contracts are static", () => {
   const root = join(import.meta.dir, ".."); const compose = readFileSync(join(root, "docker-compose.yml"), "utf8"); const worker = readFileSync(join(root, "src/image-preprocessing-worker.ts"), "utf8");
   expect(compose).toContain("mem_limit: 512m");
+  expect(compose).toContain("ORIGINALS_DIR: /data/originals");
+  expect(compose).not.toMatch(/telegram[^\n]*:\/data\//i);
   expect(worker).toContain('type Success = { ok: true; bytes: ArrayBuffer; mode: "sharp" | "opencv"; width: number; height: number };');
   expect(worker).toContain("workerScope.postMessage(response, [response.bytes])");
   expect(worker).toContain("workerScope.postMessage({ ok: false })");
+});
+
+test("environment sample documents both user OAuth credential paths", () => {
+  const environment = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
+  expect(environment).toContain("# GOOGLE_OAUTH_CLIENT_JSON=./secrets/google-oauth-client.json");
+  expect(environment).toContain("# GOOGLE_OAUTH_CREDENTIAL_JSON=./secrets/google-authorized-user.json");
 });

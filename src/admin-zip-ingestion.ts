@@ -8,7 +8,7 @@ import { canonicalAttachmentExtension, sniffSupportedDocumentMimeType } from "./
 import type { AdminUploadBatch, Bill } from "./contracts";
 import type { BillDatabase } from "./database";
 import type { Logger } from "./logger";
-import { persistOriginal, WhatsAppContentConflictError } from "./whatsapp-ingestion";
+import { AttachmentContentConflictError, persistOriginal } from "./durable-attachment-ingestion";
 
 export interface ZipIngestionLimits { maxCompressedBytes: number; maxExpandedBytes: number; maxEntryBytes: number; maxEntries: number; }
 export interface AdminZipUpload { sourceId: string; originalFilename: string; bytes: Uint8Array | AsyncIterable<Uint8Array>; }
@@ -212,11 +212,11 @@ export class AdminZipIngestionService {
     if (!extension) throw new Error("sniffed unsupported ZIP entry");
     const originalPath = join(this.options.originalsDir, `admin-${batch.id}-${itemIndex}-${contentSha256.slice(0, 16)}${extension}`);
     try { await persistOriginal(originalPath, bytes); }
-    catch (error) { if (error instanceof WhatsAppContentConflictError) throw new AdminZipContentConflictError("canonical ZIP original conflicts"); throw error; }
+    catch (error) { if (error instanceof AttachmentContentConflictError) throw new AdminZipContentConflictError("canonical ZIP original conflicts"); throw error; }
     await this.options.afterOriginalPublished?.();
     const sourceIdentity = `admin-zip:${batch.id}:${itemIndex}`;
     const result = this.options.database.createBillWithInitialJobs({
-      whatsappMessageId: sourceIdentity, whatsappGroupId: "admin-upload", whatsappSenderId: "admin-upload", attachmentIndex: 0,
+      sourceMessageId: sourceIdentity, sourceChatId: "admin-upload", sourceSenderId: "admin-upload", attachmentIndex: 0,
       receivedAt: batch.createdAt, originalFilename: null, mimeType, originalPath, contentSha256, source: "admin_upload", sourceIdentity,
       extractionPolicy: "azure_only", batchItemId: itemId,
     }, [

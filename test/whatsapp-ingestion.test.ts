@@ -39,7 +39,7 @@ describe("WhatsApp ingestion", () => {
     const result = await service.ingest(message([attachment("image", "image/jpeg", bytes, "receipt.jpg")], { caption: "lunch" }));
     const bill = result.bills[0]!;
     expect(result.bills).toHaveLength(1);
-    expect(bill).toMatchObject({ whatsappMessageId: "message-1", whatsappGroupId: "bill-group", whatsappSenderId: "sender-1", attachmentIndex: 0, caption: "lunch", originalFilename: "receipt.jpg", mimeType: "image/jpeg", contentSha256: "3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56" });
+    expect(bill).toMatchObject({ source: "whatsapp", sourceIdentity: '["bill-group","message-1",0]', sourceMessageId: "message-1", sourceChatId: "bill-group", sourceSenderId: "sender-1", attachmentIndex: 0, caption: "lunch", originalFilename: "receipt.jpg", mimeType: "image/jpeg", contentSha256: "3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56" });
     expect(readFileSync(bill.originalPath)).toEqual(Buffer.from(bytes));
     expect(database.countJobsForBill(bill.id)).toBe(2);
     expect(database.sqlite.query<{ idempotency_key: string }, [string]>("SELECT idempotency_key FROM jobs WHERE bill_id = ? AND type = 'extract'").get(bill.id)?.idempotency_key).toBe(`extract:${bill.id}:original`);
@@ -161,7 +161,7 @@ describe("WhatsApp ingestion", () => {
       if (interrupted) { interrupted = false; throw new Error("process interrupted"); }
     } });
     expect((await publishing.ingest(incoming)).bills).toEqual([]);
-    expect(database.getBillByWhatsAppAttachment("message-1", 0)).toBeNull();
+    expect(database.getBillBySourceIdentity("whatsapp", '["bill-group","message-1",0]')).toBeNull();
     const restarted = new WhatsAppIngestionService({ groupId: "bill-group", originalsDir, database, logger: silentLogger });
     const recovered = await restarted.reconcilePending();
     expect(recovered).toHaveLength(1);
@@ -174,14 +174,14 @@ describe("WhatsApp ingestion", () => {
     const created = (await service.ingest(message([attachment("image", "image/png", new Uint8Array([1, 2, 3]), "first.png")]))).bills[0]!;
     const warnings: Array<Record<string, unknown> | undefined> = [];
     const stagedBytes = new Uint8Array([4, 5, 6]);
-    const sourceKey = createHash("sha256").update("message-1").digest("hex").slice(0, 32);
+    const sourceKey = createHash("sha256").update('["bill-group","message-1",0]').digest("hex").slice(0, 32);
     const unit = join(originalsDir, ".staging", `${sourceKey}-0`);
     mkdirSync(unit, { recursive: true });
     writeFileSync(join(unit, "original"), stagedBytes);
-    writeFileSync(join(unit, "manifest.json"), JSON.stringify({ version: 1, id: "staged-conflict", whatsappMessageId: "message-1", whatsappGroupId: "bill-group", whatsappSenderId: "sender-1", attachmentIndex: 0, receivedAt: "2026-08-27T01:02:03.000Z", caption: null, originalFilename: "changed.png", mimeType: "image/png", originalPath: created.originalPath, contentSha256: createHash("sha256").update(stagedBytes).digest("hex") }));
+    writeFileSync(join(unit, "manifest.json"), JSON.stringify({ version: 1, id: "staged-conflict", source: "whatsapp", sourceIdentity: '["bill-group","message-1",0]', sourceMessageId: "message-1", sourceChatId: "bill-group", sourceSenderId: "sender-1", attachmentIndex: 0, receivedAt: "2026-08-27T01:02:03.000Z", caption: null, originalFilename: "changed.png", mimeType: "image/png", originalPath: created.originalPath, contentSha256: createHash("sha256").update(stagedBytes).digest("hex") }));
     const conflicting = new WhatsAppIngestionService({ groupId: "bill-group", originalsDir, database, logger: { ...silentLogger, warn: (_message, fields) => warnings.push(fields) } });
     expect(await conflicting.reconcilePending()).toEqual([]);
-    expect(database.getBillByWhatsAppAttachment("message-1", 0)).toMatchObject({ id: created.id, contentSha256: created.contentSha256 });
+    expect(database.getBillBySourceIdentity("whatsapp", '["bill-group","message-1",0]')).toMatchObject({ id: created.id, contentSha256: created.contentSha256 });
     expect(readFileSync(created.originalPath)).toEqual(Buffer.from([1, 2, 3]));
     expect(readdirSync(join(originalsDir, ".staging"))).toEqual([]);
     expect(warnings).toContainEqual(expect.objectContaining({ code: "whatsapp_attachment_content_conflict" }));
@@ -189,14 +189,14 @@ describe("WhatsApp ingestion", () => {
 
   test("never creates a bill over a pre-existing canonical original with different bytes", async () => {
     const originalsDir = join(directory, "originals");
-    const sourceKey = createHash("sha256").update("message-1").digest("hex").slice(0, 32);
+    const sourceKey = createHash("sha256").update('["bill-group","message-1",0]').digest("hex").slice(0, 32);
     const canonicalPath = join(originalsDir, `${sourceKey}-0.png`);
     mkdirSync(originalsDir, { recursive: true });
     writeFileSync(canonicalPath, new Uint8Array([71, 72, 73]));
     const warnings: Array<Record<string, unknown> | undefined> = [];
     const guarded = new WhatsAppIngestionService({ groupId: "bill-group", originalsDir, database, logger: { ...silentLogger, warn: (_message, fields) => warnings.push(fields) } });
     expect((await guarded.ingest(message([attachment("image", "image/png", new Uint8Array([81, 82, 83]))]))).bills).toEqual([]);
-    expect(database.getBillByWhatsAppAttachment("message-1", 0)).toBeNull();
+    expect(database.getBillBySourceIdentity("whatsapp", '["bill-group","message-1",0]')).toBeNull();
     expect(readFileSync(canonicalPath)).toEqual(Buffer.from([71, 72, 73]));
     expect(warnings).toContainEqual(expect.objectContaining({ code: "whatsapp_attachment_content_conflict" }));
   });

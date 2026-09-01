@@ -142,13 +142,50 @@ const migrations = [
       to_classification TEXT NOT NULL CHECK (to_classification IN ('unclassified','invoice','not_invoice')),
       actor TEXT NOT NULL, reason TEXT, content_revision INTEGER NOT NULL, review_revision INTEGER NOT NULL, created_at TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS bill_classification_events_bill_idx ON bill_classification_events(bill_id, created_at);`,
+     CREATE INDEX IF NOT EXISTS bill_classification_events_bill_idx ON bill_classification_events(bill_id, created_at);`,
+  /* Source identity extension. This rebuild removes the legacy global WhatsApp-message
+     uniqueness while retaining every existing bill ID for child FKs. */
+  `CREATE TABLE bills_rebuilt (
+     id TEXT PRIMARY KEY, source_message_id TEXT NOT NULL, source_chat_id TEXT NOT NULL,
+     source_sender_id TEXT NOT NULL, attachment_index INTEGER NOT NULL CHECK (attachment_index >= 0),
+     received_at TEXT NOT NULL, caption TEXT, original_filename TEXT, mime_type TEXT NOT NULL,
+     original_path TEXT NOT NULL, content_sha256 TEXT NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('received','extracting','needs_review','approved','failed')),
+     drive_file_id TEXT, sheet_row_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+     content_revision INTEGER NOT NULL DEFAULT 0, review_revision INTEGER NOT NULL DEFAULT 0,
+     manual_review_required INTEGER NOT NULL DEFAULT 0,
+     source TEXT NOT NULL CHECK (source IN ('whatsapp','telegram','admin_upload')),
+     source_identity TEXT NOT NULL,
+     extraction_policy TEXT NOT NULL CHECK (extraction_policy IN ('mistral_with_azure_fallback','azure_only')),
+     classification TEXT NOT NULL CHECK (classification IN ('unclassified','invoice','not_invoice')),
+     batch_item_id TEXT REFERENCES admin_upload_batch_items(id)
+   );
+   INSERT INTO bills_rebuilt (id, source_message_id, source_chat_id, source_sender_id, attachment_index, received_at, caption, original_filename, mime_type, original_path, content_sha256, status, drive_file_id, sheet_row_key, created_at, updated_at, content_revision, review_revision, manual_review_required, source, source_identity, extraction_policy, classification, batch_item_id)
+     SELECT id, whatsapp_message_id, whatsapp_group_id, whatsapp_sender_id, attachment_index, received_at, caption, original_filename, mime_type, original_path, content_sha256, status, drive_file_id, sheet_row_key, created_at, updated_at, content_revision, review_revision, manual_review_required, source, source_identity, extraction_policy, classification, batch_item_id FROM bills;
+   DROP TABLE bills;
+   ALTER TABLE bills_rebuilt RENAME TO bills;
+   CREATE UNIQUE INDEX bills_source_identity_idx ON bills(source, source_identity);
+   CREATE UNIQUE INDEX bills_batch_item_idx ON bills(batch_item_id) WHERE batch_item_id IS NOT NULL;
+   CREATE INDEX bills_source_message_idx ON bills(source, source_chat_id, source_message_id, attachment_index);
+   CREATE TABLE IF NOT EXISTS telegram_polling_cursor (
+     id INTEGER PRIMARY KEY CHECK (id = 1), next_update_id INTEGER NOT NULL CHECK (next_update_id >= 0), updated_at TEXT NOT NULL
+   );`,
+  /* Historical WhatsApp rows used a bill ID for source_identity. Runtime identity is the
+     canonical message tuple; normalize only WhatsApp and leave ZIP/admin identities intact. */
+  `UPDATE bills
+     SET source_identity = json_array(source_chat_id, source_message_id, attachment_index)
+   WHERE source = 'whatsapp'
+     AND source_identity <> json_array(source_chat_id, source_message_id, attachment_index);`,
 ];
 
 export function applyMigrations(db: Database): void {
-  db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-  db.exec("BEGIN IMMEDIATE");
+  // SQLite cannot remove an inline UNIQUE constraint without rebuilding its table. Disable FK
+  // enforcement before the transaction only for that rebuild, then verify integrity afterwards.
+  let transactionOpen = false;
   try {
+    db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = OFF;");
+    db.exec("BEGIN IMMEDIATE");
+    transactionOpen = true;
     db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
     const applied = db.query<{ version: number }, [number]>("SELECT version FROM schema_migrations WHERE version = ?");
     const record = db.query<unknown, [number, string]>("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?) ON CONFLICT(version) DO NOTHING");
@@ -158,9 +195,14 @@ export function applyMigrations(db: Database): void {
       db.exec(sql);
       record.run(version, new Date().toISOString());
     });
+    const violations = db.query<{ count: number }, []>("SELECT count(*) AS count FROM pragma_foreign_key_check").get()?.count ?? 0;
+    if (violations > 0) throw new Error("Migration produced foreign key violations");
     db.exec("COMMIT");
+    transactionOpen = false;
   } catch (error) {
-    db.exec("ROLLBACK");
+    if (transactionOpen) db.exec("ROLLBACK");
     throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
   }
 }

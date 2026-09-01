@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, join, resolve } from "node:path";
-import { loadConfig, type AppConfig } from "./config";
+import { canonicalOriginalsDir, loadConfig, type AppConfig } from "./config";
 import { BillDatabase } from "./database";
 import type { Bill } from "./contracts";
 import { readVerifiedOriginal } from "./originals";
@@ -70,7 +70,8 @@ export async function runOps(args: readonly string[], dependencies: OpsDependenc
     }
     if (command === "backup") {
       const destination = argv[0]; if (!destination || argv.length !== 1) usage();
-      const root = resolve(destination); const originalsRoot = resolve(dependencies.config.whatsapp.originalsDir);
+      mkdirSync(dependencies.config.originals.dir, { recursive: true });
+      const root = resolve(destination); const originalsRoot = canonicalOriginalsDir(dependencies.config.originals.dir);
       if (root === originalsRoot || root.startsWith(`${originalsRoot}/`) || root === resolve(dependencies.config.databasePath)) throw new Error("Backup destination must be outside originals and database paths");
       mkdirSync(root, { recursive: true });
       const stamp = (dependencies.now ?? (() => new Date()))().toISOString().replace(/[:.]/g, "-"); const target = join(root, `bill-ledger-${stamp}`); mkdirSync(target);
@@ -78,7 +79,7 @@ export async function runOps(args: readonly string[], dependencies: OpsDependenc
         // VACUUM INTO is SQLite's consistent WAL-safe online snapshot mechanism.
         const dbCopy = join(target, safeBackupName(dependencies.config.databasePath)); database.sqlite.exec(`VACUUM INTO '${dbCopy.replace(/'/g, "''")}'`);
         await dependencies.afterSnapshot?.(dbCopy);
-        const originals = join(target, "originals"); const copied = await copySnapshotOriginals(dbCopy, originalsRoot, originals, dependencies.config.whatsapp.maxAttachmentBytes, dependencies.beforeOpenOriginalChild);
+        const originals = join(target, "originals"); const copied = await copySnapshotOriginals(dbCopy, originalsRoot, originals, dependencies.config.originals.maxAttachmentBytes, dependencies.beforeOpenOriginalChild);
         const manifest = { version: 1, createdAt: (dependencies.now ?? (() => new Date()))().toISOString(), originalsRoot, database: { path: basename(dbCopy), sha256: sha256(dbCopy) }, originals: copied, restore: `Stop the service. Restore this database file and originals/ directory together into APP_DATABASE_PATH and the same absolute WHATSAPP_ORIGINALS_DIR (${originalsRoot}). Run bun run migrate, verify checksums, then start one service host.` };
         const manifestPath = join(target, "manifest.json"); writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
         write({ backup: target, database: dbCopy, originals, manifest: manifestPath, restore: manifest.restore }); return;

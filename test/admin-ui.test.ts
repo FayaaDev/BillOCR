@@ -8,7 +8,7 @@ import { BillDatabase } from "../src/database";
 import { handleAdminRequest, type AdminHttpCapabilities } from "../src/admin-ui";
 
 const config: AppConfig = {
-  host: "127.0.0.1", port: 0, dataDir: "/tmp", databasePath: "/tmp/test.sqlite", logLevel: "error",
+  host: "127.0.0.1", port: 0, dataDir: "/tmp", databasePath: "/tmp/test.sqlite", logLevel: "error", originals: { dir: "/tmp/originals", maxAttachmentBytes: 1 }, telegram: { enabled: false, botToken: null, groupIds: [], pollTimeoutSeconds: 30, requestTimeoutMs: 35_000, maxResponseBytes: 1 },
   whatsapp: { enabled: true, groupId: "group", authPath: "/private/auth", originalsDir: "/tmp/originals", maxAttachmentBytes: 1 }, mistral: { apiKey: "mistral-secret", model: "model", maxResponseBytes: 1, requestTimeoutMs: 1 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1, requestTimeoutMs: 1, pollIntervalMs: 0, fallbackConfidenceThreshold: .8 }, imagePreprocessing: { enabled: false, timeoutMs: 1 }, google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "admin", password: "password" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 1, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 1 },
 };
 const auth = { authorization: `Basic ${btoa("admin:password")}` };

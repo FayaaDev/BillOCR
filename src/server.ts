@@ -8,6 +8,7 @@ import type { JobHandlers } from "./contracts";
 import { BackgroundWorkerLoop, JobWorker } from "./worker";
 import { BaileysTransport, type WhatsAppAdminOperations, type WhatsAppTransport } from "./baileys-transport";
 import { WhatsAppIngestionService } from "./whatsapp-ingestion";
+import { TelegramBotApiIngestionService, type TelegramPollingService } from "./telegram-ingestion";
 import { createExtractJobHandler, MistralHttpOcrProvider, type MistralOcrProvider } from "./extraction";
 import { IMAGE_PREPROCESSING_VERSION, WorkerImagePreprocessor, type ImagePreprocessor } from "./image-preprocessing";
 import { createExtractionValidationCallback } from "./validation";
@@ -21,6 +22,8 @@ export interface ServiceDependencies {
   serve?: typeof Bun.serve;
   whatsappTransport?: WhatsAppTransport;
   enableWhatsApp?: boolean;
+  telegramTransport?: TelegramPollingService;
+  enableTelegram?: boolean;
   mistralProvider?: MistralOcrProvider;
   azureProvider?: AzureInvoiceProvider;
   imagePreprocessor?: ImagePreprocessor;
@@ -46,8 +49,9 @@ function isWhatsAppAdminOperations(transport: WhatsAppTransport): transport is W
 /** Starts HTTP and the non-blocking durable worker. Provider phases inject handlers here. */
 export function startService(config: AppConfig = loadConfig(), jobHandlers: JobHandlers = {}, dependencies: ServiceDependencies = {}): RunningService {
   mkdirSync(config.dataDir, { recursive: true });
-  mkdirSync(config.whatsapp.originalsDir, { recursive: true });
-  config = { ...config, whatsapp: { ...config.whatsapp, originalsDir: canonicalOriginalsDir(config.whatsapp.originalsDir) } };
+  mkdirSync(config.originals.dir, { recursive: true });
+  const originalsDir = canonicalOriginalsDir(config.originals.dir);
+  config = { ...config, originals: { ...config.originals, dir: originalsDir }, whatsapp: { ...config.whatsapp, originalsDir, maxAttachmentBytes: config.originals.maxAttachmentBytes } };
   const database = (dependencies.createDatabase ?? ((path: string) => new BillDatabase(path)))(config.databasePath);
   const logger = createLogger(config.logLevel);
   const validatePersistedExtraction = createExtractionValidationCallback(database, config.validation);
@@ -73,6 +77,12 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
   const transport = dependencies.whatsappTransport ?? new BaileysTransport(config.whatsapp.authPath, logger);
   const ingestion = new WhatsAppIngestionService({ groupId: config.whatsapp.groupId, originalsDir: config.whatsapp.originalsDir, maxAttachmentBytes: config.whatsapp.maxAttachmentBytes, extractionInputVersion: config.imagePreprocessing.enabled ? IMAGE_PREPROCESSING_VERSION : "original", database, logger });
   const whatsappEnabled = dependencies.enableWhatsApp ?? config.whatsapp.enabled;
+  const telegramEnabled = dependencies.enableTelegram ?? config.telegram.enabled;
+  const telegram = dependencies.telegramTransport ?? (telegramEnabled ? new TelegramBotApiIngestionService({
+    botToken: config.telegram.botToken!, groupIds: config.telegram.groupIds, pollTimeoutSeconds: config.telegram.pollTimeoutSeconds,
+    requestTimeoutMs: config.telegram.requestTimeoutMs, maxResponseBytes: config.telegram.maxResponseBytes,
+    originalsDir: config.originals.dir, maxAttachmentBytes: config.originals.maxAttachmentBytes, database, logger,
+  }) : undefined);
   const whatsappAdmin = whatsappEnabled && isWhatsAppAdminOperations(transport) ? transport : unavailableWhatsAppAdmin();
   const admin = {
     metrics: () => database.getDashboardMetrics(),
@@ -109,28 +119,43 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
     inFlightIngestion.add(task);
     await task;
   };
+  const startListener = (source: "whatsapp" | "telegram", start: () => void | Promise<void>): Promise<void> =>
+    Promise.resolve().then(start).catch(() => logger.error(`${source} listener failed to start`, { code: `${source}_listener_start_failed` }));
   const listenerStartup = (async () => {
     await admin.zip.reconcilePending();
-    if (!whatsappEnabled) return;
-    await ingestion.reconcilePending();
-    if (acceptingIngestion) await transport.start(receiveMessage);
-  })().catch(() => logger.error("ingestion listener failed to start", { code: "ingestion_listener_start_failed" }));
+    const reconciliations = await Promise.allSettled([
+      whatsappEnabled ? ingestion.reconcilePending() : Promise.resolve(),
+      telegramEnabled ? telegram!.reconcilePending() : Promise.resolve(),
+    ]);
+    for (const [index, result] of reconciliations.entries()) {
+      if (result.status === "rejected") logger.error(index === 0 ? "whatsapp staging reconciliation failed" : "telegram staging reconciliation failed", { code: index === 0 ? "whatsapp_staging_reconciliation_failed" : "telegram_staging_reconciliation_failed" });
+    }
+    await Promise.all([
+      whatsappEnabled && acceptingIngestion ? startListener("whatsapp", () => transport.start(receiveMessage)) : Promise.resolve(),
+      telegramEnabled && acceptingIngestion ? startListener("telegram", () => telegram!.start()) : Promise.resolve(),
+    ]);
+  })().catch(() => logger.error("ingestion staging reconciliation failed", { code: "ingestion_staging_reconciliation_failed" }));
 
-  let shuttingDown = false;
+  let shutdownPromise: Promise<void> | null = null;
   return {
     url: server.url.toString(),
     whatsappAdmin,
-    async shutdown(): Promise<void> {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      acceptingIngestion = false;
-      logger.info("service stopping");
-      if (whatsappEnabled) await transport.stop();
-      await listenerStartup;
-      await Promise.all(inFlightIngestion);
-      await workerLoop.stop();
-      server.stop();
-      database.close();
+    shutdown(): Promise<void> {
+      if (shutdownPromise) return shutdownPromise;
+      shutdownPromise = (async () => {
+        acceptingIngestion = false;
+        logger.info("service stopping");
+        await Promise.allSettled([
+          whatsappEnabled ? transport.stop() : Promise.resolve(),
+          telegramEnabled ? telegram!.stop() : Promise.resolve(),
+        ]);
+        await listenerStartup;
+        await Promise.all(inFlightIngestion);
+        await workerLoop.stop();
+        server.stop();
+        database.close();
+      })();
+      return shutdownPromise;
     },
   };
 }

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +16,7 @@ const basic = (user = "alice", password = "password") => ({ authorization: `Basi
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), "review-ui-"))); const originals = join(dir, "originals");
   assetDir = join(dir, "review-assets"); mkdirSync(originals); mkdirSync(assetDir); mkdirSync(join(assetDir, "files")); writeFileSync(join(originals, "bill.png"), "original"); writeFileSync(join(assetDir, "client.js"), 'window.reviewQueue = "/review/api/bills";'); writeFileSync(join(assetDir, "theme.js"), 'window.reviewTheme = true;'); writeFileSync(join(assetDir, "client.css"), ".review-page{}"); writeFileSync(join(assetDir, "files", "noto-sans-arabic-arabic-400-normal.woff2"), "font"); database = new BillDatabase(join(dir, "db.sqlite"));
-  config = { host: "127.0.0.1", port: 0, dataDir: dir, databasePath: join(dir, "db.sqlite"), logLevel: "error", whatsapp: { enabled: false, groupId: "g", authPath: dir, originalsDir: originals, maxAttachmentBytes: 1 }, mistral: { apiKey: "x", model: "x", maxResponseBytes: 1, requestTimeoutMs: 1 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1, requestTimeoutMs: 1, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 }, google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "alice", password: "password" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 1, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 1 } };
+  config = { host: "127.0.0.1", port: 0, dataDir: dir, databasePath: join(dir, "db.sqlite"), logLevel: "error", originals: { dir: originals, maxAttachmentBytes: 1 }, telegram: { enabled: false, botToken: null, groupIds: [], pollTimeoutSeconds: 30, requestTimeoutMs: 35_000, maxResponseBytes: 1 }, whatsapp: { enabled: false, groupId: "g", authPath: dir, originalsDir: originals, maxAttachmentBytes: 1 }, mistral: { apiKey: "x", model: "x", maxResponseBytes: 1, requestTimeoutMs: 1 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1, requestTimeoutMs: 1, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 }, google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "alice", password: "password" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 1, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 1 } };
   id = database.createBillWithInitialJobs({ id: "review-bill", whatsappMessageId: "m", whatsappGroupId: "g", whatsappSenderId: "s", attachmentIndex: 0, receivedAt: "2026-08-01T00:00:00.000Z", mimeType: "image/png", originalPath: join(originals, "bill.png"), contentSha256: "a".repeat(64) }, [{ type: "extract", idempotencyKey: "extract:review" }]).bill.id;
   database.sqlite.query("UPDATE bills SET status = 'needs_review', content_revision = 1 WHERE id = ?").run(id);
   database.sqlite.query("INSERT INTO extractions (id,bill_id,schema_version,normalized_json,raw_provider_response,provider_model,prompt_schema_version,requested_at,completed_at,created_at,updated_at) VALUES ('e',?,'1',?,'<unsafe>','model','schema','2026-08-01','2026-08-01','2026-08-01','2026-08-01')").run(id, JSON.stringify({ schemaVersion: "1", vendorName: "<img src=x>", invoiceNumber: null, invoiceDate: "2026-08-01", currency: "USD", subtotal: 9, vat: 1, total: 10, description: null, fields: { total: { confidence: .1, sourceText: "x" } } }));
@@ -66,6 +67,18 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   expect(stylesheet.status).toBe(200); expect(stylesheet.headers.get("content-type")).toContain("text/css"); expect(await stylesheet.text()).toContain(".review-page");
   expect((await handleReviewRequest(new Request("http://x/review/assets/other.js", { headers: basic() }), database, config)).status).toBe(404);
   expect((await handleReviewRequest(new Request("http://x/review/assets/client.css", { method: "POST", headers: basic() }), database, config)).status).toBe(405);
+});
+
+test("review lists and serves a verified Telegram original from shared storage", async () => {
+  const bytes = new TextEncoder().encode("telegram-original"); const path = join(config.originals.dir, "telegram.png"); writeFileSync(path, bytes);
+  const telegram = database.createBillWithInitialJobs({ id: "telegram-review", source: "telegram", sourceMessageId: "tg-message", sourceChatId: "tg-chat", sourceSenderId: "tg-sender", attachmentIndex: 0, receivedAt: "2026-08-03T00:00:00.000Z", mimeType: "image/png", originalPath: path, contentSha256: createHash("sha256").update(bytes).digest("hex") }, []).bill;
+  database.sqlite.query("UPDATE bills SET status = 'needs_review' WHERE id = ?").run(telegram.id);
+  config.originals.maxAttachmentBytes = bytes.byteLength;
+  config.whatsapp.originalsDir = join(dir, "whatsapp-only");
+  const queue = await handleReviewRequest(new Request("http://x/review/api/bills?source=telegram", { headers: basic() }), database, config);
+  expect(await queue.json()).toMatchObject([{ id: telegram.id, source: "telegram" }]);
+  const original = await handleReviewRequest(new Request(`http://x/review/bills/${telegram.id}/original`, { headers: basic() }), database, config);
+  expect(original.status).toBe(200); expect(new Uint8Array(await original.arrayBuffer())).toEqual(bytes);
 });
 
 test("completed-invoice CSV export is authenticated, uses reviewed data, and excludes incomplete records", async () => {
@@ -232,6 +245,7 @@ test("unified queue filters sources, batches, Complete, and NotInvoice", async (
   database.sqlite.query("UPDATE bills SET status = 'approved', classification = 'invoice' WHERE id = ?").run(id);
   const complete = await handleReviewRequest(new Request("http://x/review/api/bills?source=whatsapp&status=complete", { headers: basic() }), database, config);
   expect(await complete.json()).toMatchObject([{ id, displayStatus: "Complete" }]);
+  expect((await handleReviewRequest(new Request("http://x/review/api/bills?source=telegram", { headers: basic() }), database, config)).status).toBe(200);
   expect((await handleReviewRequest(new Request("http://x/review/api/bills?source=wrong", { headers: basic() }), database, config)).status).toBe(400);
 });
 

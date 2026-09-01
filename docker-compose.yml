@@ -14,7 +14,7 @@ services:
       APP_HOST: 0.0.0.0
       APP_DATA_DIR: /data
       APP_DATABASE_PATH: /data/bill-ledger.sqlite
-      WHATSAPP_ORIGINALS_DIR: /data/originals
+      ORIGINALS_DIR: /data/originals
       WHATSAPP_AUTH_PATH: /data/whatsapp-auth
       GOOGLE_SERVICE_ACCOUNT_JSON: /run/secrets/google-service-account.json
       GOOGLE_OAUTH_CREDENTIAL_JSON: /run/secrets/google-authorized-user.json

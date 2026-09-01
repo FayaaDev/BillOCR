@@ -11,7 +11,7 @@ const policy: RetryPolicy = { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 1, lea
 let directory: string; let database: BillDatabase; let config: AppConfig;
 beforeEach(() => {
   directory = realpathSync(mkdtempSync(join(tmpdir(), "bill-ops-"))); const originals = join(directory, "originals");
-  config = { host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "ledger.sqlite"), logLevel: "error", whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: originals, maxAttachmentBytes: 1024 }, mistral: { apiKey: "x", model: "x", maxResponseBytes: 1, requestTimeoutMs: 1 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1, requestTimeoutMs: 1, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 }, google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: policy };
+  config = { host: "127.0.0.1", port: 0, dataDir: directory, databasePath: join(directory, "ledger.sqlite"), logLevel: "error", originals: { dir: originals, maxAttachmentBytes: 1024 }, telegram: { enabled: false, botToken: null, groupIds: [], pollTimeoutSeconds: 30, requestTimeoutMs: 35_000, maxResponseBytes: 1 }, whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: originals, maxAttachmentBytes: 1024 }, mistral: { apiKey: "x", model: "x", maxResponseBytes: 1, requestTimeoutMs: 1 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1, requestTimeoutMs: 1, pollIntervalMs: 0, fallbackConfidenceThreshold: .80 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 }, google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: policy };
   database = new BillDatabase(config.databasePath);
 });
 afterEach(() => { try { database.close(); } catch {} rmSync(directory, { recursive: true, force: true }); });
@@ -27,6 +27,15 @@ test("ops parses status/errors and inspects every documented bill identifier", a
   }
   database = new BillDatabase(config.databasePath);
   await expect(invoke([])).rejects.toThrow("Usage:"); await expect(invoke(["inspect"])).rejects.toThrow("Usage:"); await expect(invoke(["unknown"])).rejects.toThrow("Usage:");
+});
+
+test("ops inspects Telegram source message IDs and identities", async () => {
+  const telegram = database.createBillWithInitialJobs({ id: "telegram-ops", source: "telegram", sourceMessageId: "tg-message", sourceChatId: "tg-chat", sourceSenderId: "tg-sender", sourceIdentity: '["tg-chat","tg-message",0]', attachmentIndex: 0, receivedAt: "2026-08-27T00:00:00.000Z", mimeType: "image/png", originalPath: join(config.originals.dir, "telegram.png"), contentSha256: "a".repeat(64) }, []).bill;
+  for (const identifier of ["tg-message", "tg-chat", "tg-sender", telegram.sourceIdentity]) {
+    database = new BillDatabase(config.databasePath);
+    const result = await invoke(["inspect", identifier]) as Array<{ bill: { id: string } }>;
+    expect(result[0]?.bill.id).toBe(telegram.id);
+  }
 });
 
 test("failed-jobs and retry report eligibility and preserve running/succeeded jobs", async () => {
@@ -53,6 +62,25 @@ test("backup writes a WAL-safe SQLite snapshot, originals checksums, and restore
   // The documented restore layout is the same absolute originals root encoded in the snapshot.
   rmSync(config.whatsapp.originalsDir, { recursive: true }); mkdirSync(config.whatsapp.originalsDir); copyFileSync(join(result.originals, "original.png"), item.originalPath);
   const snapshot = new BillDatabase(result.database); for (const canonical of snapshot.listCanonicalOriginals()) { expect(existsSync(canonical.originalPath)).toBe(true); expect(createHash("sha256").update(readFileSync(canonical.originalPath)).digest("hex")).toBe(canonical.contentSha256); } snapshot.close();
+});
+
+test("backup includes a verified Telegram original from shared storage", async () => {
+  const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 2]); mkdirSync(config.originals.dir); const path = join(config.originals.dir, "telegram.png"); writeFileSync(path, bytes);
+  const telegram = database.createBillWithInitialJobs({ id: "telegram-backup", source: "telegram", sourceMessageId: "tg-backup", sourceChatId: "tg-chat", sourceSenderId: "tg-sender", attachmentIndex: 0, receivedAt: "2026-08-27T00:00:00.000Z", mimeType: "image/png", originalPath: path, contentSha256: createHash("sha256").update(bytes).digest("hex") }, []).bill;
+  config.whatsapp.originalsDir = join(directory, "whatsapp-only");
+  const result = await invoke(["backup", join(directory, "backups")]) as { originals: string; manifest: string };
+  expect(readFileSync(join(result.originals, "telegram.png"))).toEqual(Buffer.from(bytes));
+  expect(JSON.parse(readFileSync(result.manifest, "utf8")).originals).toEqual([expect.objectContaining({ billIds: [telegram.id], sourceCanonicalPath: path })]);
+});
+
+test("backup canonicalizes a symlinked ORIGINALS_DIR before verifying canonical bill paths", async () => {
+  const canonical = join(directory, "canonical-originals"); const alias = join(directory, "originals-link"); mkdirSync(canonical); symlinkSync(canonical, alias);
+  const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 3]); const path = join(canonical, "telegram.png"); writeFileSync(path, bytes);
+  config.originals.dir = alias; config.whatsapp.originalsDir = alias;
+  const bill = database.createBillWithInitialJobs({ id: "symlink-backup", source: "telegram", sourceMessageId: "symlink-message", sourceChatId: "tg-chat", sourceSenderId: "tg-sender", attachmentIndex: 0, receivedAt: "2026-09-01T00:00:00.000Z", mimeType: "image/png", originalPath: path, contentSha256: createHash("sha256").update(bytes).digest("hex") }, []).bill;
+  const result = await invoke(["backup", join(directory, "backups")]) as { originals: string; manifest: string };
+  expect(readFileSync(join(result.originals, "telegram.png"))).toEqual(Buffer.from(bytes));
+  expect(JSON.parse(readFileSync(result.manifest, "utf8"))).toMatchObject({ originalsRoot: canonical, originals: [expect.objectContaining({ billIds: [bill.id], sourceCanonicalPath: path })] });
 });
 
 test("backup rejects a symlinked original without reading it or leaving a usable archive", async () => {

@@ -60,7 +60,7 @@ test("public ingest, worker, SQLite, and mocked providers archive a reviewable b
   let requests = 0; const provider: MistralOcrProvider = { extract: async (input) => { requests += 1; expect(input.bytes).toEqual(bytes); return { annotation: valid, rawResponse: JSON.stringify({ document_annotation: valid }), model: "mistral-mock" }; } };
   const drive = new MemoryDrive(); const sheets = new MemorySheets(); await drain(worker(provider, drive, sheets));
   const stored = database.getBill(bill.id)!; const extraction = database.getExtraction(bill.id)!;
-  expect(stored).toMatchObject({ id: bill.id, whatsappMessageId: "wa-e2e-1", status: "needs_review", driveFileId: "drive-3", sheetRowKey: null });
+  expect(stored).toMatchObject({ id: bill.id, sourceMessageId: "wa-e2e-1", status: "needs_review", driveFileId: "drive-3", sheetRowKey: null });
   expect(extraction).toMatchObject({ providerModel: "mistral-mock", normalized: expect.objectContaining({ fields: expect.objectContaining({ total: { confidence: null, sourceText: "11.00" } }) }), rawProviderResponse: expect.stringContaining("Fixture Store") });
   expect(drive.bytes.get(stored.driveFileId!)).toEqual(bytes); expect(createHash("sha256").update(bytes).digest("hex")).toBe(stored.contentSha256);
   expect([...sheets.rows.values()].filter((row) => row[13] === bill.id)).toHaveLength(0); expect(requests).toBe(1);
