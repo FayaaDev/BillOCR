@@ -438,15 +438,16 @@ export class BillDatabase {
 
   getEffectiveExtraction(billId: string): ExtractedBill | null { return this.getEffectiveBillData(billId)?.extraction ?? this.getExtraction(billId)?.normalized ?? null; }
 
-  /** Approved admin-upload invoices whose batch entry reached the terminal complete state. */
+  /** Approved invoices; admin uploads must also have a terminal complete batch entry. */
   listCompletedInvoiceExports(): CompletedInvoiceExportRecord[] {
     return this.sqlite.query<{ id: string; received_at: string; source_sender_id: string; normalized_json: string }, []>(`SELECT b.id, b.received_at, b.source_sender_id,
       COALESCE(effective.normalized_json, extraction.normalized_json) AS normalized_json
       FROM bills b
-      JOIN admin_upload_batch_items item ON item.id = b.batch_item_id AND item.state = 'complete'
+      LEFT JOIN admin_upload_batch_items item ON item.id = b.batch_item_id
       LEFT JOIN effective_bill_data effective ON effective.bill_id = b.id
       LEFT JOIN extractions extraction ON extraction.bill_id = b.id
       WHERE b.status = 'approved' AND b.classification = 'invoice'
+        AND (b.source != 'admin_upload' OR item.state = 'complete')
         AND COALESCE(effective.normalized_json, extraction.normalized_json) IS NOT NULL
       ORDER BY b.received_at, b.id`).all().map((row) => ({ id: row.id, receivedAt: row.received_at, senderId: row.source_sender_id, extraction: JSON.parse(row.normalized_json) as ExtractedBill }));
   }

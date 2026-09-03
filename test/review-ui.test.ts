@@ -131,6 +131,9 @@ test("completed-invoice CSV export is authenticated, uses reviewed data, and exc
   };
   const complete = create(0, "complete");
   database.sqlite.query("INSERT INTO effective_bill_data (bill_id,normalized_json,revision,updated_at) VALUES (?, ?, 1, 'now')").run(complete.id, JSON.stringify({ schemaVersion: "1", vendorName: "=Reviewed, Inc.", invoiceNumber: "\"INV\"\n1", invoiceDate: "2026-08-03", currency: "USD", subtotal: 9, vat: 1, total: 10, description: "@reviewed", fields: {} }));
+  const telegram = database.createBillWithInitialJobs({ id: "csv-telegram", source: "telegram", sourceMessageId: "csv-telegram-message", sourceChatId: "csv-telegram-chat", sourceSenderId: "csv-telegram-sender", attachmentIndex: 0, receivedAt: "2026-08-04T00:00:00.000Z", mimeType: "image/png", originalPath: join(dir, "originals", "telegram.png"), contentSha256: "c".repeat(64), classification: "invoice" }, []).bill;
+  database.sqlite.query("UPDATE bills SET status = 'approved' WHERE id = ?").run(telegram.id);
+  database.sqlite.query("INSERT INTO extractions (id,bill_id,schema_version,normalized_json,created_at,updated_at) VALUES ('csv-telegram-extraction',?, '1', ?, 'now', 'now')").run(telegram.id, JSON.stringify({ schemaVersion: "1", vendorName: "Telegram vendor", invoiceNumber: "TG-1", invoiceDate: "2026-08-04", currency: "SAR", subtotal: 18, vat: 2, total: 20, description: "telegram", fields: {} }));
   create(1, "not_invoice");
   create(2, "failed");
   create(3, "complete", "failed");
@@ -140,7 +143,7 @@ test("completed-invoice CSV export is authenticated, uses reviewed data, and exc
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toBe("text/csv; charset=utf-8");
   expect(response.headers.get("content-disposition")).toBe('attachment; filename="completed-invoices.csv"');
-  expect(await response.text()).toBe("\uFEFFBill ID,Received date,Vendor,Invoice number,Invoice date,Subtotal,VAT,Total,Currency,Description,Sender\r\ncsv-0,2026-08-02,\"'=Reviewed, Inc.\",\"\"\"INV\"\"\n1\",2026-08-03,9,1,10,USD,'@reviewed,csv-sender\r\n");
+  expect(await response.text()).toBe("\uFEFFBill ID,Received date,Vendor,Invoice number,Invoice date,Subtotal,VAT,Total,Currency,Description,Sender\r\ncsv-0,2026-08-02,\"'=Reviewed, Inc.\",\"\"\"INV\"\"\n1\",2026-08-03,9,1,10,USD,'@reviewed,csv-sender\r\ncsv-telegram,2026-08-04,Telegram vendor,TG-1,2026-08-04,18,2,20,SAR,telegram,csv-telegram-sender\r\n");
   const post = await handleReviewRequest(new Request("http://x/review/export.csv", { method: "POST", headers: basic() }), database, config);
   expect(post.status).toBe(405); expect(post.headers.get("allow")).toBe("GET");
 });
