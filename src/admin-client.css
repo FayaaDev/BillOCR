@@ -10,6 +10,7 @@
 .admin-icon-button { display: grid; place-items: center; padding: .5rem; }
 .admin-icon-button svg { width: 1.1rem; height: 1.1rem; }
 .admin-tabs { display: flex; gap: .25rem; margin-top: 1rem; }.admin-tab { border: 1px solid var(--border); border-radius: var(--radius-lg); color: var(--muted-foreground); font-size: .875rem; font-weight: 700; padding: .45rem .75rem; text-decoration: none; }.admin-tab[aria-current="page"] { background: var(--secondary); color: var(--foreground); }
+.admin-channel-tabs { display: flex; flex-wrap: wrap; gap: .25rem; }.admin-channel-tabs button { border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--background); color: var(--muted-foreground); cursor: pointer; font: inherit; font-size: .875rem; font-weight: 700; padding: .45rem .75rem; }.admin-channel-tabs button[aria-selected="true"] { background: var(--secondary); color: var(--foreground); }
 .admin-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
 .admin-card { border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--card); color: var(--card-foreground); padding: 1.25rem; }
 .admin-metrics .admin-card p { margin: 0; font-size: .875rem; }

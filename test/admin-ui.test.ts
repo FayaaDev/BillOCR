@@ -19,6 +19,7 @@ test("admin routes require the review Basic authentication and are never cached"
   expect(shell.status).toBe(200); expect(shell.headers.get("cache-control")).toBe("no-store");
   const html = await shell.text();
   expect(html).toContain('<html lang="ar" dir="rtl">');
+  expect(html).toContain('<title>ماسح الفواتير</title>');
   expect(html).toContain('src="/admin/assets/client.js"');
   expect(html).not.toContain(config.mistral.apiKey);
   expect(html).not.toContain(config.whatsapp.authPath);
@@ -41,7 +42,11 @@ test("admin dashboard pairing actions are explicit, state-gated, and CSRF-protec
   expect(await (await handleAdminRequest(new Request("http://x/admin/api/metrics", { headers: auth }), config, api)).json()).toMatchObject({ receivedBills: 1 });
   expect(await (await handleAdminRequest(new Request("http://x/admin/api/whatsapp/status", { headers: auth }), config, api)).json()).toEqual({ state: "connected", canPair: true });
   expect(await (await handleAdminRequest(new Request("http://x/admin/api/whatsapp/groups", { headers: auth }), config, api)).json()).toEqual([{ id: "group", name: "Bills" }]);
-  expect(await (await handleAdminRequest(new Request("http://x/admin/api/overview", { headers: auth }), config, api)).json()).toMatchObject({ metrics: { received: 1, approved: 0, failed: 0, retryableJobs: 0, permanentFailureJobs: 0 }, whatsapp: { state: "connected", configuredGroupId: "group", groups: [{ id: "group", name: "Bills" }] } });
+  config.telegram.enabled = true; config.telegram.groupIds = ["-100123"];
+  const overview = await (await handleAdminRequest(new Request("http://x/admin/api/overview", { headers: auth }), config, api)).json() as Record<string, unknown>;
+  expect(overview).toMatchObject({ metrics: { received: 1, approved: 0, failed: 0, retryableJobs: 0, permanentFailureJobs: 0 }, whatsapp: { state: "connected", configuredGroupId: "group", groups: [{ id: "group", name: "Bills" }] }, telegram: { enabled: true, groupIds: ["-100123"] } });
+  expect(JSON.stringify(overview)).not.toContain("botToken");
+  config.telegram.enabled = false; config.telegram.groupIds = [];
   expect((await handleAdminRequest(new Request("http://x/admin/whatsapp/pairing/start", { method: "POST", headers: { ...auth, "content-type": "application/x-www-form-urlencoded" }, body: "csrf=nope" }), config, api)).status).toBe(400);
   const shell = await handleAdminRequest(new Request("http://x/admin", { headers: auth }), config, api);
   const csrf = /data-csrf="([^"]+)"/.exec(await shell.text())?.[1]; if (!csrf) throw new Error("missing CSRF token");

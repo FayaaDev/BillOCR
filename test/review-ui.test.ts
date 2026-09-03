@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BillDatabase } from "../src/database";
@@ -37,7 +37,7 @@ test("review detail renders an accessible image-original preview while PDFs reta
   expect(html).toContain('<html lang="ar" dir="rtl">');
   expect(html).toContain('src="/review/assets/theme.js"');
   expect(html).toContain('<main class="review-page review-detail">'); expect(html).toContain('class="queue-back" href="/review"'); expect(html).toContain('class="status-badge">تحتاج إلى مراجعة</span>');
-   expect(html).toContain('class="original-actions"'); expect(html).toContain('id="original-preview-trigger" href="/review/bills/review-bill/original"'); expect(html).toContain('<dialog id="original-preview-dialog" aria-labelledby="original-preview-title">'); expect(html).toContain('id="original-preview-close"'); expect(html).toContain('إغلاق عرض الأصل'); expect(html).toContain('id="original-preview-image"'); expect(html).toContain('src="/review/assets/client.js" defer'); expect(html).toContain('href="/review/bills/review-bill/original?download=1"'); expect(html).not.toContain('بيانات النموذج الأصلية'); expect(html).not.toContain('>Evidence</h2>'); expect(html).not.toContain('Immutable extraction data and review history.'); expect(html).not.toContain('Immutable model output'); expect(html).not.toContain('Confidence'); expect(html).not.toContain('Validation issues'); expect(html).not.toContain('Provenance'); expect(html).not.toContain('Audit events');
+   expect(html).toContain('class="review-tabs" aria-label="التنقل الإداري"'); expect(html).toContain('href="/admin">لوحة الإدارة</a>'); expect(html).toContain('href="/review" aria-current="page">مراجعة الفواتير</a>'); expect(html).toContain('class="original-actions"'); expect(html).toContain('id="original-preview-trigger" href="/review/bills/review-bill/original"'); expect(html).toContain('<dialog id="original-preview-dialog" aria-labelledby="original-preview-title">'); expect(html).toContain('id="original-preview-close"'); expect(html).toContain('إغلاق عرض الأصل'); expect(html).toContain('id="original-preview-image"'); expect(html).toContain('src="/review/assets/client.js" defer'); expect(html).toContain('href="/review/bills/review-bill/original?download=1"'); expect(html).not.toContain('بيانات النموذج الأصلية'); expect(html).not.toContain('>Evidence</h2>'); expect(html).not.toContain('Immutable extraction data and review history.'); expect(html).not.toContain('Immutable model output'); expect(html).not.toContain('Confidence'); expect(html).not.toContain('Validation issues'); expect(html).not.toContain('Provenance'); expect(html).not.toContain('Audit events');
   database.sqlite.query("UPDATE bills SET mime_type = 'application/pdf' WHERE id = ?").run(id);
   const pdf = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
   const pdfHtml = await pdf.text();
@@ -50,9 +50,11 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   expect((await handleReviewRequest(new Request("http://x/review/assets/client.js"), database, config)).status).toBe(401);
   const shell = await handleReviewRequest(new Request("http://x/review", { headers: basic() }), database, config);
   const html = await shell.text();
-  expect(html).toContain('<html lang="ar" dir="rtl">'); expect(html).toContain('<title>قائمة المراجعة</title>');
+  expect(html).toContain('<html lang="ar" dir="rtl">'); expect(html).toContain('<title>ماسح الفواتير</title>');
   expect(shell.headers.get("content-security-policy")).toContain("script-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("style-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("connect-src 'self'");
-  expect(html).toContain('<a class="button-link" href="/review/export.csv">تصدير CSV</a>'); expect(html).toContain('<div id="root"></div>'); expect(html).toContain('src="/review/assets/theme.js"'); expect(html).toContain('src="/review/assets/client.js"'); expect(html).toContain('href="/review/assets/client.css"'); expect(html).not.toContain("review-bill"); expect(html).not.toContain("<unsafe>");
+  expect(html).not.toContain('href="/review/export.csv"'); expect(html).toMatch(/<div id="root" data-csrf="[^"]+"><\/div>/); expect(html).toContain('<div id="review-actions"></div>'); expect(html).toContain('src="/review/assets/theme.js"'); expect(html).toContain('src="/review/assets/client.js"'); expect(html).toContain('href="/review/assets/client.css"'); expect(html).not.toContain("review-bill"); expect(html).not.toContain("<unsafe>");
+  const clientSource = readFileSync(join(import.meta.dir, "..", "src", "review-client.tsx"), "utf8");
+  expect(clientSource).toContain('href="/admin"'); expect(clientSource).toContain('aria-current="page"'); expect(clientSource).toContain('<Button variant="outline" render={<a href="/review/export.csv" />}'); expect(clientSource).toContain('<Button variant="destructive"'); expect(clientSource).toContain('"x-csrf-token": csrf');
   const api = await handleReviewRequest(new Request("http://x/review/api/bills", { headers: basic() }), database, config);
    expect(api.headers.get("content-type")).toContain("application/json"); expect(api.headers.get("cache-control")).toBe("no-store"); expect(await api.json()).toEqual([{ id, status: "needs_review", displayStatus: "needs_review", source: "whatsapp", batchId: null, originalFilename: null, receivedAt: "2026-08-01T00:00:00.000Z", updatedAt: expect.any(String) }]);
   const apiPost = await handleReviewRequest(new Request("http://x/review/api/bills", { method: "POST", headers: basic() }), database, config);
@@ -67,6 +69,42 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   expect(stylesheet.status).toBe(200); expect(stylesheet.headers.get("content-type")).toContain("text/css"); expect(await stylesheet.text()).toContain(".review-page");
   expect((await handleReviewRequest(new Request("http://x/review/assets/other.js", { headers: basic() }), database, config)).status).toBe(404);
   expect((await handleReviewRequest(new Request("http://x/review/assets/client.css", { method: "POST", headers: basic() }), database, config)).status).toBe(405);
+});
+
+test("review clear endpoint is authenticated, CSRF-protected, and leaves originals and non-bill state intact", async () => {
+  const batch = database.createAdminUploadBatch({ idempotencyKey: "clear-batch", originalFilename: "bills.zip" }).batch;
+  const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 0, entryPath: "bill.pdf" }).item;
+  const uploaded = database.createBillWithInitialJobs({ id: "clear-upload", whatsappMessageId: "clear-upload", whatsappGroupId: "admin-upload", whatsappSenderId: "admin-upload", attachmentIndex: 0, receivedAt: "2026-08-02T00:00:00.000Z", mimeType: "application/pdf", originalPath: join(config.originals.dir, "bill.png"), contentSha256: "b".repeat(64), source: "admin_upload", sourceIdentity: "clear-upload", extractionPolicy: "azure_only", batchItemId: item.id }, [{ type: "extract", idempotencyKey: "extract:clear-upload" }]).bill;
+  database.setTelegramPollingCursor(99);
+  database.reserveDriveId({ key: "folder", kind: "folder", parentId: null, logicalPath: "folder", generatedId: "folder-id" });
+  database.reserveDriveId({ key: "bill", kind: "file", parentId: null, logicalPath: "bill", generatedId: "bill-id", billId: uploaded.id });
+  expect((await handleReviewRequest(new Request("http://x/review/api/bills/clear", { headers: basic() }), database, config)).status).toBe(405);
+  expect((await handleReviewRequest(new Request("http://x/review/api/bills/clear", { method: "POST", headers: basic() }), database, config)).status).toBe(400);
+  const shell = await handleReviewRequest(new Request("http://x/review", { headers: basic() }), database, config);
+  const csrf = /data-csrf="([^"]+)"/.exec(await shell.text())?.[1]; if (!csrf) throw new Error("missing CSRF");
+  const now = new Date().toISOString(); const jobId = database.listJobsForBill(id)[0]!.id;
+  database.sqlite.query("INSERT INTO extraction_attempts (id,bill_id,job_id,job_attempt,provider,requested_at,completed_at,outcome,created_at) VALUES ('clear-attempt',?,?,1,'azure',?,'now','succeeded',?)").run(id, jobId, now, now);
+  database.sqlite.query("INSERT INTO extraction_invocations (id,bill_id,job_id,job_attempt,provider,idempotency_key,requested_at,completed_at,outcome,created_at,updated_at) VALUES ('clear-invocation',?,?,1,'azure','clear-invocation',?,'now','succeeded',?,?)").run(id, jobId, now, now, now);
+  database.sqlite.query("INSERT INTO azure_extraction_operations (id,invocation_id,bill_id,job_id,operation_location,state,completed_at,created_at,updated_at) VALUES ('clear-operation','clear-invocation',?,?,'https://operation.example','succeeded','now',?,?)").run(id, jobId, now, now);
+  database.sqlite.query("UPDATE extractions SET selected_invocation_id = 'clear-invocation' WHERE bill_id = ?").run(id);
+  database.sqlite.query("INSERT INTO validation_issues (id,bill_id,field,code,message,severity,created_at) VALUES ('clear-issue',?,'total','missing_total','missing','blocking',?)").run(id, now);
+  database.sqlite.query("INSERT INTO review_events (id,bill_id,reviewer_id,action,created_at) VALUES ('clear-review',?,'alice','approve',?)").run(id, now);
+  database.sqlite.query("INSERT INTO bill_classification_events (id,bill_id,from_classification,to_classification,actor,content_revision,review_revision,created_at) VALUES ('clear-classification',?,'unclassified','invoice','alice',1,1,?)").run(id, now);
+  database.sqlite.query("INSERT INTO provider_projection_metadata (id,bill_id,provider,projection_key,created_at,updated_at) VALUES ('clear-projection',?,'drive','clear-projection',?,?)").run(id, now, now);
+  database.sqlite.query("INSERT INTO effective_bill_data (bill_id,normalized_json,revision,updated_at) VALUES (?, '{}', 1, ?)").run(id, now);
+  database.sqlite.query("UPDATE jobs SET state = 'running' WHERE id = ?").run(jobId);
+  const busy = await handleReviewRequest(new Request("http://x/review/api/bills/clear", { method: "POST", headers: { ...basic(), "x-csrf-token": csrf } }), database, config);
+  expect(busy.status).toBe(409); expect(await busy.text()).toBe("تعذر حذف الفواتير أثناء معالجة نشطة. حاول مرة أخرى بعد اكتمال المعالجة."); expect(database.getBill(id)).not.toBeNull(); expect(database.getBill(uploaded.id)).not.toBeNull(); expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM extraction_invocations").get()?.count).toBe(1);
+  database.sqlite.query("UPDATE jobs SET state = 'pending' WHERE id = ?").run(jobId);
+  const cleared = await handleReviewRequest(new Request("http://x/review/api/bills/clear", { method: "POST", headers: { ...basic(), "x-csrf-token": csrf } }), database, config);
+  expect(await cleared.json()).toEqual({ deleted: 2 });
+  expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(0);
+  expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM admin_upload_batches").get()?.count).toBe(0);
+  for (const table of ["admin_upload_batch_items", "jobs", "job_transition_history", "extractions", "extraction_attempts", "extraction_invocations", "azure_extraction_operations", "validation_issues", "review_events", "bill_classification_events", "provider_projection_metadata", "effective_bill_data"]) expect(database.sqlite.query<{ count: number }, []>(`SELECT count(*) AS count FROM ${table}`).get()?.count).toBe(0);
+  expect(database.sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
+  expect(database.getTelegramPollingCursor()).toBe(99); expect(database.getDriveReservation("folder")).not.toBeNull(); expect(database.getDriveReservation("bill")).toBeNull(); expect(readFileSync(join(config.originals.dir, "bill.png"))).toEqual(Buffer.from("original"));
+  const second = await handleReviewRequest(new Request("http://x/review/api/bills/clear", { method: "POST", headers: { ...basic(), "x-csrf-token": csrf } }), database, config);
+  expect(await second.json()).toEqual({ deleted: 0 });
 });
 
 test("review lists and serves a verified Telegram original from shared storage", async () => {

@@ -163,6 +163,34 @@ export class BillDatabase {
     return row ? toBill(row) : null;
   }
 
+  /** Deletes canonical bill data and ZIP-upload tracking, without touching originals or non-bill state. */
+  clearAllBills(): { deleted: number } | { busy: true } {
+    return this.sqlite.transaction(() => {
+      if (this.sqlite.query<{ value: number }, []>("SELECT 1 AS value FROM jobs WHERE state = 'running' LIMIT 1").get()) return { busy: true as const };
+      const deleted = this.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count ?? 0;
+      // These two nullable links form the bills <-> batch-items cycle.
+      this.sqlite.query("UPDATE bills SET batch_item_id = NULL WHERE batch_item_id IS NOT NULL").run();
+      this.sqlite.query("UPDATE admin_upload_batch_items SET bill_id = NULL WHERE bill_id IS NOT NULL").run();
+      this.sqlite.query("UPDATE extractions SET selected_invocation_id = NULL WHERE selected_invocation_id IS NOT NULL").run();
+      this.sqlite.query("DELETE FROM job_transition_history").run();
+      this.sqlite.query("DELETE FROM azure_extraction_operations").run();
+      this.sqlite.query("DELETE FROM extraction_invocations").run();
+      this.sqlite.query("DELETE FROM extraction_attempts").run();
+      this.sqlite.query("DELETE FROM jobs").run();
+      this.sqlite.query("DELETE FROM validation_issues").run();
+      this.sqlite.query("DELETE FROM review_events").run();
+      this.sqlite.query("DELETE FROM bill_classification_events").run();
+      this.sqlite.query("DELETE FROM provider_projection_metadata").run();
+      this.sqlite.query("DELETE FROM effective_bill_data").run();
+      this.sqlite.query("DELETE FROM drive_reservations WHERE bill_id IS NOT NULL").run();
+      this.sqlite.query("DELETE FROM extractions").run();
+      this.sqlite.query("DELETE FROM bills").run();
+      this.sqlite.query("DELETE FROM admin_upload_batch_items").run();
+      this.sqlite.query("DELETE FROM admin_upload_batches").run();
+      return { deleted };
+    })();
+  }
+
   createAdminUploadBatch(input: { id?: string; idempotencyKey: string; originalFilename: string }): { batch: AdminUploadBatch; created: boolean } {
     const now = new Date().toISOString();
     const id = input.id ?? randomUUID();

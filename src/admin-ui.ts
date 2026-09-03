@@ -72,7 +72,7 @@ export async function handleAdminRequest(request: Request, config: AppConfig, ca
   if (pathname === "/admin") {
     if (request.method !== "GET") return methodNotAllowed("GET");
     const token = csrf(config, user, "admin-whatsapp-action");
-    return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>إدارة واتساب</title><script src="/admin/assets/theme.js"></script><link rel="stylesheet" href="/admin/assets/client.css"></head><body><div id="root" data-csrf="${token}"></div><script src="/admin/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+    return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><script src="/admin/assets/theme.js"></script><link rel="stylesheet" href="/admin/assets/client.css"></head><body><div id="root" data-csrf="${token}"></div><script src="/admin/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
   }
   if (!capabilities) return new Response("الخدمة غير متاحة", { status: 503, headers });
   const font = /^\/admin\/assets\/files\/(noto-sans-arabic-arabic-(?:400|700)-normal\.woff2)$/.exec(pathname)?.[1];
@@ -84,7 +84,7 @@ export async function handleAdminRequest(request: Request, config: AppConfig, ca
   if (pathname === "/admin/api/overview") {
     if (request.method !== "GET") return methodNotAllowed("GET");
     const [metrics, whatsapp, groups] = await Promise.all([capabilities.metrics(), capabilities.whatsapp.status(), capabilities.whatsapp.groups()]);
-    return Response.json({ metrics: { received: metrics.receivedBills, approved: metrics.approvedBills, failed: metrics.failedBills, retryableJobs: metrics.retryableJobs, permanentFailureJobs: metrics.permanentFailureJobs }, whatsapp: { ...whatsapp, configuredGroupId: config.whatsapp.groupId, groups, csrf: csrf(config, user, "admin-whatsapp-action") }, zip: { available: capabilities.zip.available(), maxCompressedBytes: capabilities.zip.maxCompressedBytes, csrf: csrf(config, user, "admin-zip-upload") } }, { headers });
+    return Response.json({ metrics: { received: metrics.receivedBills, approved: metrics.approvedBills, failed: metrics.failedBills, retryableJobs: metrics.retryableJobs, permanentFailureJobs: metrics.permanentFailureJobs }, whatsapp: { ...whatsapp, configuredGroupId: config.whatsapp.groupId, groups, csrf: csrf(config, user, "admin-whatsapp-action") }, telegram: { enabled: config.telegram.enabled, groupIds: config.telegram.groupIds }, zip: { available: capabilities.zip.available(), maxCompressedBytes: capabilities.zip.maxCompressedBytes, csrf: csrf(config, user, "admin-zip-upload") } }, { headers });
   }
   if (pathname === "/admin/api/metrics") {
     if (request.method !== "GET") return methodNotAllowed("GET");
