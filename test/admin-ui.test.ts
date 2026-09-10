@@ -20,6 +20,7 @@ test("admin routes require the review Basic authentication and are never cached"
   const html = await shell.text();
   expect(html).toContain('<html lang="ar" dir="rtl">');
   expect(html).toContain('<title>ماسح الفواتير</title>');
+  expect(html).toContain('<link rel="icon" href="/admin/assets/favicon.png" type="image/png">');
   expect(html).toContain('src="/admin/assets/client.js"');
   expect(html).not.toContain(config.mistral.apiKey);
   expect(html).not.toContain(config.whatsapp.authPath);
@@ -69,10 +70,13 @@ test("admin protects every route, serves only known assets, and rejects malforme
     writeFileSync(join(directory, "client.js"), "window.adminClient = true;");
     writeFileSync(join(directory, "theme.js"), "window.adminTheme = true;");
     writeFileSync(join(directory, "client.css"), ".admin-page{}");
-    for (const path of ["/admin", "/admin/api/overview", "/admin/api/metrics", "/admin/api/whatsapp/status", "/admin/api/whatsapp/qr", "/admin/api/whatsapp/groups", "/admin/assets/client.js", "/admin/assets/missing.js"]) {
+    writeFileSync(join(directory, "favicon.png"), new Uint8Array([137, 80, 78, 71]));
+    for (const path of ["/admin", "/admin/api/overview", "/admin/api/metrics", "/admin/api/whatsapp/status", "/admin/api/whatsapp/qr", "/admin/api/whatsapp/groups", "/admin/assets/client.js", "/admin/assets/favicon.png", "/admin/assets/missing.js"]) {
       expect((await handleAdminRequest(new Request(`http://x${path}`), config, capabilities(), directory)).status).toBe(401);
     }
     expect((await handleAdminRequest(new Request("http://x/admin/assets/client.js", { headers: auth }), config, capabilities(), directory)).status).toBe(200);
+    const favicon = await handleAdminRequest(new Request("http://x/admin/assets/favicon.png", { headers: auth }), config, capabilities(), directory);
+    expect(favicon.status).toBe(200); expect(favicon.headers.get("content-type")).toBe("image/png"); expect(await favicon.bytes()).toEqual(new Uint8Array([137, 80, 78, 71]));
     expect((await handleAdminRequest(new Request("http://x/admin/assets/missing.js", { headers: auth }), config, capabilities(), directory)).status).toBe(404);
     expect((await handleAdminRequest(new Request("http://x/admin/assets/client.js", { method: "POST", headers: auth }), config, capabilities(), directory)).status).toBe(405);
     const shell = await handleAdminRequest(new Request("http://x/admin", { headers: auth }), config, capabilities(), directory);

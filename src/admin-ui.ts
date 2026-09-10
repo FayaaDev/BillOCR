@@ -72,14 +72,14 @@ export async function handleAdminRequest(request: Request, config: AppConfig, ca
   if (pathname === "/admin") {
     if (request.method !== "GET") return methodNotAllowed("GET");
     const token = csrf(config, user, "admin-whatsapp-action");
-    return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><script src="/admin/assets/theme.js"></script><link rel="stylesheet" href="/admin/assets/client.css"></head><body><div id="root" data-csrf="${token}"></div><script src="/admin/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+    return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><link rel="icon" href="/admin/assets/favicon.png" type="image/png"><script src="/admin/assets/theme.js"></script><link rel="stylesheet" href="/admin/assets/client.css"></head><body><div id="root" data-csrf="${token}"></div><script src="/admin/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
   }
   if (!capabilities) return new Response("الخدمة غير متاحة", { status: 503, headers });
   const font = /^\/admin\/assets\/files\/(noto-sans-arabic-arabic-(?:400|700)-normal\.woff2)$/.exec(pathname)?.[1];
-  if (pathname === "/admin/assets/client.js" || pathname === "/admin/assets/theme.js" || pathname === "/admin/assets/client.css" || font) {
+  if (pathname === "/admin/assets/client.js" || pathname === "/admin/assets/theme.js" || pathname === "/admin/assets/client.css" || pathname === "/admin/assets/favicon.png" || font) {
     if (request.method !== "GET") return methodNotAllowed("GET");
-    const name = font ? join("files", font) : pathname.endsWith("client.js") ? "client.js" : pathname.endsWith("theme.js") ? "theme.js" : "client.css";
-    try { const content = await readFile(join(assetDir, name)); return new Response(content, { headers: { ...headers, "content-type": name.endsWith(".js") ? "text/javascript; charset=utf-8" : name.endsWith(".woff2") ? "font/woff2" : "text/css; charset=utf-8" } }); } catch { return new Response("غير موجود", { status: 404, headers }); }
+    const name = font ? join("files", font) : pathname.endsWith("client.js") ? "client.js" : pathname.endsWith("theme.js") ? "theme.js" : pathname.endsWith("favicon.png") ? "favicon.png" : "client.css";
+    try { const content = await readFile(join(assetDir, name)); return new Response(content, { headers: { ...headers, "content-type": name.endsWith(".js") ? "text/javascript; charset=utf-8" : name.endsWith(".woff2") ? "font/woff2" : name.endsWith(".png") ? "image/png" : "text/css; charset=utf-8" } }); } catch { return new Response("غير موجود", { status: 404, headers }); }
   }
   if (pathname === "/admin/api/overview") {
     if (request.method !== "GET") return methodNotAllowed("GET");
