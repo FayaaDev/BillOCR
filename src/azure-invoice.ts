@@ -311,9 +311,31 @@ function normalizeSeparators(value: string): string | null {
   if (parts[1]!.length === 3) return null;
   return `${parts[0]}.${parts[1]}`;
 }
-function getField(fields: Record<string, unknown>, key: string): Record<string, unknown> | null {
-  const value = fields[key];
+function getField(fields: Record<string, unknown> | null, key: string): Record<string, unknown> | null {
+  const value = fields?.[key];
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+function itemDescription(items: Record<string, unknown> | null): { value: string | null; evidence: FieldEvidence } {
+  if (items?.type !== "array" || !Array.isArray(items.valueArray)) return { value: null, evidence: { sourceText: null, confidence: null } };
+  const descriptions = items.valueArray.flatMap((item) => {
+    const entry = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : null;
+    if (entry?.type !== "object") return [];
+    const description = getField(getField(entry, "valueObject"), "Description");
+    return description?.type === "string" && typeof description.valueString === "string" && description.valueString.trim() ? [description] : [];
+  });
+  if (!descriptions.length) return { value: null, evidence: { sourceText: null, confidence: null } };
+  const joinedValue = descriptions.map((description) => description.valueString as string).join("\n");
+  const evidenceParts = descriptions.map(fieldEvidence);
+  const sourceParts = evidenceParts.map((item) => item.sourceText);
+  const joinedSource = sourceParts.every((item): item is string => item !== null) ? sourceParts.join("\n") : null;
+  const confidences = evidenceParts.map((item) => item.confidence);
+  return {
+    value: joinedValue.length <= MAX_DESCRIPTION_LENGTH ? joinedValue : null,
+    evidence: {
+      sourceText: joinedSource !== null && joinedSource.length <= MAX_SOURCE_TEXT_LENGTH ? joinedSource : null,
+      confidence: confidences.every((item): item is number => item !== null) ? Math.min(...confidences) : null,
+    },
+  };
 }
 function emptyInvoice(): ExtractedBill {
   const evidence = { confidence: null, sourceText: null };
@@ -341,17 +363,17 @@ function mapInvoice(payload: Record<string, unknown>): ExtractedBill | null {
   const total = getField(azureFields, "InvoiceTotal");
   const subtotal = getField(azureFields, "SubTotal");
   const vat = getField(azureFields, "TotalTax");
-  const description = getField(azureFields, "InvoiceDescription");
+  const description = itemDescription(getField(azureFields, "Items"));
   const totalMoney = typedMoney(total);
   const subtotalMoney = typedMoney(subtotal);
   const vatMoney = typedMoney(vat);
   const evidence: Record<InvoiceFieldName, FieldEvidence> = {
     vendorName: fieldEvidence(vendor), vendorTaxNumber: fieldEvidence(vendorTaxNumber), invoiceNumber: fieldEvidence(invoiceNumber), invoiceDate: fieldEvidence(invoiceDate), currency: fieldEvidence(total ?? subtotal ?? vat),
-    subtotal: fieldEvidence(subtotal), vat: fieldEvidence(vat), total: fieldEvidence(total), description: fieldEvidence(description),
+    subtotal: fieldEvidence(subtotal), vat: fieldEvidence(vat), total: fieldEvidence(total), description: description.evidence,
   };
   return {
     schemaVersion: "1", vendorName: typedString(vendor, "string", MAX_VENDOR_LENGTH), vendorTaxNumber: typedString(vendorTaxNumber, "string", MAX_INVOICE_LENGTH), invoiceNumber: typedString(invoiceNumber, "string", MAX_INVOICE_LENGTH), invoiceDate: typedDate(invoiceDate),
     currency: totalMoney.currency ?? subtotalMoney.currency ?? vatMoney.currency, subtotal: subtotalMoney.amount, vat: vatMoney.amount, total: totalMoney.amount,
-    description: typedString(description, "string", MAX_DESCRIPTION_LENGTH), fields: evidence,
+    description: description.value, fields: evidence,
   };
 }

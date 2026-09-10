@@ -29,7 +29,7 @@ const columns = column.columns([
   column.accessor("total", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>مبلغ اجمالي بعد الضريبة <ArrowUpDown /></Button>, cell: ({ getValue }) => getValue() ?? "" }),
   column.accessor("vat", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>قيمة الضريبة <ArrowUpDown /></Button>, cell: ({ getValue }) => getValue() ?? "" }),
   column.accessor("subtotal", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>مبلغ قبل الضريبة <ArrowUpDown /></Button>, cell: ({ getValue }) => getValue() ?? "" }),
-  column.accessor("description", { header: "وصف القطع وبيانها", cell: ({ getValue }) => getValue() ?? "" }),
+  column.accessor("description", { header: "وصف القطع وبيانها", cell: ({ getValue }) => <span className="whitespace-pre-line">{getValue() ?? ""}</span> }),
   column.accessor("truckNumber", { header: "رقم الشاحنة ( المسؤليه )", cell: ({ getValue }) => getValue() ?? "" }),
   column.accessor("vendorTaxNumber", { header: "الرقم الضريبي للمورد", cell: ({ getValue }) => getValue() ?? "" }),
   column.accessor("vendorName", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>اسم المورد <ArrowUpDown /></Button>, cell: ({ getValue }) => getValue() ?? "" }),

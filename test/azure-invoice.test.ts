@@ -17,7 +17,7 @@ const completed = (fields: Record<string, unknown> = {}) => ({
         InvoiceTotal: { type: "currency", valueCurrency: { amount: 11, currencyCode: "USD" }, content: "$11.00", confidence: 0.95 },
         SubTotal: { type: "currency", valueCurrency: { amount: 10, currencyCode: "USD" }, content: "$10.00", confidence: 0.92 },
         TotalTax: { type: "currency", valueCurrency: { amount: 1, currencyCode: "USD" }, content: "$1.00", confidence: 0.91 },
-        InvoiceDescription: { type: "string", valueString: "handwritten repair", content: "handwritten repair", confidence: 0.8 },
+        Items: { type: "array", valueArray: [{ type: "object", valueObject: { Description: { type: "string", valueString: "handwritten repair", content: "handwritten repair", confidence: 0.8 } } }] },
         ...fields,
       },
     }],
@@ -65,6 +65,34 @@ test("submits original bytes, polls only its Azure origin, and maps typed invoic
   if (result.classification !== "invoice") throw new Error("expected invoice");
   expect(result.bill).toMatchObject({ vendorName: "متجر Example", vendorTaxNumber: "310123456700003", invoiceNumber: "INV-0042", invoiceDate: "2026-08-28", currency: "USD", subtotal: 10, vat: 1, total: 11, description: "handwritten repair" });
   expect(result.bill.fields).toMatchObject({ total: { sourceText: "$11.00", confidence: 0.95 }, vendorName: { sourceText: "متجر Example", confidence: 0.98 }, vendorTaxNumber: { sourceText: "310123456700003", confidence: 0.96 } });
+});
+
+test("maps Azure item descriptions in bill order for وصف القطع وبيانها", () => {
+  const result = parseAzureInvoiceAnalysis(JSON.stringify(completed({
+    Items: {
+      type: "array",
+      valueArray: [
+        { type: "object", valueObject: { Description: { type: "string", valueString: "فلتر زيت", content: "فلتر زيت", confidence: 0.91 }, ProductCode: { type: "string", valueString: "OF-42" } } },
+        { type: "object", valueObject: { Description: { type: "string", valueString: "زيت محرك", content: "زيت محرك", confidence: 0.84 } } },
+      ],
+    },
+  })));
+
+  expect(result.bill.description).toBe("فلتر زيت\nزيت محرك");
+  expect(result.bill.fields.description).toEqual({ sourceText: "فلتر زيت\nزيت محرك", confidence: 0.84 });
+});
+
+test("ignores product codes and malformed optional Azure item descriptions", () => {
+  for (const Items of [
+    { type: "array", valueArray: [{ type: "object", valueObject: { ProductCode: { type: "string", valueString: "OF-42" } } }] },
+    { type: "object", valueArray: [] },
+    { type: "array", valueArray: "not-an-array" },
+    { type: "array", valueArray: [null, { type: "string", valueObject: { Description: { type: "string", valueString: "ignored" } } }] },
+  ]) {
+    const result = parseAzureInvoiceAnalysis(JSON.stringify(completed({ Items })));
+    expect(result.bill.description).toBeNull();
+    expect(result.bill.fields.description).toEqual({ sourceText: null, confidence: null });
+  }
 });
 
 test("classifies a successful zero-document analysis as not_invoice without accepting malformed documents", async () => {
@@ -310,7 +338,7 @@ test("nulls Azure text beyond normalized extraction limits and calendar-invalid 
         VendorName: { type: "string", valueString: "v".repeat(513), content: "v".repeat(2_001), confidence: 0.9 },
         InvoiceId: { type: "string", valueString: "i".repeat(257), content: "i".repeat(2_001), confidence: 0.9 },
         InvoiceDate: { type: "date", valueDate: "2026-02-30", content: "2026-02-30", confidence: 0.9 },
-        InvoiceDescription: { type: "string", valueString: "d".repeat(2_001), content: "d".repeat(2_001), confidence: 0.9 },
+        Items: { type: "array", valueArray: [{ type: "object", valueObject: { Description: { type: "string", valueString: "d".repeat(2_001), content: "d".repeat(2_001), confidence: 0.9 } } }] },
       })),
   });
   const result = await provider.extract({ bytes: new Uint8Array(), mimeType: "image/png" });
