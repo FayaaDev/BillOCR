@@ -1,4 +1,4 @@
-FROM oven/bun:1.2 AS build
+FROM oven/bun:1.3 AS build
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
@@ -6,7 +6,7 @@ COPY . .
 RUN bun run typecheck
 RUN bun run build
 
-FROM oven/bun:1.2-slim
+FROM oven/bun:1.3-slim
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production && mkdir -p /data /data/originals /data/whatsapp-auth /run/secrets && chown -R bun:bun /app /data /run/secrets
