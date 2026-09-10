@@ -71,6 +71,7 @@ export interface Bill {
 export interface ExtractedBill {
   schemaVersion: "1";
   vendorName: string | null;
+  vendorTaxNumber?: string | null;
   invoiceNumber: string | null;
   invoiceDate: string | null;
   currency: string | null;
@@ -78,6 +79,7 @@ export interface ExtractedBill {
   vat: number | null;
   total: number | null;
   description: string | null;
+  truckNumber?: string | null;
   fields: Record<string, FieldEvidence>;
 }
 

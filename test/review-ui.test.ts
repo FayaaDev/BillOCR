@@ -43,6 +43,10 @@ test("review detail renders an accessible image-original preview while PDFs reta
   const pdfHtml = await pdf.text();
   expect(pdfHtml).toContain('href="/review/bills/review-bill/original">عرض الأصل</a>'); expect(pdfHtml).not.toContain('original-preview-dialog');
   expect(html).toContain('class="correction-form"'); expect(html).toContain('<label class="review-field" for="vendorName"><span>اسم المورد</span>'); expect(html).toContain('<textarea id="description" name="description"'); expect(html).not.toContain('name="handwritten"'); expect(html).not.toContain('name="reason"'); expect(html).not.toContain('name="note"'); expect(html).not.toContain('Reason for decision'); expect(html).not.toContain('Review note'); expect(html).toContain('class="review-action approve-action"'); expect(html).toContain('>اعتماد الفاتورة</button>'); expect(html).toContain('class="review-action reject-action"'); expect(html).toContain('>رفض الفاتورة</button>');
+  expect(html).toContain('name="truckNumber" value=""'); expect(html).toContain('name="vendorTaxNumber" value=""'); expect(html).toContain('<span>رقم مرسل الفاتورة</span><input id="senderId" value="s" readonly>');
+  const orderedLabels = ["تاريخ الفاتورة", "مبلغ اجمالي بعد الضريبة", "قيمة الضريبة", "مبلغ قبل الضريبة", "وصف القطع وبيانها", "رقم الشاحنة ( المسؤليه )", "الرقم الضريبي للمورد", "اسم المورد", "رقم الفاتورة", "رقم مرسل الفاتورة", "تاريخ وتوقيت الارسال"];
+  const labelOffsets = orderedLabels.map((label) => html.indexOf(`<span>${label}</span>`));
+  expect(labelOffsets.every((offset, index) => offset >= 0 && (index === 0 || offset > labelOffsets[index - 1]!))).toBe(true);
 });
 
 test("review queue shell, API, and fixed assets are authenticated", async () => {
@@ -55,8 +59,13 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   expect(html).not.toContain('href="/review/export.csv"'); expect(html).toMatch(/<div id="root" data-csrf="[^"]+"><\/div>/); expect(html).toContain('<div id="review-actions"></div>'); expect(html).toContain('src="/review/assets/theme.js"'); expect(html).toContain('src="/review/assets/client.js"'); expect(html).toContain('href="/review/assets/client.css"'); expect(html).not.toContain("review-bill"); expect(html).not.toContain("<unsafe>");
   const clientSource = readFileSync(join(import.meta.dir, "..", "src", "review-client.tsx"), "utf8");
   expect(clientSource).toContain('href="/admin"'); expect(clientSource).toContain('aria-current="page"'); expect(clientSource).toContain('<Button variant="outline" render={<a href="/review/export.csv" />}'); expect(clientSource).toContain('<Button variant="destructive"'); expect(clientSource).toContain('"x-csrf-token": csrf');
+  const dashboardHeaders = ["تاريخ الفاتورة", "مبلغ اجمالي بعد الضريبة", "قيمة الضريبة", "مبلغ قبل الضريبة", "وصف القطع وبيانها", "رقم الشاحنة ( المسؤليه )", "الرقم الضريبي للمورد", "اسم المورد", "رقم الفاتورة", "رقم مرسل الفاتورة", "تاريخ وتوقيت الارسال"];
+  const dashboardOffsets = dashboardHeaders.map((label) => clientSource.indexOf(label));
+  expect(dashboardOffsets.every((offset, index) => offset >= 0 && (index === 0 || offset > dashboardOffsets[index - 1]!))).toBe(true);
+  expect(clientSource).toContain('href={`/review/bills/${encodeURIComponent(row.original.id)}`}');
+  expect(clientSource).toContain('getValue() ?? <FilePenLine aria-hidden="true" />');
   const api = await handleReviewRequest(new Request("http://x/review/api/bills", { headers: basic() }), database, config);
-   expect(api.headers.get("content-type")).toContain("application/json"); expect(api.headers.get("cache-control")).toBe("no-store"); expect(await api.json()).toEqual([{ id, status: "needs_review", displayStatus: "needs_review", source: "whatsapp", batchId: null, originalFilename: null, receivedAt: "2026-08-01T00:00:00.000Z", updatedAt: expect.any(String) }]);
+   expect(api.headers.get("content-type")).toContain("application/json"); expect(api.headers.get("cache-control")).toBe("no-store"); expect(await api.json()).toEqual([{ id, invoiceDate: "2026-08-01", total: 10, vat: 1, subtotal: 9, description: null, truckNumber: null, vendorTaxNumber: null, vendorName: "<img src=x>", invoiceNumber: null, senderId: "s", receivedAt: "2026-08-01T00:00:00.000Z" }]);
   const apiPost = await handleReviewRequest(new Request("http://x/review/api/bills", { method: "POST", headers: basic() }), database, config);
   expect(apiPost.status).toBe(405); expect(apiPost.headers.get("allow")).toBe("GET");
   const script = await handleReviewRequest(new Request("http://x/review/assets/client.js", { headers: basic() }), database, config, assetDir);
@@ -114,7 +123,7 @@ test("review lists and serves a verified Telegram original from shared storage",
   config.originals.maxAttachmentBytes = bytes.byteLength;
   config.whatsapp.originalsDir = join(dir, "whatsapp-only");
   const queue = await handleReviewRequest(new Request("http://x/review/api/bills?source=telegram", { headers: basic() }), database, config);
-  expect(await queue.json()).toMatchObject([{ id: telegram.id, source: "telegram" }]);
+  expect(await queue.json()).toMatchObject([{ id: telegram.id, senderId: "tg-sender" }]);
   const original = await handleReviewRequest(new Request(`http://x/review/bills/${telegram.id}/original`, { headers: basic() }), database, config);
   expect(original.status).toBe(200); expect(new Uint8Array(await original.arrayBuffer())).toEqual(bytes);
 });
@@ -130,7 +139,7 @@ test("completed-invoice CSV export is authenticated, uses reviewed data, and exc
     return bill;
   };
   const complete = create(0, "complete");
-  database.sqlite.query("INSERT INTO effective_bill_data (bill_id,normalized_json,revision,updated_at) VALUES (?, ?, 1, 'now')").run(complete.id, JSON.stringify({ schemaVersion: "1", vendorName: "=Reviewed, Inc.", invoiceNumber: "\"INV\"\n1", invoiceDate: "2026-08-03", currency: "USD", subtotal: 9, vat: 1, total: 10, description: "@reviewed", fields: {} }));
+   database.sqlite.query("INSERT INTO effective_bill_data (bill_id,normalized_json,revision,updated_at) VALUES (?, ?, 1, 'now')").run(complete.id, JSON.stringify({ schemaVersion: "1", vendorName: "=Reviewed, Inc.", vendorTaxNumber: "310123456700003", invoiceNumber: "\"INV\"\n1", invoiceDate: "2026-08-03", currency: "USD", subtotal: 9, vat: 1, total: 10, description: "@reviewed", truckNumber: "+TRK-7", fields: {} }));
   const telegram = database.createBillWithInitialJobs({ id: "csv-telegram", source: "telegram", sourceMessageId: "csv-telegram-message", sourceChatId: "csv-telegram-chat", sourceSenderId: "csv-telegram-sender", attachmentIndex: 0, receivedAt: "2026-08-04T00:00:00.000Z", mimeType: "image/png", originalPath: join(dir, "originals", "telegram.png"), contentSha256: "c".repeat(64), classification: "invoice" }, []).bill;
   database.sqlite.query("UPDATE bills SET status = 'approved' WHERE id = ?").run(telegram.id);
   database.sqlite.query("INSERT INTO extractions (id,bill_id,schema_version,normalized_json,created_at,updated_at) VALUES ('csv-telegram-extraction',?, '1', ?, 'now', 'now')").run(telegram.id, JSON.stringify({ schemaVersion: "1", vendorName: "Telegram vendor", invoiceNumber: "TG-1", invoiceDate: "2026-08-04", currency: "SAR", subtotal: 18, vat: 2, total: 20, description: "telegram", fields: {} }));
@@ -143,7 +152,7 @@ test("completed-invoice CSV export is authenticated, uses reviewed data, and exc
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toBe("text/csv; charset=utf-8");
   expect(response.headers.get("content-disposition")).toBe('attachment; filename="completed-invoices.csv"');
-  expect(await response.text()).toBe("\uFEFFBill ID,Received date,Vendor,Invoice number,Invoice date,Subtotal,VAT,Total,Currency,Description,Sender\r\ncsv-0,2026-08-02,\"'=Reviewed, Inc.\",\"\"\"INV\"\"\n1\",2026-08-03,9,1,10,USD,'@reviewed,csv-sender\r\ncsv-telegram,2026-08-04,Telegram vendor,TG-1,2026-08-04,18,2,20,SAR,telegram,csv-telegram-sender\r\n");
+  expect(await response.text()).toBe("\uFEFFتاريخ الفاتورة,مبلغ اجمالي بعد الضريبة,قيمة الضريبة,مبلغ قبل الضريبة,وصف القطع وبيانها,رقم الشاحنة ( المسؤليه ),الرقم الضريبي للمورد,اسم المورد,رقم الفاتورة,رقم مرسل الفاتورة,تاريخ وتوقيت الارسال\r\n2026-08-03,10,1,9,'@reviewed,'+TRK-7,310123456700003,\"'=Reviewed, Inc.\",\"\"\"INV\"\"\n1\",,2026-08-02T00:00:00.000Z\r\n2026-08-04,20,2,18,telegram,,,Telegram vendor,TG-1,csv-telegram-sender,2026-08-04T00:00:00.000Z\r\n");
   const post = await handleReviewRequest(new Request("http://x/review/export.csv", { method: "POST", headers: basic() }), database, config);
   expect(post.status).toBe(405); expect(post.headers.get("allow")).toBe("GET");
 });
@@ -151,10 +160,10 @@ test("completed-invoice CSV export is authenticated, uses reviewed data, and exc
 test("CSRF-protected corrected approval preserves model output and is exactly once", async () => {
   const detail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
   const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; if (!csrf) throw new Error("missing csrf");
-  const form = new URLSearchParams({ csrf, contentRevision: "1", reviewRevision: "0", action: "approve", vendorName: "Vendor", invoiceNumber: "N", invoiceDate: "2026-08-01", currency: "USD", subtotal: "9", vat: "1", total: "10", description: "ok" });
+  const form = new URLSearchParams({ csrf, contentRevision: "1", reviewRevision: "0", action: "approve", vendorName: "Vendor", vendorTaxNumber: "310123456700003", invoiceNumber: "N", invoiceDate: "2026-08-01", subtotal: "9", vat: "1", total: "10", description: "ok", truckNumber: "TRK-7" });
   expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(303);
   expect(database.getBill(id)).toMatchObject({ status: "approved", contentRevision: 2, reviewRevision: 1 }); expect(database.getExtraction(id)?.normalized?.vendorName).toBe("<img src=x>");
-  expect(database.getReviewEvents(id)).toMatchObject([{ reason: null, note: null }]); expect(database.getEffectiveExtraction(id)?.vendorName).toBe("Vendor");
+  expect(database.getReviewEvents(id)).toMatchObject([{ reason: null, note: null }]); expect(database.getEffectiveExtraction(id)).toMatchObject({ vendorName: "Vendor", vendorTaxNumber: "310123456700003", truckNumber: "TRK-7", currency: "USD" });
   expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(409);
   expect(database.getReviewEvents(id)).toHaveLength(1); expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) count FROM jobs WHERE type = 'project_to_sheet'").get()?.count).toBe(1);
 });
@@ -282,10 +291,10 @@ test("unified queue filters sources, batches, Complete, and NotInvoice", async (
   const uploaded = database.createBillWithInitialJobs({ id: "not-invoice", whatsappMessageId: "admin-review", whatsappGroupId: "admin-upload", whatsappSenderId: "admin-upload", attachmentIndex: 0, receivedAt: "2026-08-03T00:00:00.000Z", mimeType: "application/pdf", originalPath: join(dir, "originals", "bill.png"), contentSha256: "c".repeat(64), source: "admin_upload", sourceIdentity: "admin-review", extractionPolicy: "azure_only", classification: "not_invoice", batchItemId: item.id }, [{ type: "extract", idempotencyKey: "extract:admin-review" }]).bill;
   database.sqlite.query("UPDATE bills SET status = 'failed' WHERE id = ?").run(uploaded.id);
   const all = await handleReviewRequest(new Request("http://x/review/api/bills?source=admin_upload&batch=" + batch.id + "&status=not_invoice", { headers: basic() }), database, config);
-  expect(await all.json()).toMatchObject([{ id: uploaded.id, source: "admin_upload", batchId: batch.id, displayStatus: "NotInvoice" }]);
+  expect(await all.json()).toMatchObject([{ id: uploaded.id, senderId: null }]);
   database.sqlite.query("UPDATE bills SET status = 'approved', classification = 'invoice' WHERE id = ?").run(id);
   const complete = await handleReviewRequest(new Request("http://x/review/api/bills?source=whatsapp&status=complete", { headers: basic() }), database, config);
-  expect(await complete.json()).toMatchObject([{ id, displayStatus: "Complete" }]);
+  expect(await complete.json()).toMatchObject([{ id }]);
   expect((await handleReviewRequest(new Request("http://x/review/api/bills?source=telegram", { headers: basic() }), database, config)).status).toBe(200);
   expect((await handleReviewRequest(new Request("http://x/review/api/bills?source=wrong", { headers: basic() }), database, config)).status).toBe(400);
 });

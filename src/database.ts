@@ -58,9 +58,9 @@ function recordTransition(db: Database, jobId: string, fromState: JobState | nul
 export interface RetryPolicy { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number; }
 export interface CreateBillResult { bill: Bill; created: boolean; }
 export interface ReviewSubmission { billId: string; reviewerId: string; action: "approve" | "reject"; reason: string | null; note: string | null; expectedContentRevision: number; expectedReviewRevision: number; corrected: ExtractedBill; }
-export interface CompletedInvoiceExportRecord { id: string; receivedAt: string; senderId: string; extraction: ExtractedBill; }
+export interface CompletedInvoiceExportRecord { receivedAt: string; senderId: string | null; extraction: ExtractedBill; }
 export interface ReviewQueueFilters { source?: BillSource; batchId?: string; status?: "complete" | "not_invoice" | Bill["status"]; }
-export interface ReviewQueueBill extends Bill { batchId: string | null; displayStatus: "Complete" | "NotInvoice" | Bill["status"]; }
+export interface ReviewQueueBill extends Bill { batchId: string | null; displayStatus: "Complete" | "NotInvoice" | Bill["status"]; extraction: ExtractedBill | null; }
 export interface ReviewClassificationOverride { billId: string; reviewerId: string; action: "mark_not_invoice" | "reclassify_invoice"; expectedContentRevision: number; expectedReviewRevision: number; }
 
 function retryTransition(attempts: number, policy: RetryPolicy, now: Date): { state: "retryable_failure" | "permanent_failure"; availableAt: string } {
@@ -440,7 +440,7 @@ export class BillDatabase {
 
   /** Approved invoices; admin uploads must also have a terminal complete batch entry. */
   listCompletedInvoiceExports(): CompletedInvoiceExportRecord[] {
-    return this.sqlite.query<{ id: string; received_at: string; source_sender_id: string; normalized_json: string }, []>(`SELECT b.id, b.received_at, b.source_sender_id,
+    return this.sqlite.query<{ received_at: string; source: BillSource; source_sender_id: string; normalized_json: string }, []>(`SELECT b.received_at, b.source, b.source_sender_id,
       COALESCE(effective.normalized_json, extraction.normalized_json) AS normalized_json
       FROM bills b
       LEFT JOIN admin_upload_batch_items item ON item.id = b.batch_item_id
@@ -449,7 +449,7 @@ export class BillDatabase {
       WHERE b.status = 'approved' AND b.classification = 'invoice'
         AND (b.source != 'admin_upload' OR item.state = 'complete')
         AND COALESCE(effective.normalized_json, extraction.normalized_json) IS NOT NULL
-      ORDER BY b.received_at, b.id`).all().map((row) => ({ id: row.id, receivedAt: row.received_at, senderId: row.source_sender_id, extraction: JSON.parse(row.normalized_json) as ExtractedBill }));
+      ORDER BY b.received_at, b.id`).all().map((row) => ({ receivedAt: row.received_at, senderId: row.source === "admin_upload" ? null : row.source_sender_id, extraction: JSON.parse(row.normalized_json) as ExtractedBill }));
   }
 
   listReviewBills(filters: ReviewQueueFilters = {}): ReviewQueueBill[] {
@@ -460,9 +460,12 @@ export class BillDatabase {
     if (filters.status === "complete") where.push("b.status = 'approved' AND b.classification != 'not_invoice'");
     else if (filters.status === "not_invoice") where.push("b.classification = 'not_invoice'");
     else if (filters.status) { where.push("b.status = ? AND b.classification != 'not_invoice'"); values.push(filters.status); }
-    const rows = this.sqlite.query<BillRow & { batch_id: string | null }, string[]>(`SELECT b.*, item.batch_id FROM bills b
-      LEFT JOIN admin_upload_batch_items item ON item.id = b.batch_item_id ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY b.updated_at DESC`).all(...values);
-    return rows.map((row) => ({ ...toBill(row), batchId: row.batch_id, displayStatus: row.classification === "not_invoice" ? "NotInvoice" : row.status === "approved" ? "Complete" : row.status }));
+    const rows = this.sqlite.query<BillRow & { batch_id: string | null; normalized_json: string | null }, string[]>(`SELECT b.*, item.batch_id,
+      COALESCE(effective.normalized_json, extraction.normalized_json) AS normalized_json FROM bills b
+      LEFT JOIN admin_upload_batch_items item ON item.id = b.batch_item_id
+      LEFT JOIN effective_bill_data effective ON effective.bill_id = b.id
+      LEFT JOIN extractions extraction ON extraction.bill_id = b.id ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY b.updated_at DESC`).all(...values);
+    return rows.map((row) => ({ ...toBill(row), batchId: row.batch_id, displayStatus: row.classification === "not_invoice" ? "NotInvoice" : row.status === "approved" ? "Complete" : row.status, extraction: row.normalized_json ? JSON.parse(row.normalized_json) as ExtractedBill : null }));
   }
 
   getReviewEvents(billId: string): ReviewEvent[] {

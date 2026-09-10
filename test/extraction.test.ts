@@ -82,9 +82,10 @@ test("keeps the internal canonical parser strict and preserves null unknowns", (
 test("normalizes permissive provider annotations without manufacturing accounting values", () => {
   const providerAnnotation = { ...valid({ schemaVersion: 1, invoiceNumber: "0042", total: 99, handwritten: null, unexpected: true, fields: { total: { confidence: "unknown", sourceText: "99" }, handwritten: null, unsupported: [], broken: { sourceText: 99 } } }) };
   expect(() => parseExtractedBill(valid({ schemaVersion: 1 }))).toThrow("schemaVersion");
+  expect(() => parseExtractedBill(valid({ truckNumber: "TRK-7" }))).toThrow("unknown or missing fields");
   expect(parseProviderExtractedBill(providerAnnotation)).toEqual(expect.objectContaining({ schemaVersion: "1", invoiceNumber: "0042", total: 99, fields: expect.objectContaining({ total: { confidence: null, sourceText: "99" }, vendorName: { confidence: null, sourceText: null }, invoiceDate: { confidence: null, sourceText: null } }) }));
   const unknown = parseProviderExtractedBill({ schemaVersion: "unexpected", vendorName: 42, invoiceNumber: [], invoiceDate: "2026-02-30", currency: "usd", subtotal: Infinity, vat: "1", total: NaN, description: "", fields: null });
-  expect(unknown).toEqual({ schemaVersion: "1", vendorName: null, invoiceNumber: null, invoiceDate: null, currency: null, subtotal: null, vat: null, total: null, description: null, fields: { vendorName: { confidence: null, sourceText: null }, invoiceDate: { confidence: null, sourceText: null }, total: { confidence: null, sourceText: null } } });
+  expect(unknown).toEqual({ schemaVersion: "1", vendorName: null, vendorTaxNumber: null, invoiceNumber: null, invoiceDate: null, currency: null, subtotal: null, vat: null, total: null, description: null, fields: { vendorName: { confidence: null, sourceText: null }, invoiceDate: { confidence: null, sourceText: null }, total: { confidence: null, sourceText: null } } });
   expect(parseProviderExtractedBill({ schemaVersion: 2, fields: [] }).total).toBeNull();
   expect(() => parseProviderExtractedBill({ fields: Array.from({ length: 51 }) })).toThrow("too many");
   expect(() => parseProviderExtractedBill(Object.fromEntries(Array.from({ length: 61 }, (_, index) => [`unknown${index}`, null])))).toThrow("too many");

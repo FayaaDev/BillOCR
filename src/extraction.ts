@@ -224,10 +224,12 @@ function normalizeConfidenceFields(fields: Record<string, FieldEvidence>): Recor
 /** Strict runtime guard: this is the sole path from provider output to normalized data. */
 export function parseExtractedBill(value: unknown): ExtractedBill {
   const parsed = object(value, "ExtractedBill");
-  const keys = ["schemaVersion", "vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description", "fields"];
-  if (Object.keys(parsed).length !== keys.length || Object.keys(parsed).some((key) => !keys.includes(key))) throw new Error("ExtractedBill has unknown or missing fields");
+  const requiredKeys = ["schemaVersion", "vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description", "fields"];
+  const allowedKeys = [...requiredKeys, "vendorTaxNumber"];
+  if (requiredKeys.some((key) => !(key in parsed)) || Object.keys(parsed).some((key) => !allowedKeys.includes(key))) throw new Error("ExtractedBill has unknown or missing fields");
   if (parsed.schemaVersion !== EXTRACTED_BILL_SCHEMA_VERSION) throw new Error("ExtractedBill schemaVersion must be 1");
   nullableValue(parsed.vendorName, "vendorName", (item) => typeof item === "string" && item.trim().length > 0 && item.length <= MAX_VENDOR_LENGTH);
+  nullableValue(parsed.vendorTaxNumber ?? null, "vendorTaxNumber", (item) => typeof item === "string" && item.trim().length > 0 && item.length <= MAX_INVOICE_LENGTH);
   nullableValue(parsed.invoiceNumber, "invoiceNumber", (item) => typeof item === "string" && item.trim().length > 0 && item.length <= MAX_INVOICE_LENGTH);
   nullableValue(parsed.description, "description", (item) => typeof item === "string" && item.trim().length > 0 && item.length <= MAX_DESCRIPTION_LENGTH);
   nullableValue(parsed.invoiceDate, "invoiceDate", (item) => typeof item === "string" && validIsoDate(item));
@@ -242,7 +244,7 @@ export function parseExtractedBill(value: unknown): ExtractedBill {
     if (!(Object.keys(entry).every((key) => key === "sourceText" || key === "confidence") && "sourceText" in entry && (entry.sourceText === null || (typeof entry.sourceText === "string" && !!entry.sourceText && entry.sourceText.length <= MAX_SOURCE_TEXT_LENGTH)))) throw new Error(`fields.${field} has invalid metadata`);
     normalizedFields[field] = { confidence: null, sourceText: entry.sourceText as string | null };
   }
-  return { ...parsed, fields: normalizeConfidenceFields(normalizedFields) } as unknown as ExtractedBill;
+  return { ...parsed, vendorTaxNumber: parsed.vendorTaxNumber ?? null, fields: normalizeConfidenceFields(normalizedFields) } as unknown as ExtractedBill;
 }
 
 /** Provider-only compatibility boundary for observed numeric schema metadata. */
@@ -254,6 +256,7 @@ export function parseProviderExtractedBill(value: unknown): ExtractedBill {
     // Provider schema metadata is advisory. The normalized contract is always version 1.
     schemaVersion: EXTRACTED_BILL_SCHEMA_VERSION,
     vendorName: nullable(annotation.vendorName, (item): item is string => typeof item === "string" && item.trim().length > 0 && item.length <= MAX_VENDOR_LENGTH),
+    vendorTaxNumber: null,
     invoiceNumber: nullable(annotation.invoiceNumber, (item): item is string => typeof item === "string" && item.trim().length > 0 && item.length <= MAX_INVOICE_LENGTH),
     invoiceDate: nullable(annotation.invoiceDate, (item): item is string => typeof item === "string" && validIsoDate(item)),
     currency: nullable(annotation.currency, (item): item is string => typeof item === "string" && /^[A-Z]{3}$/.test(item)),

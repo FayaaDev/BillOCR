@@ -11,6 +11,7 @@ const completed = (fields: Record<string, unknown> = {}) => ({
     documents: [{
       fields: {
         VendorName: { type: "string", valueString: "متجر Example", content: "متجر Example", confidence: 0.98 },
+        VendorTaxId: { type: "string", valueString: "310123456700003", content: "310123456700003", confidence: 0.96 },
         InvoiceId: { type: "string", valueString: "INV-0042", content: "INV-0042", confidence: 0.93 },
         InvoiceDate: { type: "date", valueDate: "2026-08-28", content: "28/08/2026", confidence: 0.9 },
         InvoiceTotal: { type: "currency", valueCurrency: { amount: 11, currencyCode: "USD" }, content: "$11.00", confidence: 0.95 },
@@ -62,8 +63,8 @@ test("submits original bytes, polls only its Azure origin, and maps typed invoic
   expect(result.model).toBe("prebuilt-invoice");
   expect(result.classification).toBe("invoice");
   if (result.classification !== "invoice") throw new Error("expected invoice");
-  expect(result.bill).toMatchObject({ vendorName: "متجر Example", invoiceNumber: "INV-0042", invoiceDate: "2026-08-28", currency: "USD", subtotal: 10, vat: 1, total: 11, description: "handwritten repair" });
-  expect(result.bill.fields).toMatchObject({ total: { sourceText: "$11.00", confidence: 0.95 }, vendorName: { sourceText: "متجر Example", confidence: 0.98 } });
+  expect(result.bill).toMatchObject({ vendorName: "متجر Example", vendorTaxNumber: "310123456700003", invoiceNumber: "INV-0042", invoiceDate: "2026-08-28", currency: "USD", subtotal: 10, vat: 1, total: 11, description: "handwritten repair" });
+  expect(result.bill.fields).toMatchObject({ total: { sourceText: "$11.00", confidence: 0.95 }, vendorName: { sourceText: "متجر Example", confidence: 0.98 }, vendorTaxNumber: { sourceText: "310123456700003", confidence: 0.96 } });
 });
 
 test("classifies a successful zero-document analysis as not_invoice without accepting malformed documents", async () => {

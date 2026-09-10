@@ -13,7 +13,7 @@ const MAX_VENDOR_LENGTH = 512;
 const MAX_INVOICE_LENGTH = 256;
 const MAX_DESCRIPTION_LENGTH = 2_000;
 const MAX_SOURCE_TEXT_LENGTH = 2_000;
-const invoiceFieldNames = ["vendorName", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description"] as const;
+const invoiceFieldNames = ["vendorName", "vendorTaxNumber", "invoiceNumber", "invoiceDate", "currency", "subtotal", "vat", "total", "description"] as const;
 type InvoiceFieldName = (typeof invoiceFieldNames)[number];
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -318,10 +318,10 @@ function getField(fields: Record<string, unknown>, key: string): Record<string, 
 function emptyInvoice(): ExtractedBill {
   const evidence = { confidence: null, sourceText: null };
   return {
-    schemaVersion: "1", vendorName: null, invoiceNumber: null, invoiceDate: null, currency: null,
+    schemaVersion: "1", vendorName: null, vendorTaxNumber: null, invoiceNumber: null, invoiceDate: null, currency: null,
     subtotal: null, vat: null, total: null, description: null,
     fields: {
-      vendorName: evidence, invoiceNumber: evidence, invoiceDate: evidence, currency: evidence,
+      vendorName: evidence, vendorTaxNumber: evidence, invoiceNumber: evidence, invoiceDate: evidence, currency: evidence,
       subtotal: evidence, vat: evidence, total: evidence, description: evidence,
     },
   };
@@ -335,6 +335,7 @@ function mapInvoice(payload: Record<string, unknown>): ExtractedBill | null {
   if (fields !== null && (typeof fields !== "object" || Array.isArray(fields))) throw new AzureMalformedInvoiceOutputError("Azure Document Intelligence invoice fields are invalid", "");
   const azureFields = (fields ?? {}) as Record<string, unknown>;
   const vendor = getField(azureFields, "VendorName");
+  const vendorTaxNumber = getField(azureFields, "VendorTaxId");
   const invoiceNumber = getField(azureFields, "InvoiceId");
   const invoiceDate = getField(azureFields, "InvoiceDate");
   const total = getField(azureFields, "InvoiceTotal");
@@ -345,11 +346,11 @@ function mapInvoice(payload: Record<string, unknown>): ExtractedBill | null {
   const subtotalMoney = typedMoney(subtotal);
   const vatMoney = typedMoney(vat);
   const evidence: Record<InvoiceFieldName, FieldEvidence> = {
-    vendorName: fieldEvidence(vendor), invoiceNumber: fieldEvidence(invoiceNumber), invoiceDate: fieldEvidence(invoiceDate), currency: fieldEvidence(total ?? subtotal ?? vat),
+    vendorName: fieldEvidence(vendor), vendorTaxNumber: fieldEvidence(vendorTaxNumber), invoiceNumber: fieldEvidence(invoiceNumber), invoiceDate: fieldEvidence(invoiceDate), currency: fieldEvidence(total ?? subtotal ?? vat),
     subtotal: fieldEvidence(subtotal), vat: fieldEvidence(vat), total: fieldEvidence(total), description: fieldEvidence(description),
   };
   return {
-    schemaVersion: "1", vendorName: typedString(vendor, "string", MAX_VENDOR_LENGTH), invoiceNumber: typedString(invoiceNumber, "string", MAX_INVOICE_LENGTH), invoiceDate: typedDate(invoiceDate),
+    schemaVersion: "1", vendorName: typedString(vendor, "string", MAX_VENDOR_LENGTH), vendorTaxNumber: typedString(vendorTaxNumber, "string", MAX_INVOICE_LENGTH), invoiceNumber: typedString(invoiceNumber, "string", MAX_INVOICE_LENGTH), invoiceDate: typedDate(invoiceDate),
     currency: totalMoney.currency ?? subtotalMoney.currency ?? vatMoney.currency, subtotal: subtotalMoney.amount, vat: vatMoney.amount, total: totalMoney.amount,
     description: typedString(description, "string", MAX_DESCRIPTION_LENGTH), fields: evidence,
   };
