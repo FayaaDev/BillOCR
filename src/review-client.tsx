@@ -1,72 +1,136 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useDeferredValue, useEffect, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { createColumnHelper, useTable, type ColumnFiltersState, type SortingState } from "@tanstack/react-table";
-import { ArrowUpDown, FilePenLine, Moon, Sun } from "lucide-react";
+import { FilePenLine, Moon, Sun } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { reviewDataTableFeatures } from "./review-data-table-features";
+import { paginateReviewBills, prepareReviewBills, type ReviewBill, type ReviewSort } from "./review-ticket-list";
 import "./review-original-preview";
 
-type ReviewBill = {
-  id: string;
-  invoiceDate: string | null;
-  total: number | null;
-  vat: number | null;
-  subtotal: number | null;
-  description: string | null;
-  truckNumber: string | null;
-  vendorTaxNumber: string | null;
-  vendorName: string | null;
-  invoiceNumber: string | null;
-  senderId: string | null;
-  receivedAt: string;
+const statusLabels: Record<string, string> = {
+  received: "مستلمة",
+  extracting: "قيد الاستخراج",
+  needs_review: "تحتاج مراجعة",
+  approved: "معتمدة",
+  failed: "فشلت",
+  Complete: "مكتملة",
+  NotInvoice: "ليست فاتورة",
 };
+const sourceLabels: Record<ReviewBill["source"], string> = { whatsapp: "واتساب", telegram: "تيليجرام", admin_upload: "ZIP" };
 
-const column = createColumnHelper<typeof reviewDataTableFeatures, ReviewBill>();
-const columns = column.columns([
-  column.accessor("invoiceDate", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>تاريخ الفاتورة <ArrowUpDown /></Button>, cell: ({ getValue }) => getValue() ?? "" }),
-  column.accessor("total", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>مبلغ اجمالي بعد الضريبة <ArrowUpDown /></Button>, cell: ({ getValue }) => getValue() ?? "" }),
-  column.accessor("vat", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>قيمة الضريبة <ArrowUpDown /></Button>, cell: ({ getValue }) => getValue() ?? "" }),
-  column.accessor("subtotal", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>مبلغ قبل الضريبة <ArrowUpDown /></Button>, cell: ({ getValue }) => getValue() ?? "" }),
-  column.accessor("description", { header: "وصف القطع وبيانها", cell: ({ getValue }) => <span className="whitespace-pre-line">{getValue() ?? ""}</span> }),
-  column.accessor("truckNumber", { header: "رقم الشاحنة ( المسؤليه )", cell: ({ getValue }) => getValue() ?? "" }),
-  column.accessor("vendorTaxNumber", { header: "الرقم الضريبي للمورد", cell: ({ getValue }) => getValue() ?? "" }),
-  column.accessor("vendorName", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>اسم المورد <ArrowUpDown /></Button>, cell: ({ getValue }) => getValue() ?? "" }),
-  column.accessor("invoiceNumber", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>رقم الفاتورة <ArrowUpDown /></Button>, cell: ({ getValue, row }) => <a href={`/review/bills/${encodeURIComponent(row.original.id)}`} aria-label={`مراجعة الفاتورة ${getValue() ?? row.original.id}`} title="فتح المراجعة">{getValue() ?? <FilePenLine aria-hidden="true" />}</a> }),
-  column.accessor("senderId", { header: "رقم مرسل الفاتورة", cell: ({ getValue }) => getValue() ?? "" }),
-  column.accessor("receivedAt", { header: ({ column: current }) => <Button variant="ghost" onClick={() => current.toggleSorting(current.getIsSorted() === "asc")}>تاريخ وتوقيت الارسال <ArrowUpDown /></Button>, cell: ({ getValue }) => new Date(getValue()).toLocaleString("ar-SA") }),
-]);
+function displayValue(value: string | number | null): ReactNode {
+  return value === null || value === "" ? <span className="text-muted-foreground">غير متوفر</span> : value;
+}
+
+function formatDate(value: string | null, includeTime = false): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return value;
+  return includeTime ? date.toLocaleString("ar-SA") : date.toLocaleDateString("ar-SA");
+}
+
+function Identifier({ children }: { children: string }): ReactNode {
+  return <bdi dir="ltr" className="ticket-identifier">{children}</bdi>;
+}
+
+function Detail({ label, children }: { label: string; children: ReactNode }): ReactNode {
+  return <div className="ticket-detail"><dt>{label}</dt><dd>{children}</dd></div>;
+}
+
+function Ticket({ bill }: { bill: ReviewBill }): ReactNode {
+  const invoiceLabel = bill.invoiceNumber ?? bill.id;
+  return <li>
+    <Card className="ticket-card">
+      <CardHeader>
+        <CardTitle>{bill.vendorName ?? "مورد غير معروف"}</CardTitle>
+        <CardDescription>رقم الفاتورة: <Identifier>{invoiceLabel}</Identifier></CardDescription>
+        <CardAction><Badge variant={bill.displayStatus === "NotInvoice" || bill.status === "failed" ? "destructive" : "secondary"}>{statusLabels[bill.displayStatus] ?? statusLabels[bill.status] ?? bill.displayStatus}</Badge></CardAction>
+      </CardHeader>
+      <CardContent className="ticket-content">
+        <section className="ticket-primary" aria-label="البيانات الأساسية">
+          <div className="ticket-total"><span>الإجمالي بعد الضريبة</span><strong>{displayValue(bill.total)}{bill.currency ? <> <Identifier>{bill.currency}</Identifier></> : null}</strong></div>
+          <Detail label="تاريخ الفاتورة">{displayValue(formatDate(bill.invoiceDate))}</Detail>
+          <div className="ticket-description"><span>الوصف</span><p>{displayValue(bill.description)}</p></div>
+        </section>
+        <dl className="ticket-details">
+          <Detail label="المبلغ قبل الضريبة">{displayValue(bill.subtotal)}</Detail>
+          <Detail label="قيمة الضريبة">{displayValue(bill.vat)}</Detail>
+          <Detail label="رقم الشاحنة">{bill.truckNumber ? <Identifier>{bill.truckNumber}</Identifier> : displayValue(null)}</Detail>
+          <Detail label="الرقم الضريبي للمورد">{bill.vendorTaxNumber ? <Identifier>{bill.vendorTaxNumber}</Identifier> : displayValue(null)}</Detail>
+          <Detail label="المصدر">{sourceLabels[bill.source]}</Detail>
+          <Detail label="معرف المرسل">{bill.senderId ? <Identifier>{bill.senderId}</Identifier> : displayValue(null)}</Detail>
+          <Detail label="تاريخ ووقت الاستلام">{displayValue(formatDate(bill.receivedAt, true))}</Detail>
+          <Detail label="معرف الدفعة">{bill.batchId ? <Identifier>{bill.batchId}</Identifier> : displayValue(null)}</Detail>
+          <Detail label="آخر تحديث">{displayValue(formatDate(bill.updatedAt, true))}</Detail>
+        </dl>
+      </CardContent>
+      <CardFooter className="justify-end">
+        <Button render={<a href={`/review/bills/${encodeURIComponent(bill.id)}`} aria-label={`مراجعة الفاتورة ${invoiceLabel}`} />}>
+          <FilePenLine data-icon="inline-start" aria-hidden="true" /> فتح المراجعة
+        </Button>
+      </CardFooter>
+    </Card>
+  </li>;
+}
 
 function Queue(): ReactNode {
   const [bills, setBills] = useState<ReviewBill[] | null>(null);
   const [error, setError] = useState(false);
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
   const [source, setSource] = useState("");
   const [status, setStatus] = useState("");
   const [batch, setBatch] = useState("");
+  const [sort, setSort] = useState<ReviewSort>("received-desc");
+  const [page, setPage] = useState(1);
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+
   useEffect(() => {
-    const load = () => void fetch(`/review/api/bills?${new URLSearchParams({ ...(source ? { source } : {}), ...(status ? { status } : {}), ...(batch ? { batch } : {}) })}`, { credentials: "same-origin" })
+    const controller = new AbortController();
+    let requestSequence = 0;
+    const load = () => {
+      const sequence = ++requestSequence;
+      void fetch(`/review/api/bills?${new URLSearchParams({ ...(source ? { source } : {}), ...(status ? { status } : {}), ...(batch ? { batch } : {}) })}`, { credentials: "same-origin", signal: controller.signal })
       .then(async (response) => { if (!response.ok) throw new Error("تعذر تحميل قائمة المراجعة"); return response.json() as Promise<ReviewBill[]>; })
-      .then((loaded) => { setBills(loaded); setError(false); }).catch(() => setError(true));
+      .then((loaded) => { if (sequence === requestSequence) { setBills(loaded); setError(false); } })
+      .catch((loadError: unknown) => { if (sequence === requestSequence && !(loadError instanceof DOMException && loadError.name === "AbortError")) setError(true); });
+    };
     load();
     const polling = setInterval(load, 15_000);
-    return () => clearInterval(polling);
+    return () => { controller.abort(); clearInterval(polling); };
   }, [source, status, batch]);
-  const [sorting, setSorting] = useState<SortingState>([]);
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
-  const table = useTable({ features: reviewDataTableFeatures, data: bills ?? [], columns, onSortingChange: setSorting, onColumnFiltersChange: setColumnFilters, state: { sorting, columnFilters } });
-  const toggleTheme = () => { const next = !dark; document.documentElement.classList.toggle("dark", next); try { localStorage.setItem("review-theme", next ? "dark" : "light"); } catch {} setDark(next); };
+
+  const prepared = prepareReviewBills(bills ?? [], deferredSearch, sort);
+  const pagination = paginateReviewBills(prepared, page);
+  useEffect(() => { if (pagination.page !== page) setPage(pagination.page); }, [page, pagination.page]);
+
+  const resetPage = (change: () => void): void => { change(); setPage(1); };
+  const toggleTheme = (): void => { const next = !dark; document.documentElement.classList.toggle("dark", next); try { localStorage.setItem("review-theme", next ? "dark" : "light"); } catch {} setDark(next); };
+
   return <main className="review-page">
     <div className="flex items-center justify-between gap-4"><h1>قائمة المراجعة</h1><Button variant="outline" size="icon" onClick={toggleTheme} aria-label={dark ? "التبديل إلى الوضع الفاتح" : "التبديل إلى الوضع الداكن"}>{dark ? <Sun /> : <Moon />}</Button></div>
-    {error ? <p className="notice error">تعذر تحميل قائمة المراجعة. حدّث الصفحة وحاول مرة أخرى.</p> : bills === null ? <p className="notice">جارٍ تحميل قائمة المراجعة…</p> : <div className="w-full">
-      <div className="flex items-center gap-2 py-4">
-        <Input placeholder="ابحث برقم الفاتورة..." value={(table.getColumn("invoiceNumber")?.getFilterValue() as string) ?? ""} onChange={(event) => table.getColumn("invoiceNumber")?.setFilterValue(event.target.value)} className="max-w-sm" />
-        <select aria-label="المصدر" value={source} onChange={(event) => setSource(event.target.value)}><option value="">كل المصادر</option><option value="whatsapp">واتساب</option><option value="telegram">تيليجرام</option><option value="admin_upload">ZIP</option></select>
-        <select aria-label="الحالة" value={status} onChange={(event) => setStatus(event.target.value)}><option value="">كل الحالات</option><option value="complete">مكتملة</option><option value="not_invoice">ليست فاتورة</option><option value="needs_review">تحتاج مراجعة</option></select>
-        <Input aria-label="الدفعة" placeholder="معرف الدفعة" value={batch} onChange={(event) => setBatch(event.target.value)} className="max-w-sm" />
+    {error ? <p className="notice error">تعذر تحميل قائمة المراجعة. حدّث الصفحة وحاول مرة أخرى.</p> : bills === null ? <p className="notice">جارٍ تحميل قائمة المراجعة…</p> : <div className="ticket-dashboard">
+      <div className="ticket-toolbar" aria-label="بحث وفرز الفواتير">
+        <Input aria-label="البحث برقم الفاتورة" placeholder="ابحث برقم الفاتورة..." value={search} onChange={(event) => resetPage(() => setSearch(event.target.value))} />
+        <select aria-label="المصدر" value={source} onChange={(event) => resetPage(() => setSource(event.target.value))}><option value="">كل المصادر</option><option value="whatsapp">واتساب</option><option value="telegram">تيليجرام</option><option value="admin_upload">ZIP</option></select>
+        <select aria-label="الحالة" value={status} onChange={(event) => resetPage(() => setStatus(event.target.value))}><option value="">كل الحالات</option><option value="complete">مكتملة</option><option value="not_invoice">ليست فاتورة</option><option value="needs_review">تحتاج مراجعة</option></select>
+        <Input aria-label="الدفعة" placeholder="معرف الدفعة" value={batch} onChange={(event) => resetPage(() => setBatch(event.target.value))} />
+        <select aria-label="ترتيب الفواتير" value={sort} onChange={(event) => resetPage(() => setSort(event.target.value as ReviewSort))}>
+          <option value="received-desc">الأحدث استلاماً</option><option value="received-asc">الأقدم استلاماً</option><option value="invoice-desc">تاريخ الفاتورة: الأحدث</option><option value="invoice-asc">تاريخ الفاتورة: الأقدم</option><option value="total-desc">الإجمالي: الأعلى</option><option value="total-asc">الإجمالي: الأقل</option><option value="vendor">اسم المورد</option><option value="invoice-number">رقم الفاتورة</option>
+        </select>
       </div>
-      <div className="overflow-x-auto rounded-md border">{bills.length === 0 ? <p className="notice m-4">لا توجد فواتير للمراجعة.</p> : <Table><TableHeader>{table.getHeaderGroups().map((group) => <TableRow key={group.id}>{group.headers.map((header) => <TableHead key={header.id}>{header.isPlaceholder ? null : <table.FlexRender header={header} />}</TableHead>)}</TableRow>)}</TableHeader><TableBody>{table.getRowModel().rows.length ? table.getRowModel().rows.map((row) => <TableRow key={row.id}>{row.getVisibleCells().map((cell) => <TableCell key={cell.id}><table.FlexRender cell={cell} /></TableCell>)}</TableRow>) : <TableRow><TableCell colSpan={columns.length} className="h-24 text-center">لا توجد نتائج.</TableCell></TableRow>}</TableBody></Table>}</div>
+      {bills.length === 0 ? <p className="notice">لا توجد فواتير للمراجعة.</p> : prepared.length === 0 ? <p className="notice">لا توجد نتائج مطابقة لرقم الفاتورة.</p> : <>
+        <ul className="ticket-list" aria-label="فواتير المراجعة">{pagination.bills.map((bill) => <Ticket key={bill.id} bill={bill} />)}</ul>
+        <nav className="ticket-pagination" aria-label="صفحات فواتير المراجعة">
+          <p aria-live="polite">عرض {pagination.rangeStart}–{pagination.rangeEnd} من {pagination.total} فاتورة</p>
+          <div className="ticket-page-buttons">
+            <Button variant="outline" className="ticket-page-button" disabled={pagination.page === 1} onClick={() => setPage((current) => current - 1)} aria-label="الصفحة السابقة">السابق</Button>
+            {Array.from({ length: pagination.pageCount }, (_, index) => index + 1).map((number) => <Button key={number} variant={number === pagination.page ? "default" : "outline"} className="ticket-page-button" onClick={() => setPage(number)} aria-label={`الصفحة ${number}`} aria-current={number === pagination.page ? "page" : undefined}>{number}</Button>)}
+            <Button variant="outline" className="ticket-page-button" disabled={pagination.page === pagination.pageCount} onClick={() => setPage((current) => current + 1)} aria-label="الصفحة التالية">التالي</Button>
+          </div>
+        </nav>
+      </>}
     </div>}
   </main>;
 }

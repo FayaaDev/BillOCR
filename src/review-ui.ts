@@ -79,11 +79,11 @@ export async function handleReviewRequest(request: Request, database: BillDataba
   if (url.pathname === "/review/api/bills") {
     if (request.method !== "GET") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET" } });
     const filters = reviewFilters(url); if (!filters) return new Response("طلب غير صالح", { status: 400, headers });
-    const bills = database.listReviewBills(filters).map(({ id, source, sourceSenderId, receivedAt, extraction }) => ({
-      id, invoiceDate: extraction?.invoiceDate ?? null, total: extraction?.total ?? null, vat: extraction?.vat ?? null,
+    const bills = database.listReviewBills(filters).map(({ id, source, status, displayStatus, batchId, sourceSenderId, receivedAt, updatedAt, extraction }) => ({
+      id, source, status, displayStatus, batchId, invoiceDate: extraction?.invoiceDate ?? null, total: extraction?.total ?? null, currency: extraction?.currency ?? null, vat: extraction?.vat ?? null,
       subtotal: extraction?.subtotal ?? null, description: extraction?.description ?? null, truckNumber: extraction?.truckNumber ?? null,
       vendorTaxNumber: extraction?.vendorTaxNumber ?? null, vendorName: extraction?.vendorName ?? null,
-      invoiceNumber: extraction?.invoiceNumber ?? null, senderId: source === "admin_upload" ? null : sourceSenderId, receivedAt,
+      invoiceNumber: extraction?.invoiceNumber ?? null, senderId: source === "admin_upload" ? null : sourceSenderId, receivedAt, updatedAt,
     }));
     return Response.json(bills, { headers });
   }
