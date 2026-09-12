@@ -40,6 +40,7 @@
     "react-dom": "^19.2.8",
     "sharp": "0.35.4",
     "tailwind-merge": "^3.6.0",
+    "xlsx": "^0.18.5",
     "yauzl": "^3.4.0"
   }
 }

@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import * as XLSX from "xlsx";
 import type { AppConfig } from "./config";
 import type { ExtractedBill } from "./contracts";
 import type { BillDatabase, CompletedInvoiceExportRecord, ReviewQueueFilters } from "./database";
@@ -19,8 +20,19 @@ function csvCell(value: string | number | null | undefined): string {
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 function completedInvoiceCsv(records: CompletedInvoiceExportRecord[]): string {
-  const values = records.map(({ receivedAt, senderId, extraction }) => [extraction.invoiceDate, extraction.total, extraction.vat, extraction.subtotal, extraction.description, extraction.truckNumber, extraction.vendorTaxNumber, extraction.vendorName, extraction.invoiceNumber, senderId, receivedAt]);
+  const values = completedInvoiceRows(records);
   return `\uFEFF${[completedInvoiceCsvHeaders, ...values].map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
+}
+function completedInvoiceRows(records: CompletedInvoiceExportRecord[]): Array<Array<string | number | null>> {
+  return records.map(({ receivedAt, senderId, extraction }) => [extraction.invoiceDate ?? null, extraction.total ?? null, extraction.vat ?? null, extraction.subtotal ?? null, extraction.description ?? null, extraction.truckNumber ?? null, extraction.vendorTaxNumber ?? null, extraction.vendorName ?? null, extraction.invoiceNumber ?? null, senderId ?? null, receivedAt]);
+}
+function completedInvoiceXlsx(records: CompletedInvoiceExportRecord[]): ArrayBuffer {
+  const worksheet = XLSX.utils.aoa_to_sheet([[...completedInvoiceCsvHeaders], ...completedInvoiceRows(records)]);
+  worksheet["!cols"] = completedInvoiceCsvHeaders.map(() => ({ wch: 24 }));
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "الفواتير المكتملة");
+  const bytes = XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true });
+  return bytes instanceof ArrayBuffer ? bytes : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 const page = (_title: string, body: string, status = 200): Response => new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><script src="/review/assets/theme.js"></script><link rel="stylesheet" href="/review/assets/client.css"></head><body>${body}</body></html>`, { status, headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
 const appShell = (csrfToken: string): Response => new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><script src="/review/assets/theme.js"></script><link rel="stylesheet" href="/review/assets/client.css"></head><body><div id="review-actions"></div><div id="root" data-csrf="${esc(csrfToken)}"></div><script src="/review/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
@@ -75,6 +87,10 @@ export async function handleReviewRequest(request: Request, database: BillDataba
   if (url.pathname === "/review/export.csv") {
     if (request.method !== "GET") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET" } });
     return new Response(completedInvoiceCsv(database.listCompletedInvoiceExports()), { headers: { ...headers, "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="completed-invoices.csv"' } });
+  }
+  if (url.pathname === "/review/export.xlsx") {
+    if (request.method !== "GET") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET" } });
+    return new Response(completedInvoiceXlsx(database.listCompletedInvoiceExports()), { headers: { ...headers, "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "content-disposition": 'attachment; filename="completed-invoices.xlsx"' } });
   }
   if (url.pathname === "/review/api/bills") {
     if (request.method !== "GET") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET" } });

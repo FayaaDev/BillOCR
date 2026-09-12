@@ -4,12 +4,13 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BillDatabase } from "../src/database";
-import { handleReviewRequest } from "../src/review-ui";
+import { completedInvoiceCsvHeaders, handleReviewRequest } from "../src/review-ui";
 import type { AppConfig } from "../src/config";
 import { createReviewCorrectionSyncHandler, createSheetsProjectionHandler, type SheetsAdapter } from "../src/google-projections";
 import { JobWorker } from "../src/worker";
 import { createLogger } from "../src/logger";
 import { handleRequest } from "../src/http";
+import * as XLSX from "xlsx";
 
 let dir: string; let assetDir: string; let database: BillDatabase; let config: AppConfig; let id: string;
 const basic = (user = "alice", password = "password") => ({ authorization: `Basic ${btoa(`${user}:${password}`)}` });
@@ -58,7 +59,7 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   expect(shell.headers.get("content-security-policy")).toContain("script-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("style-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("connect-src 'self'");
   expect(html).not.toContain('href="/review/export.csv"'); expect(html).toMatch(/<div id="root" data-csrf="[^"]+"><\/div>/); expect(html).toContain('<div id="review-actions"></div>'); expect(html).toContain('src="/review/assets/theme.js"'); expect(html).toContain('src="/review/assets/client.js"'); expect(html).toContain('href="/review/assets/client.css"'); expect(html).not.toContain("review-bill"); expect(html).not.toContain("<unsafe>");
   const clientSource = readFileSync(join(import.meta.dir, "..", "src", "review-client.tsx"), "utf8");
-  expect(clientSource).toContain('href="/admin"'); expect(clientSource).toContain('aria-current="page"'); expect(clientSource).toContain('<Button variant="outline" render={<a href="/review/export.csv" />}'); expect(clientSource).toContain('<Button variant="destructive"'); expect(clientSource).toContain('"x-csrf-token": csrf');
+   expect(clientSource).toContain('href="/admin"'); expect(clientSource).toContain('aria-current="page"'); expect(clientSource).toContain('<Button variant="outline" render={<a href="/review/export.csv" />}'); expect(clientSource).toContain('<Button variant="outline" render={<a href="/review/export.xlsx" />}'); expect(clientSource).toContain('<Button variant="destructive"'); expect(clientSource).toContain('"x-csrf-token": csrf');
   for (const label of ["تاريخ الفاتورة", "الإجمالي بعد الضريبة", "قيمة الضريبة", "المبلغ قبل الضريبة", "الوصف", "رقم الشاحنة", "الرقم الضريبي للمورد", "اسم المورد", "رقم الفاتورة", "معرف المرسل", "تاريخ ووقت الاستلام", "معرف الدفعة"]) expect(clientSource).toContain(label);
   expect(clientSource).toContain('<ul className="ticket-list"');
   expect(clientSource).toContain('href={`/review/bills/${encodeURIComponent(bill.id)}`}');
@@ -129,7 +130,7 @@ test("review lists and serves a verified Telegram original from shared storage",
   expect(original.status).toBe(200); expect(new Uint8Array(await original.arrayBuffer())).toEqual(bytes);
 });
 
-test("completed-invoice CSV export is authenticated, uses reviewed data, and excludes incomplete records", async () => {
+test("completed-invoice exports are authenticated, use reviewed data, and exclude incomplete records", async () => {
   const batch = database.createAdminUploadBatch({ idempotencyKey: "csv-batch", originalFilename: "invoices.zip" }).batch;
   const create = (index: number, state: "complete" | "not_invoice" | "failed", status: "approved" | "failed" = "approved") => {
     const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: index, entryPath: `invoice-${index}.pdf` }).item;
@@ -153,9 +154,23 @@ test("completed-invoice CSV export is authenticated, uses reviewed data, and exc
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toBe("text/csv; charset=utf-8");
   expect(response.headers.get("content-disposition")).toBe('attachment; filename="completed-invoices.csv"');
-  expect(await response.text()).toBe("\uFEFFتاريخ الفاتورة,مبلغ اجمالي بعد الضريبة,قيمة الضريبة,مبلغ قبل الضريبة,وصف القطع وبيانها,رقم الشاحنة ( المسؤليه ),الرقم الضريبي للمورد,اسم المورد,رقم الفاتورة,رقم مرسل الفاتورة,تاريخ وتوقيت الارسال\r\n2026-08-03,10,1,9,\"'@reviewed\nsecond item\",'+TRK-7,310123456700003,\"'=Reviewed, Inc.\",\"\"\"INV\"\"\n1\",,2026-08-02T00:00:00.000Z\r\n2026-08-04,20,2,18,telegram,,,Telegram vendor,TG-1,csv-telegram-sender,2026-08-04T00:00:00.000Z\r\n");
-  const post = await handleReviewRequest(new Request("http://x/review/export.csv", { method: "POST", headers: basic() }), database, config);
-  expect(post.status).toBe(405); expect(post.headers.get("allow")).toBe("GET");
+   expect(await response.text()).toBe("\uFEFFتاريخ الفاتورة,مبلغ اجمالي بعد الضريبة,قيمة الضريبة,مبلغ قبل الضريبة,وصف القطع وبيانها,رقم الشاحنة ( المسؤليه ),الرقم الضريبي للمورد,اسم المورد,رقم الفاتورة,رقم مرسل الفاتورة,تاريخ وتوقيت الارسال\r\n2026-08-03,10,1,9,\"'@reviewed\nsecond item\",'+TRK-7,310123456700003,\"'=Reviewed, Inc.\",\"\"\"INV\"\"\n1\",,2026-08-02T00:00:00.000Z\r\n2026-08-04,20,2,18,telegram,,,Telegram vendor,TG-1,csv-telegram-sender,2026-08-04T00:00:00.000Z\r\n");
+   const post = await handleReviewRequest(new Request("http://x/review/export.csv", { method: "POST", headers: basic() }), database, config);
+   expect(post.status).toBe(405); expect(post.headers.get("allow")).toBe("GET");
+   expect((await handleReviewRequest(new Request("http://x/review/export.xlsx"), database, config)).status).toBe(401);
+   const xlsx = await handleReviewRequest(new Request("http://x/review/export.xlsx", { headers: basic() }), database, config);
+   expect(xlsx.status).toBe(200);
+   expect(xlsx.headers.get("content-type")).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+   expect(xlsx.headers.get("content-disposition")).toBe('attachment; filename="completed-invoices.xlsx"');
+   const workbook = XLSX.read(await xlsx.arrayBuffer(), { type: "array" });
+   expect(workbook.SheetNames).toEqual(["الفواتير المكتملة"]);
+   expect(XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]!]!, { header: 1, raw: true, defval: null })).toEqual([
+     [...completedInvoiceCsvHeaders],
+     ["2026-08-03", 10, 1, 9, "@reviewed\nsecond item", "+TRK-7", "310123456700003", "=Reviewed, Inc.", '"INV"\n1', null, "2026-08-02T00:00:00.000Z"],
+     ["2026-08-04", 20, 2, 18, "telegram", null, null, "Telegram vendor", "TG-1", "csv-telegram-sender", "2026-08-04T00:00:00.000Z"],
+   ]);
+   const xlsxPost = await handleReviewRequest(new Request("http://x/review/export.xlsx", { method: "POST", headers: basic() }), database, config);
+   expect(xlsxPost.status).toBe(405); expect(xlsxPost.headers.get("allow")).toBe("GET");
 });
 
 test("CSRF-protected corrected approval preserves model output and is exactly once", async () => {

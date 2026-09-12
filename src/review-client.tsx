@@ -144,7 +144,7 @@ function ReviewActions({ csrf }: { csrf: string }): ReactNode {
       .then((response) => { if (!response.ok) throw new Error("clear failed"); window.location.reload(); })
       .catch(() => { setClearing(false); alert("تعذر حذف الفواتير. حدّث الصفحة وحاول مرة أخرى."); });
   };
-  return <header className="review-actions-bar"><nav className="review-tabs" aria-label="التنقل الإداري"><a href="/admin">لوحة الإدارة</a><a href="/review" aria-current="page">مراجعة الفواتير</a></nav><div className="flex flex-wrap gap-2"><Button variant="outline" render={<a href="/review/export.csv" />}>تصدير CSV</Button><Button variant="destructive" disabled={clearing} onClick={clearBills}>{clearing ? "جارٍ الحذف…" : "حذف جميع الفواتير"}</Button></div></header>;
+  return <header className="review-actions-bar"><nav className="review-tabs" aria-label="التنقل الإداري"><a href="/admin">لوحة الإدارة</a><a href="/review" aria-current="page">مراجعة الفواتير</a></nav><div className="flex flex-wrap gap-2"><Button variant="outline" render={<a href="/review/export.csv" />}>تصدير CSV</Button><Button variant="outline" render={<a href="/review/export.xlsx" />}>تصدير XLSX</Button><Button variant="destructive" disabled={clearing} onClick={clearBills}>{clearing ? "جارٍ الحذف…" : "حذف جميع الفواتير"}</Button></div></header>;
 }
 
 const root = document.getElementById("root");
