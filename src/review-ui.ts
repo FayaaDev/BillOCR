@@ -80,7 +80,8 @@ async function parseForm(request: Request): Promise<URLSearchParams> {
   for (const [key, value] of parsed) {
     if (!isReviewFormField(key)) continue;
     if (seen.has(key)) throw new FormError(400);
-    if (value.length > (reviewFieldLimits[key as keyof typeof reviewFieldLimits] ?? 1_024) || /[\x00-\x1f\x7f]/.test(value)) throw new FormError(413);
+    const controls = key === "description" ? /[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]/ : /[\x00-\x1f\x7f]/;
+    if (value.length > (reviewFieldLimits[key as keyof typeof reviewFieldLimits] ?? 1_024) || controls.test(value)) throw new FormError(413);
     seen.add(key); form.append(key, value);
   }
   return form;

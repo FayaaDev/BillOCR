@@ -175,12 +175,16 @@ test("completed-invoice exports are authenticated, use reviewed data, and exclud
 
 test("CSRF-protected corrected approval preserves model output and is exactly once", async () => {
   const detail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
-  const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; if (!csrf) throw new Error("missing csrf");
-  const form = new URLSearchParams({ csrf, contentRevision: "1", reviewRevision: "0", action: "approve", vendorName: "Vendor", vendorTaxNumber: "310123456700003", invoiceNumber: "N", invoiceDate: "2026-08-01", subtotal: "9", vat: "1", total: "10", description: "ok", truckNumber: "TRK-7", extensionPayload: "x".repeat(40_000) });
-  expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(303);
+  const html = await detail.text();
+  const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1]; if (!csrf) throw new Error("missing csrf");
+  const endpoint = /<form[^>]*id="review-correction-form"[^>]*action="([^"]+)"/.exec(html)?.[1]; if (!endpoint) throw new Error("missing review endpoint");
+  expect(endpoint).toBe(`/review/bills/${id}/review`);
+  const description = "first item\nsecond item";
+  const form = new URLSearchParams({ csrf, contentRevision: "1", reviewRevision: "0", action: "approve", vendorName: "Vendor", vendorTaxNumber: "310123456700003", invoiceNumber: "N", invoiceDate: "2026-08-01", subtotal: "9", vat: "1", total: "10", description, truckNumber: "TRK-7" });
+  expect((await handleReviewRequest(new Request(`http://x${endpoint}`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(303);
   expect(database.getBill(id)).toMatchObject({ status: "approved", contentRevision: 2, reviewRevision: 1 }); expect(database.getExtraction(id)?.normalized?.vendorName).toBe("<img src=x>");
-  expect(database.getReviewEvents(id)).toMatchObject([{ reason: null, note: null }]); expect(database.getEffectiveExtraction(id)).toMatchObject({ vendorName: "Vendor", vendorTaxNumber: "310123456700003", truckNumber: "TRK-7", currency: "USD" });
-  expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(409);
+  expect(database.getReviewEvents(id)).toMatchObject([{ reason: null, note: null }]); expect(database.getEffectiveExtraction(id)).toMatchObject({ vendorName: "Vendor", vendorTaxNumber: "310123456700003", truckNumber: "TRK-7", description, currency: "USD" });
+  expect((await handleReviewRequest(new Request(`http://x${endpoint}`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: form }), database, config)).status).toBe(409);
   expect(database.getReviewEvents(id)).toHaveLength(1); expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) count FROM jobs WHERE type = 'project_to_sheet'").get()?.count).toBe(1);
 });
 
