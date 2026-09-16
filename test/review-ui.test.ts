@@ -59,10 +59,10 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   expect(shell.headers.get("content-security-policy")).toContain("script-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("style-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("connect-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("font-src 'self'");
   expect(html).not.toContain('href="/review/export.csv"'); expect(html).toMatch(/<div id="root" data-csrf="[^"]+"><\/div>/); expect(html).toContain('<div id="review-actions"></div>'); expect(html).toContain('src="/review/assets/theme.js"'); expect(html).toContain('src="/review/assets/client.js"'); expect(html).toContain('href="/review/assets/client.css"'); expect(html).not.toContain("review-bill"); expect(html).not.toContain("<unsafe>");
   const clientSource = readFileSync(join(import.meta.dir, "..", "src", "review-client.tsx"), "utf8");
-   expect(clientSource).toContain('href="/admin"'); expect(clientSource).toContain('aria-current="page"'); expect(clientSource).toContain('<Button variant="outline" render={<a href="/review/export.csv" />}'); expect(clientSource).toContain('<Button variant="outline" render={<a href="/review/export.xlsx" />}'); expect(clientSource).toContain('<Button variant="destructive"'); expect(clientSource).toContain('"x-csrf-token": csrf');
+   expect(clientSource).toContain('href="/admin"'); expect(clientSource).toContain('aria-current="page"'); expect(clientSource).toContain('<Button variant="outline" nativeButton={false} render={<a href="/review/export.csv" />}'); expect(clientSource).toContain('<Button variant="outline" nativeButton={false} render={<a href="/review/export.xlsx" />}'); expect(clientSource).toContain('<Button variant="destructive"'); expect(clientSource).toContain('"x-csrf-token": csrf');
   for (const label of ["تاريخ الفاتورة", "الإجمالي بعد الضريبة", "قيمة الضريبة", "المبلغ قبل الضريبة", "الوصف", "رقم الشاحنة", "الرقم الضريبي للمورد", "اسم المورد", "رقم الفاتورة", "معرف المرسل", "تاريخ ووقت الاستلام", "معرف الدفعة"]) expect(clientSource).toContain(label);
   expect(clientSource).toContain('<ul className="ticket-list"');
-  expect(clientSource).toContain('href={`/review/bills/${encodeURIComponent(bill.id)}`}');
+  expect(clientSource).toContain('<Button nativeButton={false} render={<a href={`/review/bills/${encodeURIComponent(bill.id)}`}');
   expect(clientSource).toContain('aria-current={number === pagination.page ? "page" : undefined}');
   expect(clientSource).toContain('<bdi dir="ltr"');
   expect(clientSource).not.toContain("@tanstack/react-table");
@@ -187,7 +187,9 @@ test("CSRF-protected corrected approval preserves model output and is exactly on
 test("approved bills accept revision-fenced corrections and rejection", async () => {
   database.sqlite.query("UPDATE bills SET status = 'approved' WHERE id = ?").run(id);
   const detail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
-  const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; if (!csrf) throw new Error("missing csrf");
+  const detailHtml = await detail.text();
+  expect(detailHtml).toContain('value="approve">حفظ التعديلات</button>');
+  const csrf = /name="csrf" value="([^"]+)"/.exec(detailHtml)?.[1]; if (!csrf) throw new Error("missing csrf");
   const correction = new URLSearchParams({ csrf, contentRevision: "1", reviewRevision: "0", action: "approve", vendorName: "Corrected Vendor", invoiceNumber: "N", invoiceDate: "2026-08-01", subtotal: "9", vat: "1", total: "10", description: "corrected" });
   expect((await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: correction }), database, config)).status).toBe(303);
   expect(database.getBill(id)).toMatchObject({ status: "approved", contentRevision: 2, reviewRevision: 1 });

@@ -16,7 +16,7 @@ const auth = { authorization: `Basic ${btoa("admin:password")}` };
 test("admin routes require the review Basic authentication and are never cached", async () => {
   expect((await handleAdminRequest(new Request("http://x/admin"), config)).status).toBe(401);
   const shell = await handleAdminRequest(new Request("http://x/admin", { headers: auth }), config);
-  expect(shell.status).toBe(200); expect(shell.headers.get("cache-control")).toBe("no-store");
+  expect(shell.status).toBe(200); expect(shell.headers.get("cache-control")).toBe("no-store"); expect(shell.headers.get("content-security-policy")).toContain("font-src 'self'");
   const html = await shell.text();
   expect(html).toContain('<html lang="ar" dir="rtl">');
   expect(html).toContain('<title>ماسح الفواتير</title>');
