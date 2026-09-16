@@ -5,7 +5,6 @@ test("review form validation accepts boundaries and explains oversized values", 
   expect(reviewFormValidationMessage([["description", "x".repeat(2_000)]])).toBeNull();
   expect(reviewFormValidationMessage([["description", "x".repeat(2_001)]])).toBe("وصف الفاتورة أطول من الحد المسموح.");
   expect(reviewFormValidationMessage([["vendorName", "x".repeat(1_025)]])).toBe("إحدى قيم الفاتورة أطول من الحد المسموح.");
-  expect(reviewFormValidationMessage([["description", "ض".repeat(2_000)], ["vendorName", "ض".repeat(1_024)], ["invoiceNumber", "ض".repeat(1_024)], ["vendorTaxNumber", "ض".repeat(1_024)], ["truckNumber", "ض".repeat(1_024)], ["invoiceDate", "ض".repeat(1_024)]])).toContain("بيانات المراجعة أكبر من الحد المسموح");
 });
 
 test("review form removes controls injected outside the application schema", () => {

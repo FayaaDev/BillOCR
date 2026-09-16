@@ -7,7 +7,7 @@ import type { ExtractedBill } from "./contracts";
 import type { BillDatabase, CompletedInvoiceExportRecord, ReviewQueueFilters } from "./database";
 import { readVerifiedOriginal } from "./originals";
 import { isSupportedImageMimeType } from "./attachment-mime";
-import { reviewFieldLimits, reviewFormMaxBytes } from "./review-form";
+import { isReviewFormField, reviewFieldLimits, reviewFormMaxBytes } from "./review-form";
 
 const editable = ["invoiceDate", "total", "vat", "subtotal", "description", "truckNumber", "vendorTaxNumber", "vendorName", "invoiceNumber"] as const;
 type Editable = (typeof editable)[number];
@@ -76,7 +76,14 @@ async function parseForm(request: Request): Promise<URLSearchParams> {
   for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > reviewFormMaxBytes) throw new FormError(413); chunks.push(next.value); }
   const raw = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
   if (/%(?![0-9A-Fa-f]{2})/.test(raw) || /[\x00-\x1f\x7f]/.test(raw)) throw new FormError(400);
-  const form = new URLSearchParams(raw); if ([...form].length > 32 || [...form].some(([key, value]) => key.length > 64 || value.length > (reviewFieldLimits[key as keyof typeof reviewFieldLimits] ?? (key === "reason" || key === "note" ? 4_096 : 1_024)) || /[\x00-\x1f\x7f]/.test(value))) throw new FormError(413); return form;
+  const parsed = new URLSearchParams(raw); const form = new URLSearchParams(); const seen = new Set<string>();
+  for (const [key, value] of parsed) {
+    if (!isReviewFormField(key)) continue;
+    if (seen.has(key)) throw new FormError(400);
+    if (value.length > (reviewFieldLimits[key as keyof typeof reviewFieldLimits] ?? 1_024) || /[\x00-\x1f\x7f]/.test(value)) throw new FormError(413);
+    seen.add(key); form.append(key, value);
+  }
+  return form;
 }
 
 export async function handleReviewRequest(request: Request, database: BillDatabase, config: AppConfig, assetDir = join(import.meta.dir, "..", "dist", "review")): Promise<Response> {

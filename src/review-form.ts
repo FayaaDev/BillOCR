@@ -1,4 +1,4 @@
-export const reviewFormMaxBytes = 32 * 1024;
+export const reviewFormMaxBytes = 128 * 1024;
 export const reviewFieldLimits = {
   invoiceDate: 1_024,
   total: 1_024,
@@ -12,6 +12,10 @@ export const reviewFieldLimits = {
 } as const;
 
 const reviewFormFields = new Set(["csrf", "contentRevision", "reviewRevision", "action", ...Object.keys(reviewFieldLimits)]);
+
+export function isReviewFormField(value: string): boolean {
+  return reviewFormFields.has(value);
+}
 
 export function pruneReviewFormData(form: FormData): void {
   for (const key of [...form.keys()]) if (!reviewFormFields.has(key)) form.delete(key);
