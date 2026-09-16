@@ -129,6 +129,7 @@ a:hover { text-decoration: underline; }
 .review-field textarea { resize: vertical; }
 .review-field-full { width: 100%; }
 .review-actions { border-top: 1px solid var(--border); padding-top: 1rem; }
+.review-form-error:empty { display: none; }
 .reject-action { background: color-mix(in oklch, var(--destructive) 10%, transparent); color: var(--destructive); }
 .reject-action:hover { background: color-mix(in oklch, var(--destructive) 20%, transparent); color: var(--destructive); }
 .permanent-failure { margin: 0 0 1.5rem; }
