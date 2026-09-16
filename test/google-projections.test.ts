@@ -278,3 +278,32 @@ test("supersession after final pre-check compensates only the stale revision row
   await new JobWorker(database, { project_to_sheet: createSheetsProjectionHandler(database, sheets) }, policy, "worker", createLogger("error")).runOnce();
   expect(rows.size).toBe(0);
 });
+
+test("stale projection cleanup repairs a newer approved correction", async () => {
+  const item = approvedBill();
+  const staleJobId = database.listJobsForBill(item.id)[0]!.id;
+  const rows = new Map<number, (string | number | null)[]>([[2, [null,null,null,null,null,null,null,null,null,null,null,null,null,item.id,1]]]);
+  let superseded = false;
+  const sheets: SheetsAdapter = {
+    initializeLedger: async () => undefined,
+    findRowByBillId: async () => 2,
+    findLedgerRows: async (id) => [...rows.entries()].flatMap(([row, values]) => values[13] === id ? [{ row, revision: Number(values[14]) }] : []),
+    appendRow: async (values) => { rows.set(2, [...values]); return 2; },
+    updateRow: async (row, values) => {
+      rows.set(row, [...values]);
+      if (superseded) return;
+      superseded = true;
+      const current = database.getBill(item.id)!;
+      expect(database.submitReview({ billId: item.id, reviewerId: "reviewer", action: "approve", reason: null, note: null, expectedContentRevision: current.contentRevision, expectedReviewRevision: current.reviewRevision, corrected: { ...database.getEffectiveExtraction(item.id)!, vendorName: "Corrected" } }, [])).toBe(true);
+      database.sqlite.query("UPDATE jobs SET state = 'succeeded' WHERE idempotency_key = ?").run(`project:${item.id}:2`);
+    },
+    clearRows: async (targets) => { for (const row of targets) rows.delete(row); },
+  };
+  const worker = new JobWorker(database, { project_to_sheet: createSheetsProjectionHandler(database, sheets) }, policy, "worker", createLogger("error"));
+  await worker.runOnce();
+  expect(rows.size).toBe(0);
+  expect(database.listJobsForBill(item.id)).toContainEqual(expect.objectContaining({ type: "project_to_sheet", state: "pending", expectedRevision: 2, idempotencyKey: `repair:${staleJobId}:2` }));
+  await worker.runOnce();
+  expect([...rows.values()]).toContainEqual(expect.arrayContaining(["Corrected"]));
+  expect([...rows.values()][0]?.[14]).toBe(2);
+});

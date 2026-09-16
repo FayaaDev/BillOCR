@@ -476,7 +476,7 @@ export class BillDatabase {
   submitReview(input: ReviewSubmission, factualIssues: Array<Omit<ValidationIssue, "id" | "billId" | "createdAt">>): boolean {
     const now = new Date().toISOString();
     return this.sqlite.transaction(() => {
-      const bill = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND status IN ('needs_review','failed')").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      const bill = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND status IN ('needs_review','failed','approved')").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
       if (!bill) return false;
       // Reject a crafted approval before any effective-data, audit, issue, or revision mutation.
       if (input.action === "approve" && bill.classification === "not_invoice") return false;
@@ -491,9 +491,10 @@ export class BillDatabase {
       for (const issue of factualIssues) insertIssue.run(randomUUID(), input.billId, issue.field, issue.code, issue.message, issue.severity, issue.observedValue, now);
        const approved = input.action === "approve";
       this.sqlite.query("UPDATE bills SET status = ?, manual_review_required = 0, content_revision = ?, review_revision = ?, updated_at = ? WHERE id = ?").run(approved ? "approved" : "failed", nextContent, nextReview, now, input.billId);
-       this.invalidatePendingProjectJobs(input.billId, now);
+        this.invalidatePendingProjectJobs(input.billId, now);
         if (bill.batch_item_id) {
-          this.sqlite.query("UPDATE admin_upload_batch_items SET state = ?, updated_at = ? WHERE id = ? AND state = 'processing'").run(approved ? "complete" : "rejected", now, bill.batch_item_id);
+          if (approved) this.sqlite.query("UPDATE admin_upload_batch_items SET state = 'complete', updated_at = ? WHERE id = ? AND state IN ('processing','rejected','failed')").run(now, bill.batch_item_id);
+          else this.sqlite.query("UPDATE admin_upload_batch_items SET state = 'rejected', updated_at = ? WHERE id = ? AND state IN ('processing','complete')").run(now, bill.batch_item_id);
           this.completeAdminUploadBatchIfTerminal(bill.batch_item_id, now);
         }
       if (approved) {

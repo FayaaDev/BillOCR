@@ -503,6 +503,20 @@ describe("admin-upload source and classification persistence", () => {
     expect(database.getAdminUploadBatchStatus(batch.id)?.items).toMatchObject([{ state: "complete", billId: bill.id }]);
   });
 
+  test("rejecting an approved admin-upload bill updates its completed batch item", () => {
+    const batch = database.createAdminUploadBatch({ idempotencyKey: "upload:approved-rejection", originalFilename: "invoices.zip" }).batch;
+    const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 0, entryPath: "approved.pdf" }).item;
+    const bill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "approved-rejection", source: "admin_upload", sourceIdentity: "approved-rejection", extractionPolicy: "azure_only", classification: "invoice", batchItemId: item.id }, []).bill;
+    database.sqlite.query("UPDATE bills SET status = 'approved', content_revision = 1 WHERE id = ?").run(bill.id);
+    database.sqlite.query("UPDATE admin_upload_batch_items SET state = 'complete' WHERE id = ?").run(item.id);
+    database.sqlite.query("UPDATE admin_upload_batches SET state = 'completed' WHERE id = ?").run(batch.id);
+    const corrected = { schemaVersion: "1" as const, vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-27", currency: "USD", subtotal: 1, vat: 0, total: 1, description: null, fields: {} };
+    expect(database.submitReview({ billId: bill.id, reviewerId: "alice", action: "reject", reason: null, note: null, expectedContentRevision: 1, expectedReviewRevision: 0, corrected }, [])).toBe(true);
+    expect(database.getAdminUploadBatchStatus(batch.id)).toMatchObject({ batch: { state: "completed" }, items: [{ state: "rejected", billId: bill.id }] });
+    expect(database.submitReview({ billId: bill.id, reviewerId: "alice", action: "approve", reason: null, note: null, expectedContentRevision: 2, expectedReviewRevision: 1, corrected }, [])).toBe(true);
+    expect(database.getAdminUploadBatchStatus(batch.id)).toMatchObject({ batch: { state: "completed" }, items: [{ state: "complete", billId: bill.id }] });
+  });
+
   test("fences classification by active extract claim and exact revision while recording one event", () => {
     const bill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "classification-fence" }, [{ type: "extract", idempotencyKey: "classification-fence-job" }]).bill;
     const job = database.claimNextJob("azure", policy)!;

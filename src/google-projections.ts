@@ -288,9 +288,11 @@ export function createSheetsProjectionHandler(database: BillDatabase, sheets: Sh
        // Prefer an existing current-revision row; otherwise deterministically update the first row.
        const row = matched.filter((item) => item.revision === job.expectedRevision).sort((a, b) => a.row - b.row)[0]?.row ?? rows.sort((a, b) => a - b)[0] ?? await sheets.findRowByBillId(bill.id);
       const reconcileStale = async (): Promise<void> => {
-        if (!sheets.findLedgerRows || !sheets.clearRows) return;
-        const current = await sheets.findLedgerRows(bill.id);
-        await sheets.clearRows(current.filter((item) => item.revision === job.expectedRevision).map((item) => item.row));
+        if (sheets.findLedgerRows && sheets.clearRows) {
+          const current = await sheets.findLedgerRows(bill.id);
+          await sheets.clearRows(current.filter((item) => item.revision === job.expectedRevision).map((item) => item.row));
+        }
+        database.enqueueProjectionRepair(job.id, bill.id);
       };
       context.assertLease(); context.assertCurrentApprovalRevision();
       if (row === null) {
