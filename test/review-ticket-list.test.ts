@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { paginateReviewBills, prepareReviewBills, REVIEW_PAGE_SIZE, type ReviewBill } from "../src/review-ticket-list";
+import { paginateReviewBills, prepareReviewBills, REVIEW_PAGE_SIZE, sumReviewBillTotals, type ReviewBill } from "../src/review-ticket-list";
 
 function bill(index: number, overrides: Partial<ReviewBill> = {}): ReviewBill {
   return {
@@ -35,6 +35,10 @@ test("ticket list searches invoice numbers and supports every requested sort", (
   expect(prepareReviewBills(bills, "", "total-asc").map((item) => item.id)).toEqual(["bill-03", "bill-02", "bill-01"]);
   expect(prepareReviewBills(bills, "", "vendor").map((item) => item.id)).toEqual(["bill-02", "bill-01", "bill-03"]);
   expect(prepareReviewBills(bills, "", "invoice-number").map((item) => item.id)).toEqual(["bill-02", "bill-01", "bill-03"]);
+});
+
+test("ticket list totals known amounts and ignores missing totals", () => {
+  expect(sumReviewBillTotals([bill(1), bill(2), bill(3, { total: null })])).toBe(3);
 });
 
 test("forty tickets produce four complete numbered pages", () => {

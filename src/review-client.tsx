@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { paginateReviewBills, prepareReviewBills, type ReviewBill, type ReviewSort } from "./review-ticket-list";
+import { paginateReviewBills, prepareReviewBills, sumReviewBillTotals, type ReviewBill, type ReviewSort } from "./review-ticket-list";
 import "./review-original-preview";
 import "./review-form";
 
@@ -105,13 +105,14 @@ function Queue(): ReactNode {
 
   const prepared = prepareReviewBills(bills ?? [], deferredSearch, sort);
   const pagination = paginateReviewBills(prepared, page);
+  const total = sumReviewBillTotals(prepared);
   useEffect(() => { if (pagination.page !== page) setPage(pagination.page); }, [page, pagination.page]);
 
   const resetPage = (change: () => void): void => { change(); setPage(1); };
   const toggleTheme = (): void => { const next = !dark; document.documentElement.classList.toggle("dark", next); try { localStorage.setItem("review-theme", next ? "dark" : "light"); } catch {} setDark(next); };
 
   return <main className="review-page">
-    <div className="flex items-center justify-between gap-4"><h1>قائمة المراجعة</h1><Button variant="outline" size="icon" onClick={toggleTheme} aria-label={dark ? "التبديل إلى الوضع الفاتح" : "التبديل إلى الوضع الداكن"}>{dark ? <Sun /> : <Moon />}</Button></div>
+    <div className="flex items-center justify-between gap-4"><div><h1>قائمة المراجعة</h1>{bills !== null ? <p className="text-muted-foreground" aria-live="polite">إجمالي الفواتير: {new Intl.NumberFormat("ar-SA", { style: "currency", currency: "SAR" }).format(total)}</p> : null}</div><Button variant="outline" size="icon" onClick={toggleTheme} aria-label={dark ? "التبديل إلى الوضع الفاتح" : "التبديل إلى الوضع الداكن"}>{dark ? <Sun /> : <Moon />}</Button></div>
     {error ? <p className="notice error">تعذر تحميل قائمة المراجعة. حدّث الصفحة وحاول مرة أخرى.</p> : bills === null ? <p className="notice">جارٍ تحميل قائمة المراجعة…</p> : <div className="ticket-dashboard">
       <div className="ticket-toolbar" aria-label="بحث وفرز الفواتير">
         <Input aria-label="البحث برقم الفاتورة" placeholder="ابحث برقم الفاتورة..." value={search} onChange={(event) => resetPage(() => setSearch(event.target.value))} />
