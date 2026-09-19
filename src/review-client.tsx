@@ -81,9 +81,9 @@ function Queue(): ReactNode {
   const [error, setError] = useState(false);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
-  const [source, setSource] = useState("");
+  const [invoiceDateFrom, setInvoiceDateFrom] = useState("");
+  const [invoiceDateTo, setInvoiceDateTo] = useState("");
   const [status, setStatus] = useState("");
-  const [batch, setBatch] = useState("");
   const [sort, setSort] = useState<ReviewSort>("received-desc");
   const [page, setPage] = useState(1);
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
@@ -93,7 +93,7 @@ function Queue(): ReactNode {
     let requestSequence = 0;
     const load = () => {
       const sequence = ++requestSequence;
-      void fetch(`/review/api/bills?${new URLSearchParams({ ...(source ? { source } : {}), ...(status ? { status } : {}), ...(batch ? { batch } : {}) })}`, { credentials: "same-origin", signal: controller.signal })
+      void fetch(`/review/api/bills?${new URLSearchParams({ ...(status ? { status } : {}) })}`, { credentials: "same-origin", signal: controller.signal })
       .then(async (response) => { if (!response.ok) throw new Error("تعذر تحميل قائمة المراجعة"); return response.json() as Promise<ReviewBill[]>; })
       .then((loaded) => { if (sequence === requestSequence) { setBills(loaded); setError(false); } })
       .catch((loadError: unknown) => { if (sequence === requestSequence && !(loadError instanceof DOMException && loadError.name === "AbortError")) setError(true); });
@@ -101,9 +101,9 @@ function Queue(): ReactNode {
     load();
     const polling = setInterval(load, 15_000);
     return () => { controller.abort(); clearInterval(polling); };
-  }, [source, status, batch]);
+  }, [status]);
 
-  const prepared = prepareReviewBills(bills ?? [], deferredSearch, sort);
+  const prepared = prepareReviewBills(bills ?? [], deferredSearch, sort, invoiceDateFrom, invoiceDateTo);
   const pagination = paginateReviewBills(prepared, page);
   useEffect(() => { if (pagination.page !== page) setPage(pagination.page); }, [page, pagination.page]);
 
@@ -115,14 +115,14 @@ function Queue(): ReactNode {
     {error ? <p className="notice error">تعذر تحميل قائمة المراجعة. حدّث الصفحة وحاول مرة أخرى.</p> : bills === null ? <p className="notice">جارٍ تحميل قائمة المراجعة…</p> : <div className="ticket-dashboard">
       <div className="ticket-toolbar" aria-label="بحث وفرز الفواتير">
         <Input aria-label="البحث برقم الفاتورة" placeholder="ابحث برقم الفاتورة..." value={search} onChange={(event) => resetPage(() => setSearch(event.target.value))} />
-        <select aria-label="المصدر" value={source} onChange={(event) => resetPage(() => setSource(event.target.value))}><option value="">كل المصادر</option><option value="whatsapp">واتساب</option><option value="telegram">تيليجرام</option><option value="admin_upload">ZIP</option></select>
+        <Input type="date" aria-label="تاريخ الفاتورة من" value={invoiceDateFrom} onChange={(event) => resetPage(() => setInvoiceDateFrom(event.target.value))} />
+        <Input type="date" aria-label="تاريخ الفاتورة إلى" value={invoiceDateTo} onChange={(event) => resetPage(() => setInvoiceDateTo(event.target.value))} />
         <select aria-label="الحالة" value={status} onChange={(event) => resetPage(() => setStatus(event.target.value))}><option value="">كل الحالات</option><option value="complete">مكتملة</option><option value="not_invoice">ليست فاتورة</option><option value="needs_review">تحتاج مراجعة</option></select>
-        <Input aria-label="الدفعة" placeholder="معرف الدفعة" value={batch} onChange={(event) => resetPage(() => setBatch(event.target.value))} />
         <select aria-label="ترتيب الفواتير" value={sort} onChange={(event) => resetPage(() => setSort(event.target.value as ReviewSort))}>
           <option value="received-desc">الأحدث استلاماً</option><option value="received-asc">الأقدم استلاماً</option><option value="invoice-desc">تاريخ الفاتورة: الأحدث</option><option value="invoice-asc">تاريخ الفاتورة: الأقدم</option><option value="total-desc">الإجمالي: الأعلى</option><option value="total-asc">الإجمالي: الأقل</option><option value="vendor">اسم المورد</option><option value="invoice-number">رقم الفاتورة</option>
         </select>
       </div>
-      {bills.length === 0 ? <p className="notice">لا توجد فواتير للمراجعة.</p> : prepared.length === 0 ? <p className="notice">لا توجد نتائج مطابقة لرقم الفاتورة.</p> : <>
+      {bills.length === 0 ? <p className="notice">لا توجد فواتير للمراجعة.</p> : prepared.length === 0 ? <p className="notice">لا توجد نتائج مطابقة للفلاتر.</p> : <>
         <ul className="ticket-list" aria-label="فواتير المراجعة">{pagination.bills.map((bill) => <Ticket key={bill.id} bill={bill} />)}</ul>
         <nav className="ticket-pagination" aria-label="صفحات فواتير المراجعة">
           <p aria-live="polite">عرض {pagination.rangeStart}–{pagination.rangeEnd} من {pagination.total} فاتورة</p>

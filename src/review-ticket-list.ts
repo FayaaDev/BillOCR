@@ -31,10 +31,10 @@ function nullableCompare<T>(left: T | null, right: T | null, compare: (a: T, b: 
   return compare(left, right);
 }
 
-export function prepareReviewBills(bills: ReviewBill[], search: string, sort: ReviewSort): ReviewBill[] {
+export function prepareReviewBills(bills: ReviewBill[], search: string, sort: ReviewSort, invoiceDateFrom = "", invoiceDateTo = ""): ReviewBill[] {
   const needle = search.trim();
   return bills
-    .filter((bill) => needle === "" || bill.invoiceNumber?.toLocaleLowerCase("ar").includes(needle.toLocaleLowerCase("ar")))
+    .filter((bill) => (needle === "" || bill.invoiceNumber?.toLocaleLowerCase("ar").includes(needle.toLocaleLowerCase("ar"))) && ((!invoiceDateFrom && !invoiceDateTo) || (bill.invoiceDate !== null && (!invoiceDateFrom || bill.invoiceDate >= invoiceDateFrom) && (!invoiceDateTo || bill.invoiceDate <= invoiceDateTo))))
     .toSorted((left, right) => {
       let result: number;
       switch (sort) {

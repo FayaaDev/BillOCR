@@ -35,6 +35,9 @@ test("ticket list searches invoice numbers and supports every requested sort", (
   expect(prepareReviewBills(bills, "", "total-asc").map((item) => item.id)).toEqual(["bill-03", "bill-02", "bill-01"]);
   expect(prepareReviewBills(bills, "", "vendor").map((item) => item.id)).toEqual(["bill-02", "bill-01", "bill-03"]);
   expect(prepareReviewBills(bills, "", "invoice-number").map((item) => item.id)).toEqual(["bill-02", "bill-01", "bill-03"]);
+  expect(prepareReviewBills(bills, "", "received-asc", "2026-08-02", "2026-08-03").map((item) => item.id)).toEqual(["bill-02", "bill-03"]);
+  expect(prepareReviewBills(bills, "", "received-asc", "2026-08-03").map((item) => item.id)).toEqual(["bill-03"]);
+  expect(prepareReviewBills(bills, "", "received-asc", "", "2026-08-02").map((item) => item.id)).toEqual(["bill-02"]);
 });
 
 test("forty tickets produce four complete numbered pages", () => {
