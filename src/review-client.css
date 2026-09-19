@@ -81,15 +81,15 @@
 }
 
 body { margin: 0; }
-.review-actions-bar { max-width: 1120px; margin: 1.5rem auto 0; padding: 0 1.5rem; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; }.review-tabs { display: flex; gap: .25rem; }.review-tabs a { border: 1px solid var(--border); border-radius: var(--radius-lg); color: var(--muted-foreground); font-size: .875rem; font-weight: 700; padding: .45rem .75rem; text-decoration: none; }.review-tabs a[aria-current="page"] { background: var(--secondary); color: var(--foreground); }
-.review-page { max-width: 1120px; margin: 0 auto; padding: 3rem 1.5rem; }
+.review-page { max-width: 1120px; margin: 0 auto; padding: 1.5rem; }
+.review-header { display: grid; gap: 2rem; margin-bottom: 2rem; }.review-header-bar, .review-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }.review-heading { display: grid; gap: .5rem; }.review-heading h1, .review-heading p { margin: 0; }
 h1 { margin: 0 0 1.5rem; font-size: 1.75rem; }
 a { color: #155eef; text-decoration: none; font-weight: 600; }
 a:hover { text-decoration: underline; }
 .notice { padding: 1rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--card); color: var(--card-foreground); }
 .error { color: #b42318; border-color: #fecdca; background: #fffbfa; }
 .ticket-dashboard { display: grid; gap: 1rem; min-width: 0; }
-.ticket-toolbar { display: grid; grid-template-columns: minmax(12rem, 2fr) repeat(4, minmax(8.5rem, 1fr)); gap: .75rem; align-items: center; }
+.ticket-toolbar { display: grid; grid-template-columns: minmax(16rem, 2fr) repeat(4, minmax(9rem, 1fr)); gap: 1rem; align-items: start; }
 .ticket-toolbar select { box-sizing: border-box; min-width: 0; height: 2rem; border: 1px solid var(--input); border-radius: var(--radius-lg); background: var(--background); color: var(--foreground); font: inherit; font-size: .875rem; padding-block: .25rem; padding-inline: .625rem 2rem; }
 .ticket-list { display: grid; gap: 1rem; min-width: 0; margin: 0; padding: 0; list-style: none; }
 .ticket-list > li { min-width: 0; }

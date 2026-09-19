@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Moon, RefreshCw, Sun } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { parseAdminOverview, parseAdminZipStatus, type AdminOverview, type AdminZipStatus } from "./admin-dashboard";
 import { ZipUploadSession, zipUploadControlDisabled } from "./admin-zip-client";
 
@@ -45,7 +47,7 @@ function Dashboard(): ReactNode {
   const changeChannel = (event: KeyboardEvent<HTMLButtonElement>): void => { const channels = ["telegram", "zip"] as const; const index = channels.indexOf(channel); const next = event.key === "ArrowLeft" ? (index + 1) % channels.length : event.key === "ArrowRight" ? (index + channels.length - 1) % channels.length : event.key === "Home" ? 0 : event.key === "End" ? channels.length - 1 : null; if (next === null) return; const selected = channels[next]!; event.preventDefault(); setChannel(selected); document.getElementById(`${selected}-tab`)?.focus(); };
   const metrics = overview?.metrics;
   return <main className="admin-page">
-    <header className="admin-header"><div><p className="admin-eyebrow">إدارة التشغيل</p><h1>لوحة متابعة الفواتير</h1><p className="admin-subtitle">عرض حالة الاستلام والربط دون كشف بيانات الاعتماد.</p><nav className="admin-tabs" aria-label="التنقل الإداري"><a className="admin-tab" href="/admin" aria-current="page">لوحة الإدارة</a><a className="admin-tab" href="/review">مراجعة الفواتير</a></nav></div><div className="admin-header-actions"><button className="admin-icon-button" type="button" onClick={load} aria-label="تحديث البيانات"><RefreshCw /></button><button className="admin-icon-button" type="button" onClick={toggleTheme} aria-label={dark ? "التبديل إلى الوضع الفاتح" : "التبديل إلى الوضع الداكن"}>{dark ? <Sun /> : <Moon />}</button></div></header>
+    <header className="admin-header"><div><p className="admin-eyebrow">إدارة التشغيل</p><h1>لوحة متابعة الفواتير</h1><p className="admin-subtitle">عرض حالة الاستلام والربط دون كشف بيانات الاعتماد.</p><nav aria-label="التنقل الإداري"><DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" />}>التنقل</DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem render={<a href="/admin" aria-current="page" />}>لوحة الإدارة</DropdownMenuItem><DropdownMenuItem render={<a href="/review" />}>مراجعة الفواتير</DropdownMenuItem></DropdownMenuContent></DropdownMenu></nav></div><div className="admin-header-actions"><button className="admin-icon-button" type="button" onClick={load} aria-label="تحديث البيانات"><RefreshCw /></button><button className="admin-icon-button" type="button" onClick={toggleTheme} aria-label={dark ? "التبديل إلى الوضع الفاتح" : "التبديل إلى الوضع الداكن"}>{dark ? <Sun /> : <Moon />}</button></div></header>
     {error && <p className="notice error">تعذر تحميل بيانات لوحة الإدارة. حدّث الصفحة وحاول مرة أخرى.</p>}
     <section className="admin-metrics" aria-label="ملخص الفواتير">
       {[ ["الفواتير المستلمة", metrics?.received], ["الفواتير المعتمدة", metrics?.approved], ["الفواتير الفاشلة", metrics?.failed] ].map(([label, value]) => <article className="admin-card" key={String(label)}><p>{label}</p><strong dir="ltr">{value ?? "—"}</strong></article>)}

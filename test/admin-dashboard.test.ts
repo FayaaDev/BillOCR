@@ -32,8 +32,8 @@ test("pairing view exposes QR and cancel only after it is ready, then offers a s
 
 test("admin navigation links to the authenticated review queue without operational failures card", () => {
   const client = readFileSync(join(import.meta.dir, "..", "src", "admin-client.tsx"), "utf8");
-  expect(client).toContain('className="admin-tabs"');
-  expect(client).toContain('href="/review">مراجعة الفواتير</a>');
+  expect(client).toContain('<DropdownMenuTrigger render={<Button variant="outline" />}>التنقل</DropdownMenuTrigger>');
+  expect(client).toContain('render={<a href="/review" />}');
   expect(client).not.toContain("ملخص الأعطال التشغيلية");
   expect(client).toContain('type="file"');
   expect(client).toContain("تقدم الرفع");
