@@ -1,5 +1,6 @@
 .DS_Store
 node_modules/
+.worktrees/
 .env
 .env.local
 dist/
@@ -18,3 +19,5 @@ whatsapp-auth/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+.DS_Store
+.DS_Store
