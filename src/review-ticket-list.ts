@@ -23,6 +23,10 @@ export type ReviewSort = "received-desc" | "received-asc" | "invoice-desc" | "in
 
 export const REVIEW_PAGE_SIZE = 10;
 
+export function sumReviewBillTotals(bills: ReviewBill[]): number {
+  return bills.reduce((sum, bill) => sum + (bill.total ?? 0), 0);
+}
+
 const collator = new Intl.Collator("ar", { numeric: true, sensitivity: "base" });
 
 function nullableCompare<T>(left: T | null, right: T | null, compare: (a: T, b: T) => number): number {
