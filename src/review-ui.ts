@@ -13,24 +13,15 @@ import { reviewAuth, type ReviewAuth } from "./review-auth";
 const editable = ["invoiceDate", "total", "vat", "subtotal", "description", "truckNumber", "vendorTaxNumber", "vendorName", "invoiceNumber"] as const;
 type Editable = (typeof editable)[number];
 const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'" };
-/** Columns in the completed-invoice download, in CSV order. */
-export const completedInvoiceCsvHeaders = ["تاريخ الفاتورة", "مبلغ اجمالي بعد الضريبة", "قيمة الضريبة", "مبلغ قبل الضريبة", "وصف القطع وبيانها", "رقم الشاحنة ( المسؤليه )", "الرقم الضريبي للمورد", "اسم المورد", "رقم الفاتورة", "رقم مرسل الفاتورة", "تاريخ وتوقيت الارسال"] as const;
+/** Columns in the completed-invoice XLSX download. */
+export const completedInvoiceHeaders = ["تاريخ الفاتورة", "مبلغ اجمالي بعد الضريبة", "قيمة الضريبة", "مبلغ قبل الضريبة", "وصف القطع وبيانها", "رقم الشاحنة ( المسؤليه )", "الرقم الضريبي للمورد", "اسم المورد", "رقم الفاتورة", "رقم مرسل الفاتورة", "تاريخ وتوقيت الارسال"] as const;
 const esc = (value: unknown): string => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-function csvCell(value: string | number | null | undefined): string {
-  let text = String(value ?? "");
-  if (/^\s*[=+\-@]/.test(text)) text = `'${text}`;
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-function completedInvoiceCsv(records: CompletedInvoiceExportRecord[]): string {
-  const values = completedInvoiceRows(records);
-  return `\uFEFF${[completedInvoiceCsvHeaders, ...values].map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
-}
 function completedInvoiceRows(records: CompletedInvoiceExportRecord[]): Array<Array<string | number | null>> {
   return records.map(({ receivedAt, senderId, extraction }) => [extraction.invoiceDate ?? null, extraction.total ?? null, extraction.vat ?? null, extraction.subtotal ?? null, extraction.description ?? null, extraction.truckNumber ?? null, extraction.vendorTaxNumber ?? null, extraction.vendorName ?? null, extraction.invoiceNumber ?? null, senderId ?? null, receivedAt]);
 }
 function completedInvoiceXlsx(records: CompletedInvoiceExportRecord[]): ArrayBuffer {
-  const worksheet = XLSX.utils.aoa_to_sheet([[...completedInvoiceCsvHeaders], ...completedInvoiceRows(records)]);
-  worksheet["!cols"] = completedInvoiceCsvHeaders.map(() => ({ wch: 24 }));
+  const worksheet = XLSX.utils.aoa_to_sheet([[...completedInvoiceHeaders], ...completedInvoiceRows(records)]);
+  worksheet["!cols"] = completedInvoiceHeaders.map(() => ({ wch: 24 }));
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "الفواتير المكتملة");
   const bytes = XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true });
@@ -87,10 +78,6 @@ export async function handleReviewRequest(request: Request, database: BillDataba
   const user = auth.user(request); const binding = auth.binding(request); if (!user || !binding) return unauthorized(request, url.pathname);
   if (request.method === "GET" && url.pathname === "/review") {
     return appShell(csrf(config, user, binding, "review-clear-bills"));
-  }
-  if (url.pathname === "/review/export.csv") {
-    if (request.method !== "GET") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET" } });
-    return new Response(completedInvoiceCsv(database.listCompletedInvoiceExports()), { headers: { ...headers, "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="completed-invoices.csv"' } });
   }
   if (url.pathname === "/review/export.xlsx") {
     if (request.method !== "GET") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET" } });

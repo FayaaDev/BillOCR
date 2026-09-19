@@ -24,7 +24,7 @@ test("in-page login creates one shared session and renders an accessible Card", 
   expect((await handleRequest(new Request("http://x/admin", { headers: { cookie } }), database, config, undefined, auth))?.status).toBe(200);
   expect((await handleRequest(new Request("http://x/review", { headers: { cookie } }), database, config, undefined, auth))?.status).toBe(200);
   const page = await handleRequest(new Request("http://x/login"), database, config, undefined, auth);
-  const html = await page?.text(); expect(html).toContain('data-slot="card"'); expect(html).toContain('<label for="username">'); expect(html).toContain('type="password"');
+  const html = await page?.text(); expect(html).toContain('data-slot="card"'); expect(html).toContain('<label for="username">'); expect(html).toContain('type="password"'); expect(html).toContain('data-slot="card-footer"'); expect(html).toContain('form="login-form"');
 });
 
 test("login rejects failures and malformed or open return targets without an auth challenge", async () => {

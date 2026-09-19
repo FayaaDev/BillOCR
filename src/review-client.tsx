@@ -81,8 +81,8 @@ function Queue(): ReactNode {
   const [error, setError] = useState(false);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
-  const [invoiceDateFrom, setInvoiceDateFrom] = useState("");
-  const [invoiceDateTo, setInvoiceDateTo] = useState("");
+  const [receivedDateFrom, setReceivedDateFrom] = useState("");
+  const [receivedDateTo, setReceivedDateTo] = useState("");
   const [status, setStatus] = useState("");
   const [sort, setSort] = useState<ReviewSort>("received-desc");
   const [page, setPage] = useState(1);
@@ -103,7 +103,7 @@ function Queue(): ReactNode {
     return () => { controller.abort(); clearInterval(polling); };
   }, [status]);
 
-  const prepared = prepareReviewBills(bills ?? [], deferredSearch, sort, invoiceDateFrom, invoiceDateTo);
+  const prepared = prepareReviewBills(bills ?? [], deferredSearch, sort, receivedDateFrom, receivedDateTo);
   const pagination = paginateReviewBills(prepared, page);
   const total = sumReviewBillTotals(prepared);
   useEffect(() => { if (pagination.page !== page) setPage(pagination.page); }, [page, pagination.page]);
@@ -116,8 +116,8 @@ function Queue(): ReactNode {
     {error ? <p className="notice error">تعذر تحميل قائمة المراجعة. حدّث الصفحة وحاول مرة أخرى.</p> : bills === null ? <p className="notice">جارٍ تحميل قائمة المراجعة…</p> : <div className="ticket-dashboard">
       <div className="ticket-toolbar" aria-label="بحث وفرز الفواتير">
         <Input aria-label="البحث برقم الفاتورة" placeholder="ابحث برقم الفاتورة..." value={search} onChange={(event) => resetPage(() => setSearch(event.target.value))} />
-        <Input type="date" aria-label="تاريخ الفاتورة من" value={invoiceDateFrom} onChange={(event) => resetPage(() => setInvoiceDateFrom(event.target.value))} />
-        <Input type="date" aria-label="تاريخ الفاتورة إلى" value={invoiceDateTo} onChange={(event) => resetPage(() => setInvoiceDateTo(event.target.value))} />
+        <label className="grid gap-1 text-sm">From:<Input type="date" aria-label="تاريخ الاستلام من" value={receivedDateFrom} onChange={(event) => resetPage(() => setReceivedDateFrom(event.target.value))} /></label>
+        <label className="grid gap-1 text-sm">To:<Input type="date" aria-label="تاريخ الاستلام إلى" value={receivedDateTo} onChange={(event) => resetPage(() => setReceivedDateTo(event.target.value))} /></label>
         <select aria-label="الحالة" value={status} onChange={(event) => resetPage(() => setStatus(event.target.value))}><option value="">كل الحالات</option><option value="complete">مكتملة</option><option value="not_invoice">ليست فاتورة</option><option value="needs_review">تحتاج مراجعة</option></select>
         <select aria-label="ترتيب الفواتير" value={sort} onChange={(event) => resetPage(() => setSort(event.target.value as ReviewSort))}>
           <option value="received-desc">الأحدث استلاماً</option><option value="received-asc">الأقدم استلاماً</option><option value="invoice-desc">تاريخ الفاتورة: الأحدث</option><option value="invoice-asc">تاريخ الفاتورة: الأقدم</option><option value="total-desc">الإجمالي: الأعلى</option><option value="total-asc">الإجمالي: الأقل</option><option value="vendor">اسم المورد</option><option value="invoice-number">رقم الفاتورة</option>
@@ -147,7 +147,7 @@ function ReviewActions({ csrf }: { csrf: string }): ReactNode {
       .then((response) => { if (!response.ok) throw new Error("clear failed"); window.location.reload(); })
       .catch(() => { setClearing(false); alert("تعذر حذف الفواتير. حدّث الصفحة وحاول مرة أخرى."); });
   };
-  return <header className="review-actions-bar"><nav className="review-tabs" aria-label="التنقل الإداري"><a href="/admin">لوحة الإدارة</a><a href="/review" aria-current="page">مراجعة الفواتير</a></nav><div className="flex flex-wrap gap-2"><Button variant="outline" nativeButton={false} render={<a href="/review/export.csv" />}>تصدير CSV</Button><Button variant="outline" nativeButton={false} render={<a href="/review/export.xlsx" />}>تصدير XLSX</Button><Button variant="destructive" disabled={clearing} onClick={clearBills}>{clearing ? "جارٍ الحذف…" : "حذف جميع الفواتير"}</Button></div></header>;
+  return <header className="review-actions-bar"><nav className="review-tabs" aria-label="التنقل الإداري"><a href="/admin">لوحة الإدارة</a><a href="/review" aria-current="page">مراجعة الفواتير</a></nav><div className="flex flex-wrap gap-2"><Button variant="outline" nativeButton={false} render={<a href="/review/export.xlsx" />}>تصدير XLSX</Button><Button variant="destructive" disabled={clearing} onClick={clearBills}>{clearing ? "جارٍ الحذف…" : "حذف جميع الفواتير"}</Button></div></header>;
 }
 
 const root = document.getElementById("root");

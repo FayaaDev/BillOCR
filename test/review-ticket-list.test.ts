@@ -35,9 +35,10 @@ test("ticket list searches invoice numbers and supports every requested sort", (
   expect(prepareReviewBills(bills, "", "total-asc").map((item) => item.id)).toEqual(["bill-03", "bill-02", "bill-01"]);
   expect(prepareReviewBills(bills, "", "vendor").map((item) => item.id)).toEqual(["bill-02", "bill-01", "bill-03"]);
   expect(prepareReviewBills(bills, "", "invoice-number").map((item) => item.id)).toEqual(["bill-02", "bill-01", "bill-03"]);
-  expect(prepareReviewBills(bills, "", "received-asc", "2026-08-02", "2026-08-03").map((item) => item.id)).toEqual(["bill-02", "bill-03"]);
+  const receivedInSeptember = bill(4, { invoiceDate: "2026-01-01", receivedAt: "2026-09-03T00:00:00.000Z" });
+  expect(prepareReviewBills([...bills, receivedInSeptember], "", "received-asc", "2026-09-01", "2026-09-05").map((item) => item.id)).toEqual(["bill-04"]);
   expect(prepareReviewBills(bills, "", "received-asc", "2026-08-03").map((item) => item.id)).toEqual(["bill-03"]);
-  expect(prepareReviewBills(bills, "", "received-asc", "", "2026-08-02").map((item) => item.id)).toEqual(["bill-02"]);
+  expect(prepareReviewBills(bills, "", "received-asc", "", "2026-08-02").map((item) => item.id)).toEqual(["bill-01", "bill-02"]);
 });
 
 test("ticket list totals known amounts and ignores missing totals", () => {

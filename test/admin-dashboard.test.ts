@@ -38,15 +38,15 @@ test("admin navigation links to the authenticated review queue without operation
   expect(client).toContain('type="file"');
   expect(client).toContain("تقدم الرفع");
   expect(client).toContain("خدمة التحليل غير مهيأة");
-  expect(client).toContain("معرّف المجموعة المكوّنة");
-  expect(client).not.toContain("المجموعات المكتشفة");
-  expect(client).not.toContain("لا يدعم هذا النقل بدء الاقتران من لوحة الإدارة.");
+   expect(client).toContain('disabled aria-disabled="true" id="whatsapp-tab"');
+   expect(client).not.toContain("معرّف المجموعة المكوّنة");
+   expect(client).not.toContain("المجموعات المكتشفة");
+   expect(client).not.toContain("لا يدعم هذا النقل بدء الاقتران من لوحة الإدارة.");
   expect(client).toContain('role="tablist"');
-  expect(client).toContain('id="whatsapp-panel"');
-  expect(client).toContain('id="telegram-panel"');
-  expect(client).toContain('id="zip-panel"');
-  expect(client).toContain('hidden={channel !== "whatsapp"}');
-  expect(client).toContain('tabIndex={channel === "whatsapp" ? 0 : -1}');
+   expect(client).toContain('id="telegram-panel"');
+   expect(client).toContain('id="zip-panel"');
+   expect(client).not.toContain('id="whatsapp-panel"');
+   expect(client).not.toContain('tabIndex={channel === "whatsapp" ? 0 : -1}');
   expect(client).toContain("رمز البوت");
 });
 
