@@ -8,6 +8,7 @@ import type { BillDatabase, CompletedInvoiceExportRecord, ReviewQueueFilters } f
 import { readVerifiedOriginal } from "./originals";
 import { isSupportedImageMimeType } from "./attachment-mime";
 import { isReviewFormField, reviewFieldLimits, reviewFormMaxBytes } from "./review-form";
+import { reviewAuth, type ReviewAuth } from "./review-auth";
 
 const editable = ["invoiceDate", "total", "vat", "subtotal", "description", "truckNumber", "vendorTaxNumber", "vendorName", "invoiceNumber"] as const;
 type Editable = (typeof editable)[number];
@@ -37,21 +38,10 @@ function completedInvoiceXlsx(records: CompletedInvoiceExportRecord[]): ArrayBuf
 }
 const page = (_title: string, body: string, status = 200): Response => new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><script src="/review/assets/theme.js"></script><link rel="stylesheet" href="/review/assets/client.css"></head><body>${body}</body></html>`, { status, headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
 const appShell = (csrfToken: string): Response => new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><script src="/review/assets/theme.js"></script><link rel="stylesheet" href="/review/assets/client.css"></head><body><div id="review-actions"></div><div id="root" data-csrf="${esc(csrfToken)}"></div><script src="/review/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
-const reviewNavigation = `<nav class="review-tabs" aria-label="التنقل الإداري"><a href="/admin">لوحة الإدارة</a><a href="/review" aria-current="page">مراجعة الفواتير</a></nav>`;
-
-function authenticated(request: Request, config: AppConfig): string | null {
-  const value = request.headers.get("authorization");
-  if (!value?.startsWith("Basic ")) return null;
-  let decoded: string; try { decoded = atob(value.slice(6)); } catch { return null; }
-  const cut = decoded.indexOf(":"); if (cut < 0) return null;
-  const [user, password] = [decoded.slice(0, cut), decoded.slice(cut + 1)];
-  // Digest fixed-length inputs before constant-time comparison, including malformed lengths.
-  const digest = (item: string) => createHmac("sha256", "review-basic").update(item).digest();
-  return timingSafeEqual(digest(user), digest(config.review.username)) && timingSafeEqual(digest(password), digest(config.review.password)) ? user : null;
-}
-function csrf(config: AppConfig, user: string, billId: string): string { const nonce = randomBytes(16).toString("base64url"); return `${nonce}.${createHmac("sha256", config.review.password).update(`${user}:${billId}:${nonce}`).digest("base64url")}`; }
-function csrfValid(value: string | null, config: AppConfig, user: string, billId: string): boolean { const [nonce, signature, extra] = value?.split(".") ?? []; if (!nonce || !signature || extra || nonce.length > 64 || signature.length > 128) return false; const expected = createHmac("sha256", config.review.password).update(`${user}:${billId}:${nonce}`).digest("base64url"); const supplied = Buffer.from(signature); const expectedBytes = Buffer.from(expected); return supplied.byteLength === expectedBytes.byteLength && timingSafeEqual(supplied, expectedBytes); }
-function challenge(): Response { return new Response("غير مصرح", { status: 401, headers: { ...headers, "www-authenticate": 'Basic realm="internal review", charset="UTF-8"' } }); }
+const reviewNavigation = (logoutCsrf: string) => `<nav class="review-tabs" aria-label="التنقل الإداري"><a href="/admin">لوحة الإدارة</a><a href="/review" aria-current="page">مراجعة الفواتير</a><form method="post" action="/logout"><input type="hidden" name="logoutCsrf" value="${esc(logoutCsrf)}"><button class="button-link button-link-secondary" type="submit">تسجيل الخروج</button></form></nav>`;
+function csrf(config: AppConfig, user: string, binding: string, billId: string): string { const nonce = randomBytes(16).toString("base64url"); return `${nonce}.${createHmac("sha256", config.review.password).update(`${user}:${binding}:${billId}:${nonce}`).digest("base64url")}`; }
+function csrfValid(value: string | null, config: AppConfig, user: string, binding: string, billId: string): boolean { const [nonce, signature, extra] = value?.split(".") ?? []; if (!nonce || !signature || extra || nonce.length > 64 || signature.length > 128) return false; const expected = createHmac("sha256", config.review.password).update(`${user}:${binding}:${billId}:${nonce}`).digest("base64url"); const supplied = Buffer.from(signature); const expectedBytes = Buffer.from(expected); return supplied.byteLength === expectedBytes.byteLength && timingSafeEqual(supplied, expectedBytes); }
+function unauthorized(request: Request, pathname: string): Response { return request.method === "GET" && !pathname.includes("/api/") && !pathname.includes("/assets/") && !pathname.endsWith("/original") && !pathname.includes("/export.") ? new Response(null, { status: 303, headers: { ...headers, location: `/login?return=${pathname.startsWith("/admin") ? "/admin" : "/review"}` } }) : new Response("غير مصرح", { status: 401, headers }); }
 function numberOrNull(value: string | null): number | null { if (value === null || value.trim() === "") return null; const parsed = Number(value); if (!Number.isFinite(parsed)) throw new Error("invalid"); return parsed; }
 function valueOrNull(value: string | null): string | null { const result = value?.trim() ?? ""; return result || null; }
 function corrected(form: URLSearchParams, original: ExtractedBill): ExtractedBill {
@@ -87,11 +77,16 @@ async function parseForm(request: Request): Promise<URLSearchParams> {
   return form;
 }
 
-export async function handleReviewRequest(request: Request, database: BillDatabase, config: AppConfig, assetDir = join(import.meta.dir, "..", "dist", "review")): Promise<Response> {
-  const user = authenticated(request, config); if (!user) return challenge();
+export async function handleReviewRequest(request: Request, database: BillDatabase, config: AppConfig, assetDir = join(import.meta.dir, "..", "dist", "review"), auth: ReviewAuth = reviewAuth(config)): Promise<Response> {
   const url = new URL(request.url); const parts = url.pathname.split("/").filter(Boolean);
+  const font = /^\/review\/assets\/files\/(noto-sans-arabic-arabic-(?:400|700)-normal\.woff2)$/.exec(url.pathname)?.[1];
+  if (!auth.user(request) && request.method === "GET" && (url.pathname === "/review/assets/theme.js" || url.pathname === "/review/assets/client.css" || font)) {
+    const name = font ? join("files", font) : url.pathname.endsWith("theme.js") ? "theme.js" : "client.css";
+    try { const content = await readFile(join(assetDir, name)); return new Response(content, { headers: { ...headers, "content-type": name.endsWith(".js") ? "text/javascript; charset=utf-8" : name.endsWith(".woff2") ? "font/woff2" : "text/css; charset=utf-8" } }); } catch { return new Response("غير موجود", { status: 404, headers }); }
+  }
+  const user = auth.user(request); const binding = auth.binding(request); if (!user || !binding) return unauthorized(request, url.pathname);
   if (request.method === "GET" && url.pathname === "/review") {
-    return appShell(csrf(config, user, "review-clear-bills"));
+    return appShell(csrf(config, user, binding, "review-clear-bills"));
   }
   if (url.pathname === "/review/export.csv") {
     if (request.method !== "GET") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET" } });
@@ -114,12 +109,11 @@ export async function handleReviewRequest(request: Request, database: BillDataba
   }
   if (url.pathname === "/review/api/bills/clear") {
     if (request.method !== "POST") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "POST" } });
-    if (!csrfValid(request.headers.get("x-csrf-token"), config, user, "review-clear-bills")) return new Response("طلب غير صالح", { status: 400, headers });
+    if (!csrfValid(request.headers.get("x-csrf-token"), config, user, binding, "review-clear-bills")) return new Response("طلب غير صالح", { status: 400, headers });
     const result = database.clearAllBills();
     if ("busy" in result) return new Response("تعذر حذف الفواتير أثناء معالجة نشطة. حاول مرة أخرى بعد اكتمال المعالجة.", { status: 409, headers });
     return Response.json(result, { headers });
   }
-  const font = /^\/review\/assets\/files\/(noto-sans-arabic-arabic-(?:400|700)-normal\.woff2)$/.exec(url.pathname)?.[1];
   if (url.pathname === "/review/assets/client.js" || url.pathname === "/review/assets/theme.js" || url.pathname === "/review/assets/client.css" || font) {
     if (request.method !== "GET") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET" } });
     const name = font ? join("files", font) : url.pathname.endsWith("client.js") ? "client.js" : url.pathname.endsWith("theme.js") ? "theme.js" : "client.css";
@@ -138,7 +132,7 @@ export async function handleReviewRequest(request: Request, database: BillDataba
   if (request.method === "POST" && parts[3] === "review") {
     try {
       const form = await parseForm(request);
-      if (!csrfValid(form.get("csrf"), config, user, billId)) return page("تعذرت المراجعة", "تعذر إرسال المراجعة.", 400);
+       if (!csrfValid(form.get("csrf"), config, user, binding, billId)) return page("تعذرت المراجعة", "تعذر إرسال المراجعة.", 400);
       const action = form.get("action");
        if (action === "mark_not_invoice" || action === "reclassify_invoice") {
          const content = Number(form.get("contentRevision")); const review = Number(form.get("reviewRevision"));
@@ -165,7 +159,7 @@ export async function handleReviewRequest(request: Request, database: BillDataba
    const statusLabels: Record<string, string> = { needs_review: "تحتاج إلى مراجعة", approved: "مكتملة", failed: "فشلت", pending: "قيد الانتظار", not_invoice: "ليست فاتورة" };
   const originalUrl = `/review/bills/${encodeURIComponent(bill.id)}/original`;
   const originalPreview = isSupportedImageMimeType(bill.mimeType) ? `<a class="button-link" id="original-preview-trigger" href="${originalUrl}">عرض الأصل</a><dialog id="original-preview-dialog" aria-labelledby="original-preview-title"><div class="original-preview-content"><h2 id="original-preview-title">عرض الأصل</h2><button class="button-link button-link-secondary" type="button" id="original-preview-close">إغلاق عرض الأصل</button><img id="original-preview-image" alt="معاينة الأصل"></div></dialog>` : `<a class="button-link" href="${originalUrl}">عرض الأصل</a>`;
-   const csrfInput = `<input type="hidden" name="csrf" value="${esc(csrf(config, user, bill.id))}"><input type="hidden" name="contentRevision" value="${bill.contentRevision}"><input type="hidden" name="reviewRevision" value="${bill.reviewRevision}">`;
+   const csrfInput = `<input type="hidden" name="csrf" value="${esc(csrf(config, user, binding, bill.id))}"><input type="hidden" name="contentRevision" value="${bill.contentRevision}"><input type="hidden" name="reviewRevision" value="${bill.reviewRevision}">`;
    const override = bill.classification === "not_invoice" ? `<button class="review-action" name="action" value="reclassify_invoice">إعادة تصنيفها كفاتورة للمراجعة اليدوية</button>` : `<button class="review-action reject-action" name="action" value="mark_not_invoice">وضع علامة ليست فاتورة</button>`;
     const reviewActions = bill.classification === "not_invoice" ? override : `<button class="review-action approve-action" name="action" value="approve">${bill.status === "approved" ? "حفظ التعديلات" : "اعتماد الفاتورة"}</button><button class="review-action reject-action" name="action" value="reject">رفض الفاتورة</button>${override}`;
      const senderId = bill.source === "admin_upload" ? "" : bill.sourceSenderId;
@@ -173,5 +167,5 @@ export async function handleReviewRequest(request: Request, database: BillDataba
     const correction = canSubmitReview
       ? `<form id="review-correction-form" class="correction-form" method="post" action="/review/bills/${encodeURIComponent(bill.id)}/review">${csrfInput}<div class="form-grid">${fields}${sourceFields}</div><p id="review-form-error" class="notice error review-form-error" role="alert" aria-live="polite"></p><div class="review-actions">${reviewActions}</div></form>`
       : `<div class="correction-form"><div class="form-grid">${fields}${sourceFields}</div><p class="notice">تكتمل معالجة الفاتورة قبل مراجعتها.</p></div>`;
-      return page("مراجعة الفاتورة", `<main class="review-page review-detail"><header class="review-detail-header">${reviewNavigation}<a class="queue-back" href="/review">قائمة المراجعة →</a><div class="review-title"><h1 dir="ltr">${esc(bill.id)}</h1><span class="status-badge">${esc(bill.classification === "not_invoice" ? statusLabels.not_invoice : statusLabels[bill.status] ?? bill.status)}</span></div><nav class="original-actions" aria-label="المرفق الأصلي">${originalPreview}<a class="button-link button-link-secondary" href="${originalUrl}?download=1">تنزيل الأصل</a></nav></header>${extractionUnavailable ? `<p class="notice error permanent-failure">تعذر استخراج بيانات الفاتورة. أدخل البيانات المصححة أدناه.</p>` : ""}<section class="review-section correction-section" aria-labelledby="correction-heading"><div class="section-heading"><h2 id="correction-heading">تصحيح بيانات الفاتورة</h2><p>${canSubmitReview ? "راجع القيم المستخرجة وصححها قبل تحديد الإجراء." : "يمكنك عرض البيانات الآن، وستتاح المراجعة بعد اكتمال المعالجة."}</p></div>${correction}</section></main><script src="/review/assets/client.js" defer></script>`);
+       return page("مراجعة الفاتورة", `<main class="review-page review-detail"><header class="review-detail-header">${reviewNavigation(auth.csrf(request, "logout")!)}<a class="queue-back" href="/review">قائمة المراجعة →</a><div class="review-title"><h1 dir="ltr">${esc(bill.id)}</h1><span class="status-badge">${esc(bill.classification === "not_invoice" ? statusLabels.not_invoice : statusLabels[bill.status] ?? bill.status)}</span></div><nav class="original-actions" aria-label="المرفق الأصلي">${originalPreview}<a class="button-link button-link-secondary" href="${originalUrl}?download=1">تنزيل الأصل</a></nav></header>${extractionUnavailable ? `<p class="notice error permanent-failure">تعذر استخراج بيانات الفاتورة. أدخل البيانات المصححة أدناه.</p>` : ""}<section class="review-section correction-section" aria-labelledby="correction-heading"><div class="section-heading"><h2 id="correction-heading">تصحيح بيانات الفاتورة</h2><p>${canSubmitReview ? "راجع القيم المستخرجة وصححها قبل تحديد الإجراء." : "يمكنك عرض البيانات الآن، وستتاح المراجعة بعد اكتمال المعالجة."}</p></div>${correction}</section></main><script src="/review/assets/client.js" defer></script>`);
 }

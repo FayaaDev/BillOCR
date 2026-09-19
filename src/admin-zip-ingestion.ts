@@ -8,7 +8,8 @@ import { canonicalAttachmentExtension, sniffSupportedDocumentMimeType } from "./
 import type { AdminUploadBatch, Bill } from "./contracts";
 import type { BillDatabase } from "./database";
 import type { Logger } from "./logger";
-import { AttachmentContentConflictError, persistOriginal } from "./durable-attachment-ingestion";
+import { AttachmentContentConflictError, persistOriginal, removeVerifiedUnreferencedOriginal, safeAttachmentFilename, sourceBasename } from "./durable-attachment-ingestion";
+import { filenameKeyFromSourceBasename } from "./contracts";
 
 export interface ZipIngestionLimits { maxCompressedBytes: number; maxExpandedBytes: number; maxEntryBytes: number; maxEntries: number; }
 export interface AdminZipUpload { sourceId: string; originalFilename: string; bytes: Uint8Array | AsyncIterable<Uint8Array>; }
@@ -180,8 +181,8 @@ export class AdminZipIngestionService {
             expanded += bytes.byteLength;
             const mimeType = sniffSupportedDocumentMimeType(bytes);
             if (!mimeType) { this.reject(item.id, "unsupported_content"); counts.rejected += 1; activeItemId = null; opened.readEntry(); return; }
-            const bill = await this.publishItem(batch, item.id, index - 1, mimeType, bytes);
-            if (bill) counts.accepted += 1;
+            const bill = await this.publishItem(batch, item.id, index - 1, sourceBasename(name), mimeType, bytes);
+            if (bill) counts.accepted += 1; else counts.rejected += 1;
             activeItemId = null;
             opened.readEntry();
           } catch (error) { reject(error); }
@@ -207,23 +208,36 @@ export class AdminZipIngestionService {
     this.options.database.transitionAdminUploadBatchItemState({ itemId, state: "rejected", errorCode, expectedStates: ["queued", "processing"] });
   }
 
-  private async publishItem(batch: AdminUploadBatch, itemId: string, itemIndex: number, mimeType: NonNullable<ReturnType<typeof sniffSupportedDocumentMimeType>>, bytes: Uint8Array): Promise<Bill | null> {
+  private async publishItem(batch: AdminUploadBatch, itemId: string, itemIndex: number, sourceFilename: string | null, mimeType: NonNullable<ReturnType<typeof sniffSupportedDocumentMimeType>>, bytes: Uint8Array): Promise<Bill | null> {
     const contentSha256 = sha256(bytes); const extension = canonicalAttachmentExtension(mimeType);
     if (!extension) throw new Error("sniffed unsupported ZIP entry");
+    const sourceIdentity = `admin-zip:${batch.id}:${itemIndex}`;
     const originalPath = join(this.options.originalsDir, `admin-${batch.id}-${itemIndex}-${contentSha256.slice(0, 16)}${extension}`);
+    const existing = this.options.database.getBillBySourceIdentity("admin_upload", sourceIdentity);
+    if (existing) { if (existing.contentSha256 !== contentSha256) throw new AdminZipContentConflictError("ZIP source content differs"); return existing; }
+    const filenameKey = filenameKeyFromSourceBasename(sourceFilename);
+    if (filenameKey !== null && this.options.database.getBillByFilenameKey(filenameKey)) {
+      await removeVerifiedUnreferencedOriginal(this.options.database, originalPath, contentSha256);
+      this.options.database.transitionAdminUploadBatchItemState({ itemId, state: "rejected", errorCode: "duplicate_filename", expectedStates: ["queued"] });
+      return null;
+    }
     try { await persistOriginal(originalPath, bytes); }
     catch (error) { if (error instanceof AttachmentContentConflictError) throw new AdminZipContentConflictError("canonical ZIP original conflicts"); throw error; }
     await this.options.afterOriginalPublished?.();
-    const sourceIdentity = `admin-zip:${batch.id}:${itemIndex}`;
     const result = this.options.database.createBillWithInitialJobs({
       sourceMessageId: sourceIdentity, sourceChatId: "admin-upload", sourceSenderId: "admin-upload", attachmentIndex: 0,
-      receivedAt: batch.createdAt, originalFilename: null, mimeType, originalPath, contentSha256, source: "admin_upload", sourceIdentity,
+      receivedAt: batch.createdAt, originalFilename: safeAttachmentFilename(sourceFilename, mimeType), sourceFilename, mimeType, originalPath, contentSha256, source: "admin_upload", sourceIdentity,
       extractionPolicy: "azure_only", batchItemId: itemId,
     }, [
       { type: "extract", idempotencyKey: `extract:${sourceIdentity}:azure_only` },
       // A zero-document result is terminal but its immutable intake original is still archival work.
       { type: "archive_to_drive", idempotencyKey: `archive_to_drive:${sourceIdentity}` },
     ]);
+    if (result.duplicateFilename) {
+      await removeVerifiedUnreferencedOriginal(this.options.database, originalPath, contentSha256);
+      this.options.database.transitionAdminUploadBatchItemState({ itemId, state: "rejected", errorCode: "duplicate_filename", expectedStates: ["queued"] });
+      return null;
+    }
     return result.bill;
   }
 

@@ -15,6 +15,7 @@ import { createExtractionValidationCallback } from "./validation";
 import { createDriveArchiveHandler, createGoogleAdapters, createReviewCorrectionSyncHandler, createSheetsProjectionHandler, type DriveAdapter, type SheetsAdapter } from "./google-projections";
 import { AzureDocumentIntelligenceInvoiceProvider, type AzureInvoiceProvider } from "./azure-invoice";
 import { AdminZipIngestionService } from "./admin-zip-ingestion";
+import { createReviewAuth } from "./review-auth";
 
 export interface RunningService { url: string; whatsappAdmin: WhatsAppAdminOperations; shutdown(): Promise<void>; }
 export interface ServiceDependencies {
@@ -54,6 +55,7 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
   config = { ...config, originals: { ...config.originals, dir: originalsDir }, whatsapp: { ...config.whatsapp, originalsDir, maxAttachmentBytes: config.originals.maxAttachmentBytes } };
   const database = (dependencies.createDatabase ?? ((path: string) => new BillDatabase(path)))(config.databasePath);
   const logger = createLogger(config.logLevel);
+  const auth = createReviewAuth(config);
   const validatePersistedExtraction = createExtractionValidationCallback(database, config.validation);
   const onExtracted = async (billId: string): Promise<void> => {
     validatePersistedExtraction(billId);
@@ -103,7 +105,7 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
   };
   let server: ReturnType<typeof Bun.serve>;
   try {
-    server = (dependencies.serve ?? Bun.serve)({ hostname: config.host, port: config.port, fetch: (request) => handleRequest(request, database, config, admin) });
+    server = (dependencies.serve ?? Bun.serve)({ hostname: config.host, port: config.port, fetch: (request) => handleRequest(request, database, config, admin, auth) });
   } catch (error) {
     database.close();
     throw error;

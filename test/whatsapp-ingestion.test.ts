@@ -64,14 +64,14 @@ describe("WhatsApp ingestion", () => {
 
   test("accepts JPEG, PNG, and WebP documents with canonical safe filenames and extensions", async () => {
     const result = await service.ingest(message([
-      attachment("document", "image/jpeg", new Uint8Array([1]), "../handwritten.pdf"),
-      attachment("document", "IMAGE/PNG", new Uint8Array([2]), "handwritten.PDF"),
-      attachment("document", "image/webp", new Uint8Array([3]), "handwritten.jpg"),
+      attachment("document", "image/jpeg", new Uint8Array([1]), "../handwritten-jpeg.pdf"),
+      attachment("document", "IMAGE/PNG", new Uint8Array([2]), "handwritten-png.PDF"),
+      attachment("document", "image/webp", new Uint8Array([3]), "handwritten-webp.jpg"),
     ]));
     expect(result.bills).toMatchObject([
-      { attachmentIndex: 0, mimeType: "image/jpeg", originalFilename: "handwritten.jpg", originalPath: expect.stringMatching(/\.jpg$/) },
-      { attachmentIndex: 1, mimeType: "image/png", originalFilename: "handwritten.png", originalPath: expect.stringMatching(/\.png$/) },
-      { attachmentIndex: 2, mimeType: "image/webp", originalFilename: "handwritten.webp", originalPath: expect.stringMatching(/\.webp$/) },
+      { attachmentIndex: 0, mimeType: "image/jpeg", originalFilename: "handwritten-jpeg.jpg", originalPath: expect.stringMatching(/\.jpg$/) },
+      { attachmentIndex: 1, mimeType: "image/png", originalFilename: "handwritten-png.png", originalPath: expect.stringMatching(/\.png$/) },
+      { attachmentIndex: 2, mimeType: "image/webp", originalFilename: "handwritten-webp.webp", originalPath: expect.stringMatching(/\.webp$/) },
     ]);
   });
 
@@ -100,7 +100,7 @@ describe("WhatsApp ingestion", () => {
     const result = await service.ingest(message([
       attachment("document", "text/plain", new Uint8Array([1]), "ignore.txt"),
       attachment("image", "image/png", new Uint8Array([2]), "accepted.png"),
-      attachment("document", "application/pdf", new Uint8Array([3]), "accepted.pdf"),
+      attachment("document", "application/pdf", new Uint8Array([3]), "accepted-document.pdf"),
     ]));
     expect(result.bills.map((bill) => bill.attachmentIndex)).toEqual([1, 2]);
   });

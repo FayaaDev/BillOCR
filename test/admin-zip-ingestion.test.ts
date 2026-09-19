@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AdminZipContentConflictError, AdminZipIngestionService } from "../src/admin-zip-ingestion";
@@ -55,7 +55,7 @@ describe("admin ZIP ingestion", () => {
     const archive = zip([{ name: "nested/not-a-name.bin", bytes: pdf("one") }, { name: "images/also-not-an-image.txt", bytes: png }]);
     const first = await service.ingest({ sourceId: "upload-1", originalFilename: "invoices.zip", bytes: archive });
     const replay = await service.ingest({ sourceId: "upload-1", originalFilename: "changed.zip", bytes: archive });
-    expect(first.counts.accepted).toBe(2); expect(replay.batch.id).toBe(first.batch.id);
+    expect(first.counts.accepted).toBe(2); expect(replay.batch.id).toBe(first.batch.id); expect(replay.counts.accepted).toBe(2);
     const bills = database.sqlite.query<{ id: string; mime_type: string; original_path: string; content_sha256: string; extraction_policy: string }, []>("SELECT id, mime_type, original_path, content_sha256, extraction_policy FROM bills ORDER BY original_path").all();
     expect(bills).toHaveLength(2);
     expect(bills.map((bill) => bill.mime_type).sort()).toEqual(["application/pdf", "image/png"]);
@@ -63,6 +63,26 @@ describe("admin ZIP ingestion", () => {
     expect(bills.every((bill) => bill.extraction_policy === "azure_only")).toBe(true);
     expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM jobs WHERE type = 'extract'").get()?.count).toBe(2);
     expect(itemRows().map((item) => item.state)).toEqual(["processing", "processing"]);
+  });
+
+  test("terminally rejects a ZIP entry whose named basename duplicates an existing bill", async () => {
+    const durable = new (await import("../src/durable-attachment-ingestion")).DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["tg"], originalsDir: join(directory, "originals"), database, logger: silentLogger });
+    const existing = (await durable.ingest({ id: "tg-existing", chatId: "tg", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ kind: "document", mimeType: "application/pdf", filename: "Receipt.pdf", download: async () => pdf("first") }] })).bills[0]!;
+    const result = await service.ingest({ sourceId: "duplicate-name", originalFilename: "duplicates.zip", bytes: zip([{ name: "nested/Receipt.PNG", bytes: png }]) });
+    expect(result.counts).toEqual({ accepted: 0, rejected: 1, ignored: 0 });
+    expect(database.getAdminUploadBatchStatus(result.batch.id)).toMatchObject({ batch: { state: "completed" }, counts: { queued: 0, processing: 0, rejected: 1 }, items: [{ entryPath: "nested/Receipt.PNG", state: "rejected", errorCode: "duplicate_filename", billId: null }] });
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
+    expect(database.countJobsForBill(existing.id)).toBe(2);
+  });
+
+  test("cleans a matching ZIP orphan when another source already owns its filename", async () => {
+    const batch = database.createAdminUploadBatch({ id: "orphan-batch", idempotencyKey: "admin-zip:orphan-cleanup", originalFilename: "orphan.zip" }).batch;
+    database.createBillWithInitialJobs({ source: "telegram", sourceMessageId: "existing", sourceChatId: "tg", sourceSenderId: "sender", attachmentIndex: 0, receivedAt: batch.createdAt, sourceFilename: "Receipt.pdf", originalFilename: "Receipt.pdf", mimeType: "application/pdf", originalPath: join(directory, "existing.pdf"), contentSha256: "a".repeat(64) }, [{ type: "extract", idempotencyKey: "existing-receipt" }]);
+    const bytes = pdf("orphan"); const hash = createHash("sha256").update(bytes).digest("hex"); const orphan = join(directory, "originals", `admin-${batch.id}-0-${hash.slice(0, 16)}.pdf`); mkdirSync(join(directory, "originals"), { recursive: true }); writeFileSync(orphan, bytes);
+    const result = await service.ingest({ sourceId: "orphan-cleanup", originalFilename: "orphan.zip", bytes: zip([{ name: "nested/Receipt.PDF", bytes }]) });
+    expect(result.counts).toEqual({ accepted: 0, rejected: 1, ignored: 0 });
+    expect(existsSync(orphan)).toBe(false);
+    expect(database.getAdminUploadBatchStatus(batch.id)?.items).toEqual([expect.objectContaining({ state: "rejected", errorCode: "duplicate_filename", billId: null })]);
   });
 
   test("records hostile and unsupported entries while accepting valid later entries", async () => {
@@ -84,7 +104,7 @@ describe("admin ZIP ingestion", () => {
     expect(result.counts).toEqual({ accepted: 1, rejected: 2, ignored: 0 });
     expect(itemRows().map((item) => item.error_code)).toEqual(["entry_size_limit", null, "entry_count_limit"]);
     const expanded = new AdminZipIngestionService({ database, logger: silentLogger, originalsDir: join(directory, "originals"), stagingDir: join(directory, "expanded"), limits: { maxExpandedBytes: 10 } });
-    const expandedResult = await expanded.ingest({ sourceId: "expanded", originalFilename: "expanded.zip", bytes: zip([{ name: "one.pdf", bytes: pdf() }, { name: "two.pdf", bytes: pdf() }]) });
+    const expandedResult = await expanded.ingest({ sourceId: "expanded", originalFilename: "expanded.zip", bytes: zip([{ name: "expanded-one.pdf", bytes: pdf() }, { name: "expanded-two.pdf", bytes: pdf() }]) });
     expect(database.sqlite.query<{ error_code: string | null }, [string]>("SELECT error_code FROM admin_upload_batch_items WHERE batch_id = ? ORDER BY item_index").all(expandedResult.batch.id).map((item) => item.error_code)).toEqual([null, "expanded_size_limit"]);
     await expect(bounded.ingest({ sourceId: "too-compressed", originalFilename: "too.zip", bytes: new Uint8Array(1_001) })).rejects.toThrow("compressed size limit");
   });

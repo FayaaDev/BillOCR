@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { transportSourceIdentity, type AdminUploadBatch, type AdminUploadBatchItem, type AdminUploadBatchStatusCounts, type AzureExtractionOperation, type BeginExtractionInvocationResult, type Bill, type BillClassification, type BillSource, type ClaimedJob, type CreateBillInput, type DashboardMetrics, type EffectiveBillData, type ExtractedBill, type Extraction, type ExtractionFallbackStatus, type ExtractionInvocation, type ExtractionPolicy, type ExtractionProvider, type InitialJobInput, type Job, type JobState, type JobTransition, type JobType, type ProviderProjectionMetadata, type ReviewEvent, type ValidationIssue } from "./contracts";
+import { filenameKeyFromSourceBasename, isSourceBasename, transportSourceIdentity, type AdminUploadBatch, type AdminUploadBatchItem, type AdminUploadBatchStatusCounts, type AzureExtractionOperation, type BeginExtractionInvocationResult, type Bill, type BillClassification, type BillSource, type ClaimedJob, type CreateBillInput, type DashboardMetrics, type EffectiveBillData, type ExtractedBill, type Extraction, type ExtractionFallbackStatus, type ExtractionInvocation, type ExtractionPolicy, type ExtractionProvider, type InitialJobInput, type Job, type JobState, type JobTransition, type JobType, type ProviderProjectionMetadata, type ReviewEvent, type ValidationIssue } from "./contracts";
 import { applyMigrations } from "./migrations";
 import { jobTypes } from "./contracts";
 
@@ -11,7 +11,7 @@ type JobRow = {
 };
 type BillRow = {
   id: string; source_message_id: string; source_chat_id: string; source_sender_id: string; attachment_index: number;
-  received_at: string; caption: string | null; original_filename: string | null; mime_type: string; original_path: string;
+  received_at: string; caption: string | null; original_filename: string | null; source_filename: string | null; filename_key: string | null; mime_type: string; original_path: string;
   content_sha256: string; status: Bill["status"]; drive_file_id: string | null; sheet_row_key: string | null; created_at: string; updated_at: string; content_revision: number; review_revision: number; manual_review_required: number;
   source: BillSource; source_identity: string; extraction_policy: ExtractionPolicy; classification: BillClassification; batch_item_id: string | null;
 };
@@ -31,7 +31,7 @@ function toJob(row: JobRow): Job {
   return { id: row.id, billId: row.bill_id, type: row.type, state: row.state, idempotencyKey: row.idempotency_key, attempts: row.attempts, availableAt: row.available_at, leaseToken: row.lease_token, leaseExpiresAt: row.lease_expires_at, claimedBy: row.claimed_by, claimedAt: row.claimed_at, lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at, expectedRevision: row.expected_revision };
 }
 function toBill(row: BillRow): Bill {
-  return { id: row.id, sourceMessageId: row.source_message_id, sourceChatId: row.source_chat_id, sourceSenderId: row.source_sender_id, attachmentIndex: row.attachment_index, receivedAt: row.received_at, caption: row.caption, originalFilename: row.original_filename, mimeType: row.mime_type, originalPath: row.original_path, contentSha256: row.content_sha256, status: row.status, driveFileId: row.drive_file_id, sheetRowKey: row.sheet_row_key, createdAt: row.created_at, updatedAt: row.updated_at, contentRevision: row.content_revision, reviewRevision: row.review_revision, source: row.source, sourceIdentity: row.source_identity, extractionPolicy: row.extraction_policy, classification: row.classification, batchItemId: row.batch_item_id };
+  return { id: row.id, sourceMessageId: row.source_message_id, sourceChatId: row.source_chat_id, sourceSenderId: row.source_sender_id, attachmentIndex: row.attachment_index, receivedAt: row.received_at, caption: row.caption, originalFilename: row.original_filename, sourceFilename: row.source_filename, filenameKey: row.filename_key, mimeType: row.mime_type, originalPath: row.original_path, contentSha256: row.content_sha256, status: row.status, driveFileId: row.drive_file_id, sheetRowKey: row.sheet_row_key, createdAt: row.created_at, updatedAt: row.updated_at, contentRevision: row.content_revision, reviewRevision: row.review_revision, source: row.source, sourceIdentity: row.source_identity, extractionPolicy: row.extraction_policy, classification: row.classification, batchItemId: row.batch_item_id };
 }
 function toJobTransition(row: JobTransitionRow): JobTransition {
   return { id: row.id, jobId: row.job_id, fromState: row.from_state, toState: row.to_state, reason: row.reason, createdAt: row.created_at };
@@ -56,7 +56,7 @@ function recordTransition(db: Database, jobId: string, fromState: JobState | nul
 }
 
 export interface RetryPolicy { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number; }
-export interface CreateBillResult { bill: Bill; created: boolean; }
+export interface CreateBillResult { bill: Bill; created: boolean; duplicateFilename: boolean; }
 export interface ReviewSubmission { billId: string; reviewerId: string; action: "approve" | "reject"; reason: string | null; note: string | null; expectedContentRevision: number; expectedReviewRevision: number; corrected: ExtractedBill; }
 export interface CompletedInvoiceExportRecord { receivedAt: string; senderId: string | null; extraction: ExtractedBill; }
 export interface ReviewQueueFilters { source?: BillSource; batchId?: string; status?: "complete" | "not_invoice" | Bill["status"]; }
@@ -100,12 +100,16 @@ export class BillDatabase {
     const sourceIdentity = input.sourceIdentity ?? transportSourceIdentity(sourceChatId, sourceMessageId, input.attachmentIndex);
     const extractionPolicy = input.extractionPolicy ?? "mistral_with_azure_fallback";
     const classification = input.classification ?? "unclassified";
+    const sourceFilename = input.sourceFilename ?? null;
+    if (sourceFilename !== null && !isSourceBasename(sourceFilename)) throw new Error("Bill source filename must be a bounded basename");
+    const filenameKey = filenameKeyFromSourceBasename(sourceFilename);
     if (!sourceIdentity) throw new Error("Bill source identity is required");
     if (source !== "admin_upload" && input.batchItemId) throw new Error("Transport bill cannot link an admin-upload batch item");
     if (source === "admin_upload" && !input.batchItemId) throw new Error("Admin-upload bill requires a batch item");
     if (classification === "not_invoice" && initialJobs.some((job) => job.type === "project_to_sheet")) throw new Error("NotInvoice bills cannot create sheet projection jobs");
-    const insertBill = this.sqlite.query(`INSERT INTO bills (id, source_message_id, source_chat_id, source_sender_id, attachment_index, received_at, caption, original_filename, mime_type, original_path, content_sha256, status, source, source_identity, extraction_policy, classification, batch_item_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
+    const insertBill = this.sqlite.query(`INSERT INTO bills (id, source_message_id, source_chat_id, source_sender_id, attachment_index, received_at, caption, original_filename, source_filename, filename_key, mime_type, original_path, content_sha256, status, source, source_identity, extraction_policy, classification, batch_item_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
     const bySource = this.sqlite.query<BillRow, [BillSource, string]>("SELECT * FROM bills WHERE source = ? AND source_identity = ?");
+    const byFilename = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE filename_key = ? COLLATE BINARY LIMIT 1");
     const insertJob = this.sqlite.query(`INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, 0, ?, ?, ?)`);
     const jobByKey = this.sqlite.query<{ bill_id: string }, [string]>("SELECT bill_id FROM jobs WHERE idempotency_key = ?");
     return this.sqlite.transaction(() => {
@@ -120,10 +124,16 @@ export class BillDatabase {
           JOIN admin_upload_batches batch ON batch.id = item.batch_id WHERE item.id = ? AND item.bill_id IS NULL AND item.state = 'queued'`).get(input.batchItemId);
         if (!compatible) throw new Error("Admin-upload batch item is missing or already linked");
       }
-      const result = insertBill.run(billId, sourceMessageId, sourceChatId, sourceSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, input.mimeType, input.originalPath, input.contentSha256, source, sourceIdentity, extractionPolicy, classification, input.batchItemId ?? null, now, now);
-      const row = existingBill ?? bySource.get(source, sourceIdentity);
+      if (!existingBill && filenameKey !== null) {
+        const duplicate = byFilename.get(filenameKey);
+        if (duplicate) return { bill: toBill(duplicate), created: false, duplicateFilename: true };
+      }
+      const result = insertBill.run(billId, sourceMessageId, sourceChatId, sourceSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, sourceFilename, filenameKey, input.mimeType, input.originalPath, input.contentSha256, source, sourceIdentity, extractionPolicy, classification, input.batchItemId ?? null, now, now);
+      const resolvedBySource = existingBill ?? bySource.get(source, sourceIdentity);
+      const row = resolvedBySource ?? (filenameKey === null ? undefined : byFilename.get(filenameKey));
       if (!row) throw new Error("Bill source identity conflicts with another bill");
       const created = result.changes === 1;
+      if (!created && !resolvedBySource && filenameKey !== null) return { bill: toBill(row), created: false, duplicateFilename: true };
       for (const job of initialJobs) {
         const existing = jobByKey.get(job.idempotencyKey);
         if (existing && existing.bill_id !== row.id) throw new Error(`Required job idempotency key belongs to another bill: ${job.idempotencyKey}`);
@@ -139,13 +149,23 @@ export class BillDatabase {
           WHERE id = ? AND bill_id IS NULL AND state = 'queued' AND EXISTS (SELECT 1 FROM admin_upload_batches WHERE id = admin_upload_batch_items.batch_id)`).run(row.id, now, input.batchItemId);
         if (linked.changes !== 1) throw new Error("Admin-upload batch item is missing or already linked");
       }
-      return { bill: toBill(row), created };
+      return { bill: toBill(row), created, duplicateFilename: false };
     })();
   }
 
   getBillBySourceIdentity(source: BillSource, sourceIdentity: string): Bill | null {
     const row = this.sqlite.query<BillRow, [BillSource, string]>("SELECT * FROM bills WHERE source = ? AND source_identity = ?").get(source, sourceIdentity);
     return row ? toBill(row) : null;
+  }
+
+  /** Global case-sensitive filename check. The unique index remains the authoritative race fence. */
+  getBillByFilenameKey(filenameKey: string): Bill | null {
+    const row = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE filename_key = ? COLLATE BINARY LIMIT 1").get(filenameKey);
+    return row ? toBill(row) : null;
+  }
+
+  hasBillOriginalPath(originalPath: string): boolean {
+    return this.sqlite.query<{ value: number }, [string]>("SELECT 1 AS value FROM bills WHERE original_path = ? LIMIT 1").get(originalPath)?.value === 1;
   }
 
   getTelegramPollingCursor(): number | null {

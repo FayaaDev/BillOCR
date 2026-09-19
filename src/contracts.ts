@@ -18,6 +18,18 @@ export function transportSourceIdentity(sourceChatId: string, sourceMessageId: s
   return JSON.stringify([sourceChatId, sourceMessageId, attachmentIndex]);
 }
 
+/** Case-sensitive filename identity; callers supply a bounded basename, never a path. */
+export function filenameKeyFromSourceBasename(sourceFilename: string | null | undefined): string | null {
+  if (sourceFilename === null || sourceFilename === undefined) return null;
+  const finalDot = sourceFilename.lastIndexOf(".");
+  return finalDot > 0 ? sourceFilename.slice(0, finalDot) : sourceFilename;
+}
+
+/** A persisted source filename is always a complete, bounded leaf name. */
+export function isSourceBasename(sourceFilename: unknown): sourceFilename is string {
+  return typeof sourceFilename === "string" && sourceFilename.length > 0 && sourceFilename.length <= 512 && !sourceFilename.includes("/") && !sourceFilename.includes("\\") && !sourceFilename.includes("\0");
+}
+
 /** Read-only dashboard totals derived from canonical bill and job state. Processed means approved. */
 export interface DashboardMetrics {
   receivedBills: number;
@@ -51,6 +63,8 @@ export interface Bill {
   receivedAt: string;
   caption: string | null;
   originalFilename: string | null;
+  sourceFilename: string | null;
+  filenameKey: string | null;
   mimeType: string;
   originalPath: string;
   contentSha256: string;
@@ -226,6 +240,8 @@ export interface CreateBillInput {
   receivedAt: string;
   caption?: string | null;
   originalFilename?: string | null;
+  /** Bounded, unsanitized source basename retained only for global filename deduplication. */
+  sourceFilename?: string | null;
   mimeType: string;
   originalPath: string;
   contentSha256: string;

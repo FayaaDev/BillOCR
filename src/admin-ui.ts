@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AppConfig } from "./config";
 import type { AdminUploadBatch, AdminUploadBatchStatusCounts, DashboardMetrics } from "./contracts";
+import { reviewAuth, type ReviewAuth } from "./review-auth";
 
 const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'" };
 
@@ -24,19 +25,11 @@ export interface AdminHttpCapabilities {
   };
 }
 
-function authenticated(request: Request, config: AppConfig): string | null {
-  const value = request.headers.get("authorization");
-  if (!value?.startsWith("Basic ")) return null;
-  let decoded: string; try { decoded = atob(value.slice(6)); } catch { return null; }
-  const cut = decoded.indexOf(":"); if (cut < 0) return null;
-  const digest = (item: string) => createHmac("sha256", "review-basic").update(item).digest();
-  return timingSafeEqual(digest(decoded.slice(0, cut)), digest(config.review.username)) && timingSafeEqual(digest(decoded.slice(cut + 1)), digest(config.review.password)) ? decoded.slice(0, cut) : null;
-}
-function csrf(config: AppConfig, user: string, scope: "admin-whatsapp-action" | "admin-zip-upload"): string { const nonce = randomBytes(16).toString("base64url"); return `${nonce}.${createHmac("sha256", config.review.password).update(`${user}:${scope}:${nonce}`).digest("base64url")}`; }
-function csrfValid(value: string | null, config: AppConfig, user: string, scope: "admin-whatsapp-action" | "admin-zip-upload"): boolean {
+function csrf(config: AppConfig, user: string, binding: string, scope: "admin-whatsapp-action" | "admin-zip-upload"): string { const nonce = randomBytes(16).toString("base64url"); return `${nonce}.${createHmac("sha256", config.review.password).update(`${user}:${binding}:${scope}:${nonce}`).digest("base64url")}`; }
+function csrfValid(value: string | null, config: AppConfig, user: string, binding: string, scope: "admin-whatsapp-action" | "admin-zip-upload"): boolean {
   const [nonce, signature, extra] = value?.split(".") ?? [];
   if (!nonce || !signature || extra || nonce.length > 64 || signature.length > 128) return false;
-  const expected = createHmac("sha256", config.review.password).update(`${user}:${scope}:${nonce}`).digest("base64url");
+  const expected = createHmac("sha256", config.review.password).update(`${user}:${binding}:${scope}:${nonce}`).digest("base64url");
   const supplied = Buffer.from(signature); const expectedBytes = Buffer.from(expected);
   return supplied.byteLength === expectedBytes.byteLength && timingSafeEqual(supplied, expectedBytes);
 }
@@ -54,7 +47,7 @@ async function* requestBytes(request: Request): AsyncIterable<Uint8Array> {
   const reader = request.body?.getReader(); if (!reader) return;
   try { for (;;) { const next = await reader.read(); if (next.done) return; yield next.value; } } finally { reader.releaseLock(); }
 }
-function challenge(): Response { return new Response("غير مصرح", { status: 401, headers: { ...headers, "www-authenticate": 'Basic realm="internal review", charset="UTF-8"' } }); }
+function unauthorized(request: Request, pathname: string): Response { return request.method === "GET" && !pathname.includes("/api/") && !pathname.includes("/assets/") ? new Response(null, { status: 303, headers: { ...headers, location: "/login?return=/admin" } }) : new Response("غير مصرح", { status: 401, headers }); }
 function methodNotAllowed(allow: string): Response { return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow } }); }
 async function parseUnpairForm(request: Request): Promise<URLSearchParams | null> {
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/x-www-form-urlencoded")) return null;
@@ -66,13 +59,13 @@ async function parseUnpairForm(request: Request): Promise<URLSearchParams | null
   return [...form].length <= 2 && [...form].every(([key, value]) => key.length <= 32 && value.length <= 256) ? form : null;
 }
 
-export async function handleAdminRequest(request: Request, config: AppConfig, capabilities?: AdminHttpCapabilities, assetDir = join(import.meta.dir, "..", "dist", "admin")): Promise<Response> {
-  const user = authenticated(request, config); if (!user) return challenge();
+export async function handleAdminRequest(request: Request, config: AppConfig, capabilities?: AdminHttpCapabilities, assetDir = join(import.meta.dir, "..", "dist", "admin"), auth: ReviewAuth = reviewAuth(config)): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  const user = auth.user(request); const binding = auth.binding(request); if (!user || !binding) return unauthorized(request, pathname);
   if (pathname === "/admin") {
     if (request.method !== "GET") return methodNotAllowed("GET");
-    const token = csrf(config, user, "admin-whatsapp-action");
-    return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><link rel="icon" href="/admin/assets/favicon.png" type="image/png"><script src="/admin/assets/theme.js"></script><link rel="stylesheet" href="/admin/assets/client.css"></head><body><div id="root" data-csrf="${token}"></div><script src="/admin/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+    const token = csrf(config, user, binding, "admin-whatsapp-action");
+    return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><link rel="icon" href="/admin/assets/favicon.png" type="image/png"><script src="/admin/assets/theme.js"></script><link rel="stylesheet" href="/admin/assets/client.css"></head><body><form method="post" action="/logout"><input type="hidden" name="logoutCsrf" value="${auth.csrf(request, "logout")!}"><button type="submit">تسجيل الخروج</button></form><div id="root" data-csrf="${token}"></div><script src="/admin/assets/client.js" defer></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
   }
   if (!capabilities) return new Response("الخدمة غير متاحة", { status: 503, headers });
   const font = /^\/admin\/assets\/files\/(noto-sans-arabic-arabic-(?:400|700)-normal\.woff2)$/.exec(pathname)?.[1];
@@ -84,7 +77,7 @@ export async function handleAdminRequest(request: Request, config: AppConfig, ca
   if (pathname === "/admin/api/overview") {
     if (request.method !== "GET") return methodNotAllowed("GET");
     const [metrics, whatsapp, groups] = await Promise.all([capabilities.metrics(), capabilities.whatsapp.status(), capabilities.whatsapp.groups()]);
-    return Response.json({ metrics: { received: metrics.receivedBills, approved: metrics.approvedBills, failed: metrics.failedBills, retryableJobs: metrics.retryableJobs, permanentFailureJobs: metrics.permanentFailureJobs }, whatsapp: { ...whatsapp, configuredGroupId: config.whatsapp.groupId, groups, csrf: csrf(config, user, "admin-whatsapp-action") }, telegram: { enabled: config.telegram.enabled, groupIds: config.telegram.groupIds }, zip: { available: capabilities.zip.available(), maxCompressedBytes: capabilities.zip.maxCompressedBytes, csrf: csrf(config, user, "admin-zip-upload") } }, { headers });
+    return Response.json({ metrics: { received: metrics.receivedBills, approved: metrics.approvedBills, failed: metrics.failedBills, retryableJobs: metrics.retryableJobs, permanentFailureJobs: metrics.permanentFailureJobs }, whatsapp: { ...whatsapp, configuredGroupId: config.whatsapp.groupId, groups, csrf: csrf(config, user, binding, "admin-whatsapp-action") }, telegram: { enabled: config.telegram.enabled, groupIds: config.telegram.groupIds }, zip: { available: capabilities.zip.available(), maxCompressedBytes: capabilities.zip.maxCompressedBytes, csrf: csrf(config, user, binding, "admin-zip-upload") } }, { headers });
   }
   if (pathname === "/admin/api/metrics") {
     if (request.method !== "GET") return methodNotAllowed("GET");
@@ -110,7 +103,7 @@ export async function handleAdminRequest(request: Request, config: AppConfig, ca
     const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.toLowerCase();
     const filename = zipFilename(request.headers.get("x-upload-filename"));
     const sourceId = uploadId(request.headers.get("x-upload-id"));
-    if ((contentType !== "application/zip" && contentType !== "application/x-zip-compressed") || !filename || !sourceId || compressedLength(request, capabilities.zip.maxCompressedBytes) === null || !csrfValid(request.headers.get("x-csrf-token"), config, user, "admin-zip-upload")) return new Response("طلب رفع غير صالح", { status: 400, headers });
+    if ((contentType !== "application/zip" && contentType !== "application/x-zip-compressed") || !filename || !sourceId || compressedLength(request, capabilities.zip.maxCompressedBytes) === null || !csrfValid(request.headers.get("x-csrf-token"), config, user, binding, "admin-zip-upload")) return new Response("طلب رفع غير صالح", { status: 400, headers });
     try {
       const result = await capabilities.zip.ingest({ sourceId, originalFilename: filename, bytes: requestBytes(request) });
       return Response.json({ batch: { id: result.batch.id, originalFilename: result.batch.originalFilename, state: result.batch.state }, counts: result.counts }, { status: 202, headers });
@@ -128,7 +121,7 @@ export async function handleAdminRequest(request: Request, config: AppConfig, ca
     if (request.method !== "POST") return methodNotAllowed("POST");
     try {
       const form = await parseUnpairForm(request);
-      if (!form || !csrfValid(form.get("csrf"), config, user, "admin-whatsapp-action")) return new Response("طلب غير صالح", { status: 400, headers });
+       if (!form || !csrfValid(form.get("csrf"), config, user, binding, "admin-whatsapp-action")) return new Response("طلب غير صالح", { status: 400, headers });
       const status = await capabilities.whatsapp.status();
       if (pairingAction === "start") {
         if (status.state !== "unavailable" || !status.canPair) return new Response("الاقتران غير متاح", { status: 409, headers });

@@ -6,19 +6,22 @@ import { join } from "node:path";
 import type { AppConfig } from "../src/config";
 import { BillDatabase } from "../src/database";
 import { handleAdminRequest, type AdminHttpCapabilities } from "../src/admin-ui";
+import { reviewAuth } from "../src/review-auth";
 
 const config: AppConfig = {
   host: "127.0.0.1", port: 0, dataDir: "/tmp", databasePath: "/tmp/test.sqlite", logLevel: "error", originals: { dir: "/tmp/originals", maxAttachmentBytes: 1 }, telegram: { enabled: false, botToken: null, groupIds: [], pollTimeoutSeconds: 30, requestTimeoutMs: 35_000, maxResponseBytes: 1 },
   whatsapp: { enabled: true, groupId: "group", authPath: "/private/auth", originalsDir: "/tmp/originals", maxAttachmentBytes: 1 }, mistral: { apiKey: "mistral-secret", model: "model", maxResponseBytes: 1, requestTimeoutMs: 1 }, azure: { enabled: false, endpoint: null, apiKey: null, maxResponseBytes: 1, requestTimeoutMs: 1, pollIntervalMs: 0, fallbackConfidenceThreshold: .8 }, imagePreprocessing: { enabled: false, timeoutMs: 1 }, google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "admin", password: "password" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 1, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 1 },
 };
-const auth = { authorization: `Basic ${btoa("admin:password")}` };
+const id = reviewAuth(config).login("admin", "password"); if (!id) throw new Error("login failed");
+const auth = { cookie: `review_session=${id}` };
 
-test("admin routes require the review Basic authentication and are never cached", async () => {
-  expect((await handleAdminRequest(new Request("http://x/admin"), config)).status).toBe(401);
+test("admin routes require a review session and are never cached", async () => {
+  expect((await handleAdminRequest(new Request("http://x/admin"), config)).status).toBe(303);
   const shell = await handleAdminRequest(new Request("http://x/admin", { headers: auth }), config);
   expect(shell.status).toBe(200); expect(shell.headers.get("cache-control")).toBe("no-store"); expect(shell.headers.get("content-security-policy")).toContain("font-src 'self'");
   const html = await shell.text();
   expect(html).toContain('<html lang="ar" dir="rtl">');
+  expect(html).toContain('name="logoutCsrf"');
   expect(html).toContain('<title>ماسح الفواتير</title>');
   expect(html).toContain('<link rel="icon" href="/admin/assets/favicon.png" type="image/png">');
   expect(html).toContain('src="/admin/assets/client.js"');
@@ -72,7 +75,7 @@ test("admin protects every route, serves only known assets, and rejects malforme
     writeFileSync(join(directory, "client.css"), ".admin-page{}");
     writeFileSync(join(directory, "favicon.png"), new Uint8Array([137, 80, 78, 71]));
     for (const path of ["/admin", "/admin/api/overview", "/admin/api/metrics", "/admin/api/whatsapp/status", "/admin/api/whatsapp/qr", "/admin/api/whatsapp/groups", "/admin/assets/client.js", "/admin/assets/favicon.png", "/admin/assets/missing.js"]) {
-      expect((await handleAdminRequest(new Request(`http://x${path}`), config, capabilities(), directory)).status).toBe(401);
+      expect((await handleAdminRequest(new Request(`http://x${path}`), config, capabilities(), directory)).status).toBe(path === "/admin" ? 303 : 401);
     }
     expect((await handleAdminRequest(new Request("http://x/admin/assets/client.js", { headers: auth }), config, capabilities(), directory)).status).toBe(200);
     const favicon = await handleAdminRequest(new Request("http://x/admin/assets/favicon.png", { headers: auth }), config, capabilities(), directory);
