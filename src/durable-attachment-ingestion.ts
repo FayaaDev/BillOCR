@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { link, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
-import { transportSourceIdentity, type Bill, type BillSource, type CreateBillInput } from "./contracts";
+import { dirname, join, resolve } from "node:path";
+import { filenameKeyFromSourceBasename, isSourceBasename, transportSourceIdentity, type Bill, type BillSource, type CreateBillInput } from "./contracts";
 import type { BillDatabase } from "./database";
 import type { Logger } from "./logger";
 import { canonicalOriginalsDir } from "./config";
@@ -25,7 +25,10 @@ function sha256(bytes: Uint8Array): string { return createHash("sha256").update(
 function alreadyExists(error: unknown): boolean { return (error as NodeJS.ErrnoException).code === "EEXIST" || (error as NodeJS.ErrnoException).code === "ENOTEMPTY"; }
 function accepted(attachment: IncomingAttachment): boolean { return attachment.kind === "image" ? isSupportedImageMimeType(attachment.mimeType) : isSupportedDocumentMimeType(attachment.mimeType); }
 function receivedAt(timestamp: IncomingSourceMessage["timestamp"]): string | null { const date = timestamp instanceof Date ? timestamp : new Date(typeof timestamp === "number" ? timestamp * 1000 : timestamp ?? ""); return Number.isNaN(date.getTime()) ? null : date.toISOString(); }
-function safeFilename(filename: string | null | undefined, mimeType: string): string | null { if (!filename) return null; const name = basename(filename).replace(/[^a-zA-Z0-9._-]/g, "_"); const base = name.lastIndexOf(".") > 0 ? name.slice(0, name.lastIndexOf(".")) : name; return `${base || "attachment"}${canonicalAttachmentExtension(mimeType)!}`; }
+function platformBasename(filename: string | null | undefined): string | null { if (!filename) return null; const name = filename.slice(Math.max(filename.lastIndexOf("/"), filename.lastIndexOf("\\")) + 1); return name || null; }
+function displaySourceBasename(filename: string | null | undefined): string | null { return platformBasename(filename)?.slice(0, 512) ?? null; }
+export function sourceBasename(filename: string | null | undefined): string | null { const name = platformBasename(filename); return isSourceBasename(name) ? name : null; }
+export function safeAttachmentFilename(sourceFilename: string | null, mimeType: string): string | null { if (!sourceFilename) return null; const name = sourceFilename.replace(/[^a-zA-Z0-9._-]/g, "_"); const base = name.lastIndexOf(".") > 0 ? name.slice(0, name.lastIndexOf(".")) : name; return `${base || "attachment"}${canonicalAttachmentExtension(mimeType)!}`; }
 
 /** Crash-recoverable source-neutral intake. It persists immutable bytes before its short SQLite transaction. */
 export class DurableAttachmentIngestionService {
@@ -47,6 +50,9 @@ export class DurableAttachmentIngestionService {
       const sourceIdentity = this.sourceIdentity(message.id, message.chatId, attachmentIndex);
       const existing = this.options.database.getBillBySourceIdentity(this.options.source, sourceIdentity);
       if (existing) { bills.push(existing); continue; }
+      const sourceFilename = sourceBasename(attachment.filename);
+      const filenameKey = filenameKeyFromSourceBasename(sourceFilename);
+      if (filenameKey !== null) { const duplicate = this.options.database.getBillByFilenameKey(filenameKey); if (duplicate) { bills.push(duplicate); continue; } }
       try {
         const bytes = await readLimitedAttachment(attachment, this.options.maxAttachmentBytes ?? 20 * 1024 * 1024);
         const manifest = this.createManifest(message, attachment, attachmentIndex, timestamp, bytes);
@@ -70,7 +76,8 @@ export class DurableAttachmentIngestionService {
 
   private createManifest(message: IncomingSourceMessage, attachment: IncomingAttachment, attachmentIndex: number, timestamp: string, bytes: Uint8Array): StagedAttachment {
     const mimeType = attachment.mimeType!.toLowerCase(); const sourceIdentity = this.sourceIdentity(message.id!, message.chatId!, attachmentIndex);
-    return { version: 1, id: randomUUID(), source: this.options.source, sourceIdentity, sourceMessageId: message.id!, sourceChatId: message.chatId!, sourceSenderId: message.senderId!, attachmentIndex, receivedAt: timestamp, caption: attachment.caption ?? message.caption ?? null, originalFilename: safeFilename(attachment.filename, mimeType), mimeType, originalPath: this.canonicalOriginalPath(sourceIdentity, attachmentIndex, mimeType), contentSha256: sha256(bytes) };
+    const sourceFilename = sourceBasename(attachment.filename);
+    return { version: 1, id: randomUUID(), source: this.options.source, sourceIdentity, sourceMessageId: message.id!, sourceChatId: message.chatId!, sourceSenderId: message.senderId!, attachmentIndex, receivedAt: timestamp, caption: attachment.caption ?? message.caption ?? null, originalFilename: safeAttachmentFilename(displaySourceBasename(attachment.filename), mimeType), sourceFilename, mimeType, originalPath: this.canonicalOriginalPath(sourceIdentity, attachmentIndex, mimeType), contentSha256: sha256(bytes) };
   }
   private stagingDirectory(): string { return join(this.options.originalsDir, stagingName); }
   private canonicalOriginalPath(sourceIdentity: string, attachmentIndex: number, mimeType: string): string { const extension = canonicalAttachmentExtension(mimeType); if (!extension) throw new Error("unsupported attachment MIME type"); const key = this.options.source === "whatsapp" ? sourceIdentity : `${this.options.source}:${sourceIdentity}`; return join(resolve(this.options.originalsDir), `${createHash("sha256").update(key).digest("hex").slice(0, 32)}-${attachmentIndex}${extension}`); }
@@ -95,7 +102,7 @@ export class DurableAttachmentIngestionService {
     const sourceIdentity = transportSourceIdentity(value.whatsappGroupId, value.whatsappMessageId, value.attachmentIndex);
     const originalPath = this.legacyWhatsAppOriginalPath(value.whatsappMessageId, value.attachmentIndex, value.mimeType);
     if (value.originalPath !== originalPath) return null;
-    return { ...value, source: "whatsapp", sourceIdentity, sourceMessageId: value.whatsappMessageId, sourceChatId: value.whatsappGroupId, sourceSenderId: value.whatsappSenderId, originalPath };
+    return { ...value, source: "whatsapp", sourceIdentity, sourceMessageId: value.whatsappMessageId, sourceChatId: value.whatsappGroupId, sourceSenderId: value.whatsappSenderId, sourceFilename: null, originalPath };
   }
   private async reconcileOne(unit: string): Promise<Bill | null> {
     const manifestInfo = await lstat(join(unit, "manifest.json")); const originalInfo = await lstat(join(unit, "original"));
@@ -104,16 +111,28 @@ export class DurableAttachmentIngestionService {
     if (!manifest || !this.validManifest(manifest)) throw new Error("invalid staging manifest"); const bytes = await readFile(join(unit, "original")); if (sha256(bytes) !== manifest.contentSha256) throw new Error("staged content hash mismatch");
     const existing = this.options.database.getBillBySourceIdentity(manifest.source, manifest.sourceIdentity);
     if (existing) { if (manifest.contentSha256 !== existing.contentSha256) { await rm(unit, { recursive: true, force: true }); throw new AttachmentContentConflictError("existing bill content differs"); } await rm(unit, { recursive: true, force: true }); return existing; }
+    const filenameKey = filenameKeyFromSourceBasename(manifest.sourceFilename);
+    if (filenameKey !== null) { const duplicate = this.options.database.getBillByFilenameKey(filenameKey); if (duplicate) { await removeVerifiedUnreferencedOriginal(this.options.database, manifest.originalPath, manifest.contentSha256); await rm(unit, { recursive: true, force: true }); return duplicate; } }
     const originalPath = manifest.originalPath;
     try { await persistOriginal(originalPath, bytes); } catch (error) { if (error instanceof AttachmentContentConflictError) await rm(unit, { recursive: true, force: true }); throw error; }
     await this.options.afterOriginalPublished?.();
     let result; try { result = this.options.database.createBillWithInitialJobs({ ...manifest, originalPath }, [{ type: "extract", idempotencyKey: `extract:${manifest.id}:${this.options.extractionInputVersion}` }, { type: "archive_to_drive", idempotencyKey: `archive_to_drive:${manifest.id}` }]); }
     catch (error) { const raced = this.options.database.getBillBySourceIdentity(manifest.source, manifest.sourceIdentity); if (!raced) throw error; if (raced.contentSha256 !== manifest.contentSha256) { await rm(unit, { recursive: true, force: true }); throw new AttachmentContentConflictError("racing bill content differs"); } result = { bill: raced, created: false }; }
+    if (result.duplicateFilename) await removeVerifiedUnreferencedOriginal(this.options.database, originalPath, manifest.contentSha256);
     await rm(unit, { recursive: true, force: true }); return result.bill;
   }
-  private validManifest(value: StagedAttachment): boolean { return value.version === 1 && value.source === this.options.source && typeof value.sourceIdentity === "string" && typeof value.id === "string" && typeof value.sourceMessageId === "string" && typeof value.sourceChatId === "string" && typeof value.sourceSenderId === "string" && Number.isInteger(value.attachmentIndex) && value.attachmentIndex >= 0 && typeof value.receivedAt === "string" && typeof value.mimeType === "string" && typeof value.originalPath === "string" && /^[a-f0-9]{64}$/.test(value.contentSha256) && isSupportedDocumentMimeType(value.mimeType) && value.sourceIdentity === this.sourceIdentity(value.sourceMessageId, value.sourceChatId, value.attachmentIndex) && (value.originalPath === this.canonicalOriginalPath(value.sourceIdentity, value.attachmentIndex, value.mimeType) || (value.source === "whatsapp" && value.originalPath === this.legacyWhatsAppOriginalPath(value.sourceMessageId, value.attachmentIndex, value.mimeType))); }
+  private validManifest(value: StagedAttachment): boolean { return value.version === 1 && value.source === this.options.source && typeof value.sourceIdentity === "string" && typeof value.id === "string" && typeof value.sourceMessageId === "string" && typeof value.sourceChatId === "string" && typeof value.sourceSenderId === "string" && Number.isInteger(value.attachmentIndex) && value.attachmentIndex >= 0 && typeof value.receivedAt === "string" && typeof value.mimeType === "string" && typeof value.originalPath === "string" && (value.sourceFilename === undefined || value.sourceFilename === null || isSourceBasename(value.sourceFilename)) && /^[a-f0-9]{64}$/.test(value.contentSha256) && isSupportedDocumentMimeType(value.mimeType) && value.sourceIdentity === this.sourceIdentity(value.sourceMessageId, value.sourceChatId, value.attachmentIndex) && (value.originalPath === this.canonicalOriginalPath(value.sourceIdentity, value.attachmentIndex, value.mimeType) || (value.source === "whatsapp" && value.originalPath === this.legacyWhatsAppOriginalPath(value.sourceMessageId, value.attachmentIndex, value.mimeType))); }
 }
 
 export async function readLimitedAttachment(attachment: IncomingAttachment, maxBytes: number): Promise<Uint8Array> { const downloaded = await attachment.download(); if (downloaded instanceof Uint8Array) { if (downloaded.byteLength > maxBytes) throw new Error("attachment exceeds configured size limit"); return downloaded; } const chunks: Uint8Array[] = []; let size = 0; for await (const chunk of downloaded) { size += chunk.byteLength; if (size > maxBytes) throw new Error("attachment exceeds configured size limit"); chunks.push(chunk); } const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; } return bytes; }
+/** Removes only a verified delivery orphan; canonical DB-referenced originals are never candidates. */
+export async function removeVerifiedUnreferencedOriginal(database: BillDatabase, path: string, contentSha256: string): Promise<boolean> {
+  if (database.hasBillOriginalPath(path)) return false;
+  let info; try { info = await lstat(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  if (!info.isFile() || info.isSymbolicLink()) return false;
+  if (sha256(await readFile(path)) !== contentSha256 || database.hasBillOriginalPath(path)) return false;
+  await rm(path);
+  return true;
+}
 /** Atomically publishes a completed original without replacement. */
 export async function persistOriginal(path: string, bytes: Uint8Array): Promise<void> { await mkdir(dirname(path), { recursive: true }); const temporaryPath = `${path}.${randomUUID()}.tmp`; try { await writeFile(temporaryPath, bytes); try { await link(temporaryPath, path); } catch (error) { if (!alreadyExists(error)) throw error; const existingInfo = await lstat(path); if (existingInfo.isSymbolicLink()) throw new Error("canonical original is symlink"); const existing = await readFile(path); if (sha256(existing) !== sha256(bytes)) throw new AttachmentContentConflictError("canonical original content differs"); } await rm(temporaryPath, { force: true }); } catch (error) { await rm(temporaryPath, { force: true }).catch(() => undefined); throw error; } }

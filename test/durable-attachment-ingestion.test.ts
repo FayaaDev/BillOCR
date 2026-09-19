@@ -32,6 +32,34 @@ test("ingests allowed Telegram PDFs with immutable source-qualified paths and re
   expect(first.originalPath).toContain(createHash("sha256").update(`telegram:${first.sourceIdentity}`).digest("hex").slice(0, 32));
 });
 
+test("deduplicates named attachments globally by case-sensitive basename without its final extension", async () => {
+  const originalsDir = join(directory, "originals");
+  const telegram = new DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["tg"], originalsDir, database, logger });
+  const whatsapp = new DurableAttachmentIngestionService({ source: "whatsapp", allowedChatIds: ["wa"], originalsDir, database, logger });
+  const first = (await telegram.ingest({ id: "tg-1", chatId: "tg", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ ...attachment(pdf), filename: "nested/Receipt.pdf" }] })).bills[0]!;
+  const duplicate = (await whatsapp.ingest({ id: "wa-1", chatId: "wa", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ ...attachment(new Uint8Array([...pdf, 1])), filename: "C:\\incoming\\Receipt.PDF" }] })).bills[0]!;
+  const distinctCase = (await whatsapp.ingest({ id: "wa-2", chatId: "wa", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ ...attachment(new Uint8Array([...pdf, 2])), filename: "receipt.pdf" }] })).bills[0]!;
+  const sameBytesDifferentName = (await whatsapp.ingest({ id: "wa-3", chatId: "wa", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ ...attachment(pdf), filename: "other.pdf" }] })).bills[0]!;
+  const unnamed = (await whatsapp.ingest({ id: "wa-4", chatId: "wa", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ ...attachment(new Uint8Array([...pdf, 3])), filename: null }] })).bills[0]!;
+  expect(duplicate.id).toBe(first.id);
+  expect(distinctCase.id).not.toBe(first.id);
+  expect(sameBytesDifferentName.id).not.toBe(first.id);
+  expect(unnamed.id).not.toBe(first.id);
+  expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(4);
+  expect(first).toMatchObject({ sourceFilename: "Receipt.pdf", filenameKey: "Receipt", originalFilename: "Receipt.pdf" });
+  expect(database.countJobsForBill(first.id)).toBe(2);
+});
+
+test("excludes overlong source names from filename deduplication while retaining a safe display name", async () => {
+  const originalsDir = join(directory, "originals");
+  const service = new DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["tg"], originalsDir, database, logger });
+  const filename = `${"x".repeat(513)}.pdf`;
+  const first = (await service.ingest({ id: "long-1", chatId: "tg", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ ...attachment(pdf), filename }] })).bills[0]!;
+  const second = (await service.ingest({ id: "long-2", chatId: "tg", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ ...attachment(new Uint8Array([...pdf, 1])), filename }] })).bills[0]!;
+  expect(first.id).not.toBe(second.id);
+  expect(first).toMatchObject({ sourceFilename: null, filenameKey: null, originalFilename: `${"x".repeat(512)}.pdf` });
+});
+
 test("recovers a post-publication pre-source WhatsApp manifest through its existing immutable original", async () => {
   const originalsDir = join(directory, "originals"); const unit = join(originalsDir, ".staging", "legacy"); mkdirSync(unit, { recursive: true }); writeFileSync(join(unit, "original"), pdf);
   const legacyOriginal = join(realpathSync(originalsDir), `${createHash("sha256").update("old-message").digest("hex").slice(0, 32)}-0.pdf`); writeFileSync(legacyOriginal, pdf);
@@ -74,6 +102,31 @@ test("Telegram rejects a staged manifest whose source identity names another mes
   expect(await service.reconcilePending()).toEqual([]); expect(database.getBillBySourceIdentity("telegram", transportSourceIdentity("-100", "identity-2", 0))).toBeNull();
 });
 
+test("Telegram rejects a recovered manifest with a Windows path separator in its source filename", async () => {
+  const originalsDir = join(directory, "originals");
+  const interrupted = new DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["-100"], originalsDir, database, logger, beforeCommit: async () => { throw new Error("interrupt"); } });
+  await interrupted.ingest({ id: "windows-name", chatId: "-100", senderId: "42", timestamp: "2026-09-01T00:00:00.000Z", attachments: [attachment()] });
+  const unit = join(originalsDir, ".staging", readdirSync(join(originalsDir, ".staging"))[0]!); const manifestPath = join(unit, "manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { sourceFilename: string | null }; manifest.sourceFilename = "nested\\receipt.pdf"; writeFileSync(manifestPath, JSON.stringify(manifest));
+  const service = new DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["-100"], originalsDir, database, logger });
+  expect(await service.reconcilePending()).toEqual([]); expect(database.getBillBySourceIdentity("telegram", transportSourceIdentity("-100", "windows-name", 0))).toBeNull();
+});
+
+test("recovery removes a matching unreferenced original when another source won its filename", async () => {
+  const originalsDir = join(directory, "originals");
+  const winner = new DurableAttachmentIngestionService({ source: "whatsapp", allowedChatIds: ["wa"], originalsDir, database, logger });
+  const interrupted = new DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["tg"], originalsDir, database, logger, afterOriginalPublished: async () => {
+    await winner.ingest({ id: "winner", chatId: "wa", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ ...attachment(new Uint8Array([...pdf, 1])), filename: "shared.PDF" }] });
+    throw new Error("crash after publish");
+  } });
+  await interrupted.ingest({ id: "loser", chatId: "tg", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ ...attachment(pdf), filename: "shared.pdf" }] });
+  const unit = join(originalsDir, ".staging", readdirSync(join(originalsDir, ".staging"))[0]!); const manifest = JSON.parse(readFileSync(join(unit, "manifest.json"), "utf8")) as { originalPath: string };
+  expect(existsSync(manifest.originalPath)).toBe(true);
+  const recovery = new DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["tg"], originalsDir, database, logger });
+  expect((await recovery.reconcilePending()).map((bill) => bill.source)).toEqual(["whatsapp"]);
+  expect(existsSync(manifest.originalPath)).toBe(false);
+  expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
+});
+
 test("mixed source staging reconciles only each source without false warnings", async () => {
   const originalsDir = join(directory, "mixed-originals"); const warnings: string[] = [];
   const testLogger: Logger = { debug() {}, info() {}, error() {}, warn(message) { warnings.push(message); } };
@@ -82,8 +135,8 @@ test("mixed source staging reconciles only each source without false warnings", 
   const interrupt = async () => { throw new Error("interrupt"); };
   const stagedWhatsapp = new DurableAttachmentIngestionService({ source: "whatsapp", allowedChatIds: ["wa"], originalsDir, database, logger: testLogger, beforeCommit: interrupt });
   const stagedTelegram = new DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["tg"], originalsDir, database, logger: testLogger, beforeCommit: interrupt });
-  await stagedWhatsapp.ingest({ id: "wa-message", chatId: "wa", senderId: "sender", timestamp: "2026-08-27T00:00:00.000Z", attachments: [attachment()] });
-  await stagedTelegram.ingest({ id: "tg-message", chatId: "tg", senderId: "sender", timestamp: "2026-08-27T00:00:00.000Z", attachments: [attachment()] });
+  await stagedWhatsapp.ingest({ id: "wa-message", chatId: "wa", senderId: "sender", timestamp: "2026-08-27T00:00:00.000Z", attachments: [{ ...attachment(), filename: "whatsapp.pdf" }] });
+  await stagedTelegram.ingest({ id: "tg-message", chatId: "tg", senderId: "sender", timestamp: "2026-08-27T00:00:00.000Z", attachments: [{ ...attachment(), filename: "telegram.pdf" }] });
   warnings.length = 0;
   expect((await whatsapp.reconcilePending()).map((bill) => bill.source)).toEqual(["whatsapp"]);
   expect((await telegram.reconcilePending()).map((bill) => bill.source)).toEqual(["telegram"]);

@@ -32,6 +32,10 @@ function lifecycleConfig(name: string, options: { whatsapp?: boolean; telegram?:
   };
 }
 async function waitFor(check: () => boolean, attempts = 100): Promise<void> { for (let attempt = 0; attempt < attempts && !check(); attempt += 1) await Bun.sleep(2); }
+async function session(): Promise<{ cookie: string }> {
+  const response = await fetch(new URL("login", service.url), { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "username=reviewer&password=secret&return=%2Freview", redirect: "manual" });
+  const cookie = response.headers.get("set-cookie"); if (!cookie) throw new Error("login failed"); return { cookie };
+}
 
 beforeEach(() => {
   directory = realpathSync(mkdtempSync(join(tmpdir(), "bill-server-")));
@@ -70,7 +74,7 @@ test("a symlinked ORIGINALS_DIR keeps WhatsApp ingestion and review previews on 
   await receive({ id: "symlink-message", groupId: "group", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ kind: "image", mimeType: "image/png", filename: "receipt.png", download: async () => bytes }] });
   const bill = database.findBillsByIdentifier("symlink-message")[0]; if (!bill) throw new Error("bill missing");
   expect(bill.originalPath.startsWith(`${canonical}/`)).toBe(true);
-  const preview = await fetch(new URL(`review/bills/${bill.id}/original`, service.url), { headers: { authorization: `Basic ${btoa("reviewer:secret")}` } });
+  const preview = await fetch(new URL(`review/bills/${bill.id}/original`, service.url), { headers: await session() });
   expect(preview.status).toBe(200); expect(new Uint8Array(await preview.arrayBuffer())).toEqual(bytes);
 });
 
@@ -101,7 +105,7 @@ test("startService exposes authenticated safe ZIP failures and reconciles staged
     whatsapp: { enabled: false, groupId: "group", authPath: join(directory, "auth"), originalsDir: join(directory, "originals"), maxAttachmentBytes: 1024 }, mistral: { apiKey: "secret", model: "model", maxResponseBytes: 1024, requestTimeoutMs: 1000 }, azure: { enabled: true, endpoint: "https://azure.test", apiKey: "secret", maxResponseBytes: 1024, requestTimeoutMs: 1000, pollIntervalMs: 0, fallbackConfidenceThreshold: .8 }, imagePreprocessing: { enabled: false, timeoutMs: 8_000 }, google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 },
   };
   service = startService(config, {}, { azureProvider: { submit: async () => ({ operationLocation: "unused" }), poll: async () => { throw new Error("unused"); } } });
-  const auth = { authorization: `Basic ${btoa("reviewer:secret")}` };
+  const auth = await session();
   const overview = await (await fetch(new URL("admin/api/overview", service.url), { headers: auth })).json() as { zip: { csrf: string } };
   const upload = await fetch(new URL("admin/api/zip", service.url), { method: "POST", headers: { ...auth, "content-type": "application/zip", "x-upload-id": "corrupt-upload", "x-upload-filename": "corrupt.zip", "x-csrf-token": overview.zip.csrf }, body: new Uint8Array([0x50, 0x4b, 5, 6]) });
   expect(upload.status).toBe(202); const response = await upload.json() as { batch: { id: string; state: string } }; expect(response.batch.state).toBe("failed");
@@ -172,7 +176,7 @@ test("admin preserves connecting during a pairing restart so the client does not
     google: { enabled: false, authMode: "disabled", credentialJson: null, driveFolderId: null, sheetId: null, sheetName: "Ledger", requestTimeoutMs: 1, maxResponseBytes: 1 }, review: { username: "reviewer", password: "secret" }, validation: { currencyRoundingTolerance: .01, maxFutureInvoiceDays: 30 }, jobs: { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 },
   };
   service = startService(config, {}, { whatsappTransport: transport });
-  const headers = { authorization: `Basic ${btoa("reviewer:secret")}` };
+  const headers = await session();
   const overview = await (await fetch(new URL("admin/api/overview", service.url), { headers })).json();
   expect(overview.whatsapp).toMatchObject({ state: "connecting", canPair: true });
   expect(qrRequests).toBe(0);

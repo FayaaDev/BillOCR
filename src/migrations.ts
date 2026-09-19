@@ -174,8 +174,57 @@ const migrations = [
      canonical message tuple; normalize only WhatsApp and leave ZIP/admin identities intact. */
   `UPDATE bills
      SET source_identity = json_array(source_chat_id, source_message_id, attachment_index)
-   WHERE source = 'whatsapp'
-     AND source_identity <> json_array(source_chat_id, source_message_id, attachment_index);`,
+    WHERE source = 'whatsapp'
+      AND source_identity <> json_array(source_chat_id, source_message_id, attachment_index);`,
+  /* Historical original_filename values were sanitized, so they cannot safely seed a global
+     source-filename identity. New intake retains its bounded raw basename separately. */
+  `ALTER TABLE bills ADD COLUMN source_filename TEXT;
+   ALTER TABLE bills ADD COLUMN filename_key TEXT;
+   CREATE UNIQUE INDEX bills_filename_key_idx ON bills(filename_key COLLATE BINARY) WHERE filename_key IS NOT NULL;`,
+  /* Legacy transport filenames were sanitized and therefore untrusted. ZIP entry paths retain
+     a source basename only when their stored path is demonstrably safe and untruncated. */
+  `CREATE TEMP TABLE legacy_zip_filename_candidates (
+      bill_id TEXT PRIMARY KEY, source_filename TEXT NOT NULL, filename_key TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    WITH RECURSIVE stripped(bill_id, basename) AS (
+      SELECT b.id, item.entry_path FROM bills b
+        JOIN admin_upload_batch_items item ON item.id = b.batch_item_id
+       WHERE b.source = 'admin_upload' AND b.source_filename IS NULL
+         AND length(item.entry_path) BETWEEN 1 AND 999
+         AND instr(item.entry_path, char(0)) = 0 AND instr(item.entry_path, char(92)) = 0
+         AND item.entry_path NOT LIKE '/%' AND item.entry_path NOT GLOB '[A-Za-z]:*'
+         AND item.entry_path NOT IN ('.', '..') AND item.entry_path NOT LIKE './%' AND item.entry_path NOT LIKE '../%'
+         AND item.entry_path NOT LIKE '%//%' AND item.entry_path NOT LIKE '%/./%' AND item.entry_path NOT LIKE '%/../%'
+         AND item.entry_path NOT LIKE '%/.' AND item.entry_path NOT LIKE '%/..'
+      UNION ALL
+      SELECT bill_id, substr(basename, instr(basename, '/') + 1) FROM stripped WHERE instr(basename, '/') > 0
+    ), positions(bill_id, basename, position) AS (
+      SELECT bill_id, basename, 1 FROM stripped WHERE instr(basename, '/') = 0
+      UNION ALL
+      SELECT bill_id, basename, position + 1 FROM positions WHERE position < length(basename)
+    )
+    INSERT INTO legacy_zip_filename_candidates (bill_id, source_filename, filename_key, created_at)
+      SELECT p.bill_id, p.basename,
+        CASE WHEN MAX(CASE WHEN substr(p.basename, p.position, 1) = '.' THEN p.position ELSE 0 END) > 1
+          THEN substr(p.basename, 1, MAX(CASE WHEN substr(p.basename, p.position, 1) = '.' THEN p.position ELSE 0 END) - 1)
+          ELSE p.basename END,
+        b.created_at
+      FROM positions p JOIN bills b ON b.id = p.bill_id
+      WHERE length(p.basename) BETWEEN 1 AND 512
+      GROUP BY p.bill_id, p.basename, b.created_at;
+    UPDATE bills SET source_filename = (SELECT source_filename FROM legacy_zip_filename_candidates WHERE bill_id = bills.id)
+      WHERE id IN (SELECT bill_id FROM legacy_zip_filename_candidates);
+    UPDATE bills SET filename_key = (SELECT filename_key FROM legacy_zip_filename_candidates WHERE bill_id = bills.id)
+      WHERE id IN (
+        SELECT candidate.bill_id FROM legacy_zip_filename_candidates candidate
+         WHERE NOT EXISTS (
+           SELECT 1 FROM legacy_zip_filename_candidates earlier
+            WHERE earlier.filename_key = candidate.filename_key
+              AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.bill_id < candidate.bill_id))
+         )
+           AND NOT EXISTS (SELECT 1 FROM bills existing WHERE existing.filename_key = candidate.filename_key)
+      );
+    DROP TABLE legacy_zip_filename_candidates;`,
 ];
 
 export function applyMigrations(db: Database): void {

@@ -21,7 +21,7 @@ describe("migrations", () => {
   test("apply on a fresh database and safely reapply", () => {
     database.close();
     const reopened = new BillDatabase(path);
-    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(16);
+    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(18);
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'validation_issues'").get()?.name).toBe("validation_issues");
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'extraction_invocations'").get()?.name).toBe("extraction_invocations");
     reopened.close();
@@ -36,7 +36,7 @@ describe("migrations", () => {
     expect(await first.exited).toBe(0);
     expect(await second.exited).toBe(0);
     database = new BillDatabase(path);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(16);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(18);
   });
 
   test("upgrades a v9 database with existing extraction records without changing canonical data", () => {
@@ -79,7 +79,7 @@ describe("migrations", () => {
     database = new BillDatabase(path);
     expect(database.getExtraction("legacy-bill")).toMatchObject({ normalized: { vendorName: "Legacy" }, selectedProvider: null, fallbackStatus: null });
     expect(database.sqlite.query<{ provider: string }, [string]>("SELECT provider FROM extraction_attempts WHERE id = ?").get("legacy-attempt")?.provider).toBe("mistral");
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(16);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(18);
   });
 
   test("upgrades historical WhatsApp identity, jobs, foreign keys, and projections without loss", () => {
@@ -114,7 +114,7 @@ describe("migrations", () => {
     legacy.close();
 
     database = new BillDatabase(path);
-    expect(database.getBill("legacy-whatsapp")).toMatchObject({ sourceMessageId: "wamid.legacy", sourceChatId: "group@chat", sourceSenderId: "sender@chat", attachmentIndex: 2, status: "approved", driveFileId: "drive-legacy", sheetRowKey: "sheet-legacy", contentRevision: 7, reviewRevision: 3, source: "whatsapp", sourceIdentity: transportSourceIdentity("group@chat", "wamid.legacy", 2), extractionPolicy: "mistral_with_azure_fallback", classification: "unclassified", batchItemId: null });
+    expect(database.getBill("legacy-whatsapp")).toMatchObject({ sourceMessageId: "wamid.legacy", sourceChatId: "group@chat", sourceSenderId: "sender@chat", attachmentIndex: 2, status: "approved", driveFileId: "drive-legacy", sheetRowKey: "sheet-legacy", contentRevision: 7, reviewRevision: 3, source: "whatsapp", sourceIdentity: transportSourceIdentity("group@chat", "wamid.legacy", 2), extractionPolicy: "mistral_with_azure_fallback", classification: "unclassified", batchItemId: null, sourceFilename: null, filenameKey: null });
     expect(database.getJob("legacy-job")).toMatchObject({ billId: "legacy-whatsapp", state: "succeeded" });
     expect(database.getProjectionMetadata("sheets", "legacy-whatsapp")).toMatchObject({ billId: "legacy-whatsapp", externalId: "sheet-legacy" });
     const replay = database.createBillWithInitialJobs({ source: "whatsapp", sourceMessageId: "wamid.legacy", sourceChatId: "group@chat", sourceSenderId: "sender@chat", attachmentIndex: 2, receivedAt: appliedAt, mimeType: "application/pdf", originalPath: "/originals/legacy.pdf", contentSha256: "b".repeat(64) }, [{ type: "archive_to_drive", idempotencyKey: "archive:legacy" }]);
@@ -169,6 +169,29 @@ describe("migrations", () => {
     expect(batchStatus?.items).toContainEqual(expect.objectContaining({ billId: "zip-bill", entryPath: "nested/receipt.pdf" }));
     expect(database.sqlite.query<{ id: string }, []>("SELECT id FROM admin_upload_batch_items WHERE bill_id = 'zip-bill'").get()?.id).toBe("zip-item");
     expect(database.sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  test("backfills only reliable legacy ZIP basenames and chooses the earliest duplicate stem", () => {
+    const insertBatch = database.sqlite.query("INSERT INTO admin_upload_batches (id, idempotency_key, original_filename, state, created_at, updated_at) VALUES (?, ?, ?, 'completed', ?, ?)");
+    const insertItem = database.sqlite.query("INSERT INTO admin_upload_batch_items (id, batch_id, item_index, entry_path, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'complete', ?, ?)");
+    const insertBill = database.sqlite.query(`INSERT INTO bills (id, source_message_id, source_chat_id, source_sender_id, attachment_index, received_at, mime_type, original_path, content_sha256, status, created_at, updated_at, source, source_identity, extraction_policy, classification, batch_item_id)
+      VALUES (?, ?, 'admin-upload', 'admin-upload', 0, ?, 'application/pdf', ?, ?, 'received', ?, ?, 'admin_upload', ?, 'azure_only', 'unclassified', ?)`);
+    const early = "2026-08-01T00:00:00.000Z"; const late = "2026-08-02T00:00:00.000Z";
+    insertBatch.run("legacy-zip", "legacy-zip", "legacy.zip", early, early);
+    const entries = [["winner", "nested/Invoice.PDF", early], ["loser", "other/Invoice.png", late], ["tie-z", "later/Tie.pdf", late], ["tie-a", "earlier/Tie.png", late], ["truncated", "x".repeat(1_000), late], ["unsafe", "../unsafe.pdf", late]] as const;
+    for (const [index, [id, entryPath, createdAt]] of entries.entries()) {
+      insertItem.run(`item-${id}`, "legacy-zip", index, entryPath, createdAt, createdAt);
+      insertBill.run(id, `message-${id}`, createdAt, `/originals/${id}.pdf`, id.padEnd(64, "0"), createdAt, createdAt, `legacy:${id}`, `item-${id}`);
+    }
+    database.sqlite.query("DELETE FROM schema_migrations WHERE version = 18").run();
+    database.close();
+    database = new BillDatabase(path);
+    expect(database.getBill("winner")).toMatchObject({ sourceFilename: "Invoice.PDF", filenameKey: "Invoice" });
+    expect(database.getBill("loser")).toMatchObject({ sourceFilename: "Invoice.png", filenameKey: null });
+    expect(database.getBill("tie-a")).toMatchObject({ sourceFilename: "Tie.png", filenameKey: "Tie" });
+    expect(database.getBill("tie-z")).toMatchObject({ sourceFilename: "Tie.pdf", filenameKey: null });
+    expect(database.getBill("truncated")).toMatchObject({ sourceFilename: null, filenameKey: null });
+    expect(database.getBill("unsafe")).toMatchObject({ sourceFilename: null, filenameKey: null });
   });
 });
 
@@ -356,6 +379,25 @@ describe("canonical bill and jobs", () => {
     expect(repeated.bill.id).toBe(first.bill.id);
     expect(database.countJobsForBill(first.bill.id)).toBe(2);
   });
+
+  test("uses the unique filename key as the cross-source race fence without adding duplicate jobs", () => {
+    const first = database.createBillWithInitialJobs({ ...input(), sourceFilename: "Receipt.pdf" }, jobs());
+    database.sqlite.query("UPDATE bills SET status = 'failed' WHERE id = ?").run(first.bill.id);
+    const secondConnection = new BillDatabase(path);
+    const duplicate = secondConnection.createBillWithInitialJobs({ ...input(), whatsappMessageId: "message-2", attachmentIndex: 1, originalPath: "/durable/other.png", contentSha256: "b".repeat(64), sourceFilename: "Receipt.PNG" }, [{ type: "extract", idempotencyKey: "extract:message-2:1" }]);
+    expect(duplicate).toMatchObject({ created: false, duplicateFilename: true, bill: { id: first.bill.id, status: "failed" } });
+    expect(database.countJobsForBill(first.bill.id)).toBe(2);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
+    secondConnection.close();
+  });
+
+  test("rejects direct source filenames containing either path separator", () => {
+    expect(() => database.createBillWithInitialJobs({ ...input(), sourceFilename: "nested/receipt.pdf" }, [])).toThrow("bounded basename");
+    expect(() => database.createBillWithInitialJobs({ ...input(), sourceFilename: "nested\\receipt.pdf" }, [])).toThrow("bounded basename");
+    expect(() => database.createBillWithInitialJobs({ ...input(), sourceFilename: "receipt\0.pdf" }, [])).toThrow("bounded basename");
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(0);
+  });
+
 
   test("rolls back a new bill when a required job idempotency key belongs to another bill", () => {
     database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "shared-key" }]);
