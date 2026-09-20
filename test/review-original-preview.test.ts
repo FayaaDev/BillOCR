@@ -18,16 +18,21 @@ class FakeDialog extends FakeElement {
 }
 
 test("image preview opens only on activation and closes accessibly", () => {
-  const trigger = Object.assign(new FakeElement(), { href: "/review/bills/bill/original" });
+  const toolbar = Object.assign(new FakeElement(), { href: "/review/bills/bill/original" });
+  const imageWrap = Object.assign(new FakeElement(), { href: "/review/bills/bill/original" });
   const dialog = new FakeDialog(); const image = Object.assign(new FakeElement(), { src: "" }); const close = new FakeElement();
-  installOriginalPreview({ getElementById: (id: string) => ({ "original-preview-trigger": trigger, "original-preview-dialog": dialog, "original-preview-image": image, "original-preview-close": close })[id] ?? null } as never);
+  installOriginalPreview({
+    getElementById: (id: string) => ({ "original-preview-dialog": dialog, "original-preview-image": image, "original-preview-close": close })[id] ?? null,
+    querySelectorAll: (selector: string) => selector === ".original-preview-trigger" ? [toolbar, imageWrap] : [],
+  } as never);
 
   expect(image.src).toBe("");
-  expect(trigger.dispatch("click").prevented).toBe(true); expect(dialog.open).toBe(true); expect(image.src).toBe(trigger.href); expect(close.focused).toBe(true);
-  expect(dialog.dispatch("cancel").prevented).toBe(true); expect(dialog.open).toBe(false); expect(image.src).toBe(""); expect(trigger.focused).toBe(true);
-  trigger.focused = false; trigger.dispatch("click"); dialog.dispatch("click", dialog); expect(dialog.open).toBe(false); expect(image.src).toBe(""); expect(trigger.focused).toBe(true);
+  expect(toolbar.dispatch("click").prevented).toBe(true); expect(dialog.open).toBe(true); expect(image.src).toBe(toolbar.href); expect(close.focused).toBe(true);
+  expect(dialog.dispatch("cancel").prevented).toBe(true); expect(dialog.open).toBe(false); expect(image.src).toBe(""); expect(toolbar.focused).toBe(true);
+  toolbar.focused = false; expect(imageWrap.dispatch("click").prevented).toBe(true); expect(dialog.open).toBe(true); expect(image.src).toBe(imageWrap.href);
+  dialog.dispatch("click", dialog); expect(dialog.open).toBe(false); expect(image.src).toBe(""); expect(imageWrap.focused).toBe(true);
 });
 
 test("does nothing when the detail-page preview markup is absent", () => {
-  expect(() => installOriginalPreview({ getElementById: () => null } as never)).not.toThrow();
+  expect(() => installOriginalPreview({ getElementById: () => null, querySelectorAll: () => [] } as never)).not.toThrow();
 });
