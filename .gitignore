@@ -21,3 +21,4 @@ whatsapp-auth/
 .beads/proxieddb/
 .DS_Store
 .DS_Store
+.beads/interactions.jsonl
