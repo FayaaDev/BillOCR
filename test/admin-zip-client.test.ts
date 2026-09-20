@@ -38,6 +38,18 @@ test("ZIP client fetches initial status, polls non-terminal batches, and stops o
   expect(ids).toEqual(["batch-1", "batch-1"]); expect(statuses).toEqual([pending(), complete()]); expect(timers).toHaveLength(1);
 });
 
+test("ZIP client retries a failed status poll instead of erroring", async () => {
+  const requests: Request[] = []; const timers: Array<() => void> = []; const errors: string[] = []; const statuses: AdminZipStatus[] = [];
+  const queue: Array<AdminZipStatus | null> = [pending(), null, complete()];
+  const session = new ZipUploadSession({ createSourceId: () => "opaque-upload-id", createRequest: () => { const request = new Request(); requests.push(request); return request; }, fetchStatus: async () => queue.shift() ?? null, schedule: (callback) => { timers.push(callback); return timers.length as unknown as ReturnType<typeof setTimeout>; }, cancel: () => undefined, onProgress: () => undefined, onUploading: () => undefined, onStatus: (status) => statuses.push(status), onError: () => errors.push("error") });
+  session.submit(new File(["zip"], "bills.zip"), "csrf-token");
+  requests[0]!.status = 202; requests[0]!.response = { batch: { id: "batch-1" } }; requests[0]!.onload?.();
+  await Promise.resolve(); await Promise.resolve();
+  timers[0]!(); await Promise.resolve(); await Promise.resolve();
+  timers[1]!(); await Promise.resolve(); await Promise.resolve();
+  expect(errors).toEqual([]); expect(statuses).toEqual([pending(), complete()]);
+});
+
 test("ZIP client ignores a stale poll after reset starts a new upload session", async () => {
   let resolveFirst: ((status: AdminZipStatus | null) => void) | undefined;
   const requests: Request[] = []; const statuses: AdminZipStatus[] = []; const timers: Array<() => void> = [];

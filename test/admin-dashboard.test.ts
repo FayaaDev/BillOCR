@@ -58,7 +58,9 @@ test("ZIP status parser accepts safe aggregate and entry data only and identifie
   const status = { batch: { id: "batch-1", originalFilename: "bills.zip", state: "completed" }, counts: { total: 2, queued: 0, processing: 0, complete: 1, notInvoice: 0, rejected: 1, failed: 0 }, items: [{ entryPath: "invoice.pdf", state: "complete", errorCode: null, billId: "bill-1" }, { entryPath: "notes.txt", state: "rejected", errorCode: "unsupported_content", billId: null }] } satisfies AdminZipStatus;
   expect(parseAdminZipStatus(status)).toEqual(status);
   expect(adminZipTerminal(status)).toBe(true);
-  expect(adminZipTerminal({ ...status, counts: { ...status.counts, queued: 1 } })).toBe(false);
+  expect(adminZipTerminal({ ...status, batch: { ...status.batch, state: "failed" } })).toBe(true);
+  expect(adminZipTerminal({ ...status, batch: { ...status.batch, state: "queued" }, counts: { total: 0, queued: 0, processing: 0, complete: 0, notInvoice: 0, rejected: 0, failed: 0 }, items: [] })).toBe(false);
+  expect(adminZipTerminal({ ...status, batch: { ...status.batch, state: "processing" } })).toBe(false);
   expect(parseAdminZipStatus({ ...status, items: [{ ...status.items[0], state: "raw_provider_error" }] })).toBeNull();
   expect(parseAdminZipStatus({ ...status, counts: { ...status.counts, total: -1 } })).toBeNull();
 });

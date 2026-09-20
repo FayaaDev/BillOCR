@@ -100,12 +100,12 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
     zip: (() => {
       const maxCompressedBytes = 50 * 1024 * 1024;
       const ingestion = new AdminZipIngestionService({ database, logger, originalsDir: config.whatsapp.originalsDir, stagingDir: `${config.dataDir}/admin-zip-staging`, limits: { maxCompressedBytes } });
-      return { available: () => config.azure.enabled, maxCompressedBytes, ingest: (input: { sourceId: string; originalFilename: string; bytes: AsyncIterable<Uint8Array> }) => ingestion.ingest(input), status: (batchId: string) => database.getAdminUploadBatchStatus(batchId), reconcilePending: () => ingestion.reconcilePending() };
+      return { available: () => config.azure.enabled, maxCompressedBytes, ingest: (input: { sourceId: string; originalFilename: string; bytes: AsyncIterable<Uint8Array> }) => ingestion.ingest(input, { wait: false }), status: (batchId: string) => database.getAdminUploadBatchStatus(batchId), reconcilePending: () => ingestion.reconcilePending() };
     })(),
   };
   let server: ReturnType<typeof Bun.serve>;
   try {
-    server = (dependencies.serve ?? Bun.serve)({ hostname: config.host, port: config.port, fetch: (request) => handleRequest(request, database, config, admin, auth) });
+    server = (dependencies.serve ?? Bun.serve)({ hostname: config.host, port: config.port, idleTimeout: 255, fetch: (request) => handleRequest(request, database, config, admin, auth) });
   } catch (error) {
     database.close();
     throw error;

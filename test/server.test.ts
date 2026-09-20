@@ -108,8 +108,14 @@ test("startService exposes authenticated safe ZIP failures and reconciles staged
   const auth = await session();
   const overview = await (await fetch(new URL("admin/api/overview", service.url), { headers: auth })).json() as { zip: { csrf: string } };
   const upload = await fetch(new URL("admin/api/zip", service.url), { method: "POST", headers: { ...auth, "content-type": "application/zip", "x-upload-id": "corrupt-upload", "x-upload-filename": "corrupt.zip", "x-csrf-token": overview.zip.csrf }, body: new Uint8Array([0x50, 0x4b, 5, 6]) });
-  expect(upload.status).toBe(202); const response = await upload.json() as { batch: { id: string; state: string } }; expect(response.batch.state).toBe("failed");
-  expect(await (await fetch(new URL(`admin/api/zip/${response.batch.id}`, service.url), { headers: auth })).json()).toMatchObject({ batch: { id: response.batch.id, state: "failed" }, counts: { failed: 1 } });
+  expect(upload.status).toBe(202); const response = await upload.json() as { batch: { id: string } }; expect(response.batch.id).toBeString();
+  let failed: unknown;
+  for (let attempts = 0; attempts < 40; attempts += 1) {
+    failed = await (await fetch(new URL(`admin/api/zip/${response.batch.id}`, service.url), { headers: auth })).json();
+    if ((failed as { batch?: { state?: string } }).batch?.state === "failed") break;
+    await Bun.sleep(5);
+  }
+  expect(failed).toMatchObject({ batch: { id: response.batch.id, state: "failed" }, counts: { failed: 1 } });
   let restartBatchId: string | undefined;
   for (let attempts = 0; !restartBatchId && attempts < 20; attempts += 1) { const database = new BillDatabase(config.databasePath); restartBatchId = database.sqlite.query<{ id: string }, [string]>("SELECT id FROM admin_upload_batches WHERE idempotency_key = ?").get(`admin-zip:${sourceId}`)?.id; database.close(); if (!restartBatchId) await Bun.sleep(1); }
   expect(restartBatchId).toBeString();

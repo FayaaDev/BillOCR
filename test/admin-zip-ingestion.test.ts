@@ -85,16 +85,29 @@ describe("admin ZIP ingestion", () => {
     expect(database.getAdminUploadBatchStatus(batch.id)?.items).toEqual([expect.objectContaining({ state: "rejected", errorCode: "duplicate_filename", billId: null })]);
   });
 
-  test("records hostile and unsupported entries while accepting valid later entries", async () => {
+  test("records hostile entries, ignores junk, and accepts valid later entries", async () => {
     const archive = zip([
       { name: "../escape.pdf", bytes: pdf() }, { name: "C:/drive.pdf", bytes: pdf() }, { name: "back\\slash.pdf", bytes: pdf() },
       { name: "encrypted.pdf", bytes: new Uint8Array([...new Uint8Array(12), ...pdf()]), flags: 1, declaredSize: pdf().byteLength, compressedSize: pdf().byteLength + 12 }, { name: "link.pdf", bytes: pdf(), externalAttributes: 0o120777 << 16 },
-      { name: "unknown.pdf", bytes: encoder.encode("not a document") }, { name: "safe/final.bin", bytes: pdf("valid") },
+      { name: "unknown.pdf", bytes: encoder.encode("not a document") }, { name: "folder/", bytes: new Uint8Array(), externalAttributes: 0x10 }, { name: "safe/final.bin", bytes: pdf("valid") },
     ]);
     const result = await service.ingest({ sourceId: "hostile", originalFilename: "hostile.zip", bytes: archive });
-    expect(result.counts).toEqual({ accepted: 1, rejected: 6, ignored: 0 });
-    expect(itemRows().map((item) => item.error_code)).toEqual(["unsafe_entry_path", "unsafe_entry_path", "unsafe_entry_path", "encrypted_entry", "special_entry", "unsupported_content", null]);
+    expect(result.counts).toEqual({ accepted: 1, rejected: 5, ignored: 2 });
+    expect(itemRows().map((item) => item.error_code)).toEqual(["unsafe_entry_path", "unsafe_entry_path", "unsafe_entry_path", "encrypted_entry", "special_entry", null]);
     expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
+  });
+
+  test("accept returns a batch id without waiting for original publish", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gated = new AdminZipIngestionService({ database, logger: silentLogger, originalsDir: join(directory, "originals"), stagingDir: join(directory, "async-staging"), afterOriginalPublished: () => gate });
+    const archive = zip([{ name: "invoice.pdf", bytes: pdf() }]);
+    const accepted = await gated.ingest({ sourceId: "async", originalFilename: "async.zip", bytes: archive }, { wait: false });
+    expect(accepted.batch.id).toBeTruthy();
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(0);
+    release();
+    const done = await gated.ingest({ sourceId: "async", originalFilename: "async.zip", bytes: archive });
+    expect(done.counts.accepted).toBe(1);
   });
 
   test("enforces compressed, entry, expanded, and entry-count limits with durable rejection outcomes", async () => {

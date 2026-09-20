@@ -64,6 +64,8 @@ function readEntry(zip: ZipFile, entry: Entry, limit: number): Promise<Uint8Arra
 /** Bounded, filesystem-staged ZIP intake. SQLite calls are short transactions; archive work is always outside them. */
 export class AdminZipIngestionService {
   private readonly options: AdminZipIngestionOptions & { limits: ZipIngestionLimits; originalsDir: string; stagingDir: string };
+  // ponytail: process-local in-flight map; reconcilePending recovers after crash
+  private readonly inFlight = new Map<string, Promise<AdminZipIngestionResult>>();
 
   constructor(options: AdminZipIngestionOptions) {
     const limits = { ...defaultLimits, ...options.limits };
@@ -71,10 +73,16 @@ export class AdminZipIngestionService {
     this.options = { ...options, limits, originalsDir: resolve(options.originalsDir), stagingDir: resolve(options.stagingDir) };
   }
 
-  async ingest(upload: AdminZipUpload): Promise<AdminZipIngestionResult> {
+  async ingest(upload: AdminZipUpload, options?: { wait?: boolean }): Promise<AdminZipIngestionResult> {
     if (!validSourceId(upload.sourceId)) throw new Error("ZIP source ID is invalid");
     const staged = await this.stage(upload);
-    return this.reconcileStaged(staged);
+    const work = this.process(staged);
+    if (options?.wait === false) {
+      const batch = this.options.database.createAdminUploadBatch({ idempotencyKey: `admin-zip:${staged.sourceId}`, originalFilename: staged.originalFilename }).batch;
+      void work.catch(() => this.options.logger.warn("admin ZIP processing failed", { code: "admin_zip_processing_failed" }));
+      return { batch, counts: { accepted: 0, rejected: 0, ignored: 0 } };
+    }
+    return work;
   }
 
   /** Restarts processing from durable local manifests left by a process crash. */
@@ -92,7 +100,7 @@ export class AdminZipIngestionService {
         if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()) continue;
         const staged = JSON.parse(await readFile(manifestFile, "utf8")) as StagedZip;
         if (!this.validManifest(staged, unit)) continue;
-        results.push(await this.reconcileStaged(staged));
+        results.push(await this.process(staged));
       } catch {
         this.options.logger.warn("admin ZIP staging reconciliation failed", { code: "admin_zip_staging_reconciliation_failed" });
       }
@@ -139,6 +147,16 @@ export class AdminZipIngestionService {
     } catch (error) { output.destroy(); await rm(path, { force: true }).catch(() => undefined); throw error; }
   }
 
+  private process(staged: StagedZip): Promise<AdminZipIngestionResult> {
+    const key = sourceKey(staged.sourceId);
+    const existing = this.inFlight.get(key);
+    if (existing) return existing;
+    let work: Promise<AdminZipIngestionResult>;
+    work = this.reconcileStaged(staged).finally(() => { if (this.inFlight.get(key) === work) this.inFlight.delete(key); });
+    this.inFlight.set(key, work);
+    return work;
+  }
+
   private async reconcileStaged(staged: StagedZip): Promise<AdminZipIngestionResult> {
     const stagedInfo = await lstat(staged.zipPath);
     if (!stagedInfo.isFile() || stagedInfo.isSymbolicLink() || stagedInfo.size > this.options.limits.maxCompressedBytes || sha256(await readFile(staged.zipPath)) !== staged.contentSha256) throw new Error("staged ZIP is unavailable or changed");
@@ -158,30 +176,34 @@ export class AdminZipIngestionService {
         opened.on("entry", async (entry: Entry) => {
           try {
             const name = entryName(entry);
-            const item = this.options.database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: index, entryPath: safeEntryPath(name) }).item;
+            const itemIndex = index;
             index += 1;
-            activeItemId = item.id;
-            if (index > this.options.limits.maxEntries) { this.reject(item.id, "entry_count_limit"); counts.rejected += 1; activeItemId = null; opened.close(); resolvePromise(); return; }
-            if (unsafePath(name)) { this.reject(item.id, "unsafe_entry_path"); counts.rejected += 1; activeItemId = null; opened.readEntry(); return; }
-            if (encryptedEntry(entry)) { this.reject(item.id, "encrypted_entry"); counts.rejected += 1; activeItemId = null; opened.readEntry(); return; }
-            if (specialEntry(entry)) { this.reject(item.id, "special_entry"); counts.rejected += 1; activeItemId = null; opened.readEntry(); return; }
-            if (directoryEntry(entry, name)) { this.options.database.transitionAdminUploadBatchItemState({ itemId: item.id, state: "rejected", errorCode: "directory_entry", expectedStates: ["queued"] }); counts.rejected += 1; activeItemId = null; opened.readEntry(); return; }
-            if (entry.uncompressedSize > this.options.limits.maxEntryBytes) { this.reject(item.id, "entry_size_limit"); counts.rejected += 1; activeItemId = null; opened.readEntry(); return; }
-            if (expanded + entry.uncompressedSize > this.options.limits.maxExpandedBytes) { this.reject(item.id, "expanded_size_limit"); counts.rejected += 1; activeItemId = null; opened.readEntry(); return; }
+            const rejectNew = (errorCode: string) => {
+              const created = this.options.database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex, entryPath: safeEntryPath(name) }).item;
+              this.reject(created.id, errorCode);
+              counts.rejected += 1;
+            };
+            if (itemIndex >= this.options.limits.maxEntries) { rejectNew("entry_count_limit"); opened.close(); resolvePromise(); return; }
+            if (directoryEntry(entry, name)) { counts.ignored += 1; opened.readEntry(); return; }
+            if (unsafePath(name)) { rejectNew("unsafe_entry_path"); opened.readEntry(); return; }
+            if (encryptedEntry(entry)) { rejectNew("encrypted_entry"); opened.readEntry(); return; }
+            if (specialEntry(entry)) { rejectNew("special_entry"); opened.readEntry(); return; }
+            if (entry.uncompressedSize > this.options.limits.maxEntryBytes) { rejectNew("entry_size_limit"); opened.readEntry(); return; }
+            if (expanded + entry.uncompressedSize > this.options.limits.maxExpandedBytes) { rejectNew("expanded_size_limit"); opened.readEntry(); return; }
             const readLimit = Math.min(this.options.limits.maxEntryBytes, this.options.limits.maxExpandedBytes - expanded);
             let bytes: Uint8Array;
             try { bytes = await readEntry(opened, entry, readLimit); }
             catch {
-              this.reject(item.id, readLimit === this.options.limits.maxEntryBytes ? "entry_size_limit" : "expanded_size_limit");
-              counts.rejected += 1;
-              activeItemId = null;
+              rejectNew(readLimit === this.options.limits.maxEntryBytes ? "entry_size_limit" : "expanded_size_limit");
               opened.readEntry();
               return;
             }
             expanded += bytes.byteLength;
             const mimeType = sniffSupportedDocumentMimeType(bytes);
-            if (!mimeType) { this.reject(item.id, "unsupported_content"); counts.rejected += 1; activeItemId = null; opened.readEntry(); return; }
-            const bill = await this.publishItem(batch, item.id, index - 1, sourceBasename(name), mimeType, bytes);
+            if (!mimeType) { counts.ignored += 1; opened.readEntry(); return; }
+            const item = this.options.database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex, entryPath: safeEntryPath(name) }).item;
+            activeItemId = item.id;
+            const bill = await this.publishItem(batch, item.id, itemIndex, sourceBasename(name), mimeType, bytes);
             if (bill) counts.accepted += 1; else counts.rejected += 1;
             activeItemId = null;
             opened.readEntry();

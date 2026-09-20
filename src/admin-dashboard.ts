@@ -59,7 +59,7 @@ export function parseAdminZipStatus(value: unknown): AdminZipStatus | null {
   return { batch: { id, originalFilename, state }, counts: parsedCounts, items };
 }
 
-export function adminZipTerminal(status: AdminZipStatus): boolean { return status.counts.queued === 0 && status.counts.processing === 0; }
+export function adminZipTerminal(status: AdminZipStatus): boolean { return status.batch.state === "completed" || status.batch.state === "failed"; }
 
 export function whatsappPairingView(state: AdminOverview["whatsapp"]["state"], canPair: boolean): "connected" | "waiting" | "qr" | "start" | "unavailable" {
   if (state === "connected") return "connected";

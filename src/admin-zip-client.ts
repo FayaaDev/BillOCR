@@ -68,12 +68,17 @@ export class ZipUploadSession {
     try {
       const status = await this.options.fetchStatus(batchId);
       if (!this.current(generation)) return;
-      if (!status) return this.options.onError();
-      this.options.onStatus(status);
-      if (adminZipTerminal(status)) { this.#sourceId = null; this.clearTimer(); return; }
+      if (status) {
+        this.options.onStatus(status);
+        if (adminZipTerminal(status)) { this.#sourceId = null; this.clearTimer(); return; }
+      }
       this.clearTimer();
       this.#timer = this.options.schedule(() => { void this.refresh(batchId, generation); }, 2_000);
-    } catch { if (this.current(generation)) this.options.onError(); }
+    } catch {
+      if (!this.current(generation)) return;
+      this.clearTimer();
+      this.#timer = this.options.schedule(() => { void this.refresh(batchId, generation); }, 2_000);
+    }
   }
 
   dispose(): void { this.#generation += 1; this.clearTimer(); }
