@@ -14,8 +14,6 @@ export interface DashboardSummary {
   totalVat: number;
   processedBills: number;
   awaitingReview: number;
-  missingVat: number;
-  excludedCurrency: number;
   daily: Array<{ date: string; total: number; vat: number }>;
 }
 
@@ -34,7 +32,7 @@ function cents(value: number | null): number {
   return Number.isSafeInteger(rounded) ? rounded : 0;
 }
 
-/** All-time counters/totals; only daily is limited to days. UI must note that null currency is assumed SAR. */
+/** All-time counters/totals; only daily is limited to days. Null and non-SAR currencies are summed as SAR. */
 export function summarizeBills(bills: ReviewBill[], days: 7 | 30 | 90, now = new Date()): DashboardSummary {
   const end = new Date(now);
   end.setUTCHours(0, 0, 0, 0);
@@ -44,7 +42,7 @@ export function summarizeBills(bills: ReviewBill[], days: 7 | 30 | 90, now = new
     return { date: day.toISOString().slice(0, 10), total: 0, vat: 0 };
   });
   const byDate = new Map(daily.map((day) => [day.date, day]));
-  const summary: DashboardSummary = { totalIncludingVat: 0, totalVat: 0, processedBills: 0, awaitingReview: 0, missingVat: 0, excludedCurrency: 0, daily };
+  const summary: DashboardSummary = { totalIncludingVat: 0, totalVat: 0, processedBills: 0, awaitingReview: 0, daily };
 
   for (const bill of bills) {
     if (bill.displayStatus === "NotInvoice" || bill.displayStatus === "not_invoice") continue;
@@ -52,11 +50,6 @@ export function summarizeBills(bills: ReviewBill[], days: 7 | 30 | 90, now = new
     summary.processedBills += 1;
     if (bill.status === "needs_review") {
       summary.awaitingReview += 1;
-      continue;
-    }
-    if (bill.vat === null || !Number.isFinite(bill.vat)) summary.missingVat += 1;
-    if (bill.currency !== null && bill.currency !== "SAR") {
-      summary.excludedCurrency += 1;
       continue;
     }
     const total = cents(bill.total);

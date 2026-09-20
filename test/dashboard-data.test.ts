@@ -43,19 +43,19 @@ test("uses corrected input values and counts only extracted invoices with approv
     bill({ status: "needs_review", displayStatus: "NotInvoice" })];
   const before = structuredClone(bills);
   const summary = summarizeBills(bills, 7, now);
-  expect(summary).toMatchObject({ totalIncludingVat: 230, totalVat: 30, processedBills: 2, awaitingReview: 1, missingVat: 0, excludedCurrency: 0 });
+  expect(summary).toMatchObject({ totalIncludingVat: 230, totalVat: 30, processedBills: 2, awaitingReview: 1 });
   expect(summary.daily.at(-1)).toEqual({ date: "2026-03-01", total: 230, vat: 30 });
   expect(bills).toEqual(before);
 });
 
-test("assumes null currency is SAR, excludes foreign money, and never infers missing VAT", () => {
+test("sums null and non-SAR currency amounts as SAR and never infers missing VAT", () => {
   const summary = summarizeBills([
     bill({ currency: null, vat: null }), bill({ vat: 0 }),
     bill({ currency: "USD", vat: null }), bill({ currency: "EUR" }),
     bill({ status: "needs_review", currency: "USD", vat: null }),
   ], 7, now);
-  expect(summary).toMatchObject({ totalIncludingVat: 230, totalVat: 0, processedBills: 5, awaitingReview: 1, missingVat: 2, excludedCurrency: 2 });
-  expect(summary.daily.at(-1)).toEqual({ date: "2026-03-01", total: 230, vat: 0 });
+  expect(summary).toMatchObject({ totalIncludingVat: 460, totalVat: 15, processedBills: 5, awaitingReview: 1 });
+  expect(summary.daily.at(-1)).toEqual({ date: "2026-03-01", total: 460, vat: 15 });
 });
 
 test("zero fills all supported UTC calendar ranges across month, year and leap boundaries", () => {
@@ -98,6 +98,5 @@ test("sums rounded integer cents and ignores nonfinite monetary data", () => {
   ], 7, now);
   expect(summary.totalIncludingVat).toBe(1.31);
   expect(summary.totalVat).toBe(0.31);
-  expect(summary.missingVat).toBe(4);
   expect(summary.daily.at(-1)).toEqual({ date: "2026-03-01", total: 1.31, vat: 0.31 });
 });
