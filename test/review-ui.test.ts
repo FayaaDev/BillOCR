@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BillDatabase } from "../src/database";
-import { completedInvoiceHeaders, handleReviewRequest } from "../src/review-ui";
+import { completedInvoiceHeaders, handleReviewRequest, reviewClearCsrf } from "../src/review-ui";
 import type { AppConfig } from "../src/config";
 import { createReviewCorrectionSyncHandler, createSheetsProjectionHandler, type SheetsAdapter } from "../src/google-projections";
 import { JobWorker } from "../src/worker";
@@ -42,8 +42,8 @@ test("review detail renders an accessible image-original preview while PDFs reta
   const html = await detail.text();
   expect(html).toContain('<html lang="ar" dir="rtl">');
   expect(html).toContain('src="/review/assets/theme.js"');
-   expect(html).toContain('<main class="review-page review-detail">'); expect(html).toContain('class="queue-back" href="/review"'); expect(html).toContain('class="status-badge">تحتاج إلى مراجعة</span>');
-    expect(html).toContain('class="review-tabs" aria-label="التنقل الإداري"'); expect(html).toContain('href="/admin">لوحة الإدارة</a>'); expect(html).toContain('href="/review" aria-current="page">مراجعة الفواتير</a>'); expect(html).toContain('name="logoutCsrf"'); expect(html).toContain('class="original-actions"'); expect(html).toContain('id="original-preview-trigger" href="/review/bills/review-bill/original"'); expect(html).toContain('<dialog id="original-preview-dialog" aria-labelledby="original-preview-title">'); expect(html).toContain('id="original-preview-close"'); expect(html).toContain('إغلاق عرض الأصل'); expect(html).toContain('id="original-preview-image"'); expect(html).toContain('type="module" src="/review/assets/client.js"'); expect(html).toContain('href="/review/bills/review-bill/original?download=1"'); expect(html).not.toContain('بيانات النموذج الأصلية'); expect(html).not.toContain('>Evidence</h2>'); expect(html).not.toContain('Immutable extraction data and review history.'); expect(html).not.toContain('Immutable model output'); expect(html).not.toContain('Confidence'); expect(html).not.toContain('Validation issues'); expect(html).not.toContain('Provenance'); expect(html).not.toContain('Audit events');
+   expect(html).toContain('<body><!-- dashboard-01:'); expect(html).toContain('lg:grid-cols-2'); expect(html).toContain('src="/review/bills/review-bill/original" alt="المرفق الأصلي للفاتورة"'); expect(html).toContain('class="queue-back" href="/review"'); expect(html).toContain('class="status-badge">تحتاج إلى مراجعة</span>');
+    expect(html).toContain('aria-label="التنقل الإداري"'); expect(html).toContain('href="/admin">لوحة الإدارة</a>'); expect(html).toContain('href="/admin?view=integrations"'); expect(html).toContain('href="/review/export.xlsx"'); expect(html).toContain('name="logoutCsrf"'); expect(html).toContain('class="original-actions"'); expect(html).toContain('id="original-preview-trigger" href="/review/bills/review-bill/original"'); expect(html).toContain('<dialog id="original-preview-dialog" aria-labelledby="original-preview-title">'); expect(html).toContain('id="original-preview-close"'); expect(html).toContain('إغلاق عرض الأصل'); expect(html).toContain('id="original-preview-image"'); expect(html).toContain('type="module" src="/review/assets/client.js"'); expect(html).toContain('href="/review/bills/review-bill/original?download=1"'); expect(html).not.toContain('بيانات النموذج الأصلية'); expect(html).not.toContain('>Evidence</h2>'); expect(html).not.toContain('Immutable extraction data and review history.'); expect(html).not.toContain('Immutable model output'); expect(html).not.toContain('Confidence'); expect(html).not.toContain('Validation issues'); expect(html).not.toContain('Provenance'); expect(html).not.toContain('Audit events');
   database.sqlite.query("UPDATE bills SET mime_type = 'application/pdf' WHERE id = ?").run(id);
   const pdf = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
   const pdfHtml = await pdf.text();
@@ -62,16 +62,11 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   const html = await shell.text();
   expect(html).toContain('<html lang="ar" dir="rtl">'); expect(html).toContain('<title>ماسح الفواتير</title>');
   expect(shell.headers.get("content-security-policy")).toContain("script-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("style-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("connect-src 'self'"); expect(shell.headers.get("content-security-policy")).toContain("font-src 'self'");
-   expect(html).not.toContain('href="/review/export.csv"'); expect(html).toMatch(/<div id="root" data-csrf="[^"]+"><\/div>/); expect(html).not.toContain('<div id="review-actions"></div>'); expect(html).toContain('src="/review/assets/theme.js"'); expect(html).toContain('src="/review/assets/client.js"'); expect(html).toContain('href="/review/assets/client.css"'); expect(html).not.toContain("review-bill"); expect(html).not.toContain("<unsafe>");
+   expect(html).not.toContain('href="/review/export.csv"'); expect(html).toMatch(/<div id="root" data-csrf="[^"]+" data-clear-csrf="[^"]+" data-logout-csrf="[^"]+"><\/div>/); expect(html).toContain('<body><!-- dashboard-01:'); expect(html).not.toContain('<div id="review-actions"></div>'); expect(html).toContain('src="/review/assets/theme.js"'); expect(html).toContain('src="/review/assets/client.js"'); expect(html).toContain('href="/review/assets/client.css"'); expect(html).not.toContain("review-bill"); expect(html).not.toContain("<unsafe>");
   const clientSource = readFileSync(join(import.meta.dir, "..", "src", "review-client.tsx"), "utf8");
-    expect(clientSource).toContain('<DropdownMenuTrigger render={<Button variant="outline" />}>التنقل</DropdownMenuTrigger>'); expect(clientSource).toContain('href="/admin"'); expect(clientSource).toContain('aria-current="page"'); expect(clientSource).not.toContain('/review/export.csv'); expect(clientSource).toContain('<Button variant="outline" nativeButton={false} render={<a href="/review/export.xlsx" />}'); expect(clientSource).toContain('<Button variant="destructive"'); expect(clientSource).toContain('"x-csrf-token": csrf');
-   expect(clientSource).toContain('<FieldLabel htmlFor="received-date-from">تاريخ الاستلام من</FieldLabel>'); expect(clientSource).toContain('<FieldLabel htmlFor="received-date-to">تاريخ الاستلام إلى</FieldLabel>'); expect(clientSource).not.toContain('<select aria-label="المصدر"'); expect(clientSource).not.toContain('<Input aria-label="الدفعة"');
-  for (const label of ["تاريخ الفاتورة", "الإجمالي بعد الضريبة", "قيمة الضريبة", "المبلغ قبل الضريبة", "الوصف", "رقم الشاحنة", "الرقم الضريبي للمورد", "اسم المورد", "رقم الفاتورة", "معرف المرسل", "تاريخ ووقت الاستلام", "معرف الدفعة"]) expect(clientSource).toContain(label);
-  expect(clientSource).toContain('<ul className="ticket-list"');
-  expect(clientSource).toContain('<Button nativeButton={false} render={<a href={`/review/bills/${encodeURIComponent(bill.id)}`}');
-  expect(clientSource).toContain('aria-current={number === pagination.page ? "page" : undefined}');
-  expect(clientSource).toContain('<bdi dir="ltr"');
-  expect(clientSource).not.toContain("@tanstack/react-table");
+  expect(clientSource).toContain('import { Dashboard } from "./admin-client"');
+  expect(clientSource).toContain('<Dashboard clearCsrf={root.dataset.clearCsrf ?? root.dataset.csrf ?? ""} logoutCsrf={root.dataset.logoutCsrf ?? ""}');
+  expect(clientSource).toContain('import "./review-original-preview"'); expect(clientSource).toContain('import "./review-form"');
   const api = await handleReviewRequest(new Request("http://x/review/api/bills", { headers: basic() }), database, config);
    expect(api.headers.get("content-type")).toContain("application/json"); expect(api.headers.get("cache-control")).toBe("no-store"); expect(await api.json()).toEqual([{ id, source: "whatsapp", status: "needs_review", displayStatus: "needs_review", batchId: null, invoiceDate: "2026-08-01", total: 10, currency: "USD", vat: 1, subtotal: 9, description: "فلتر زيت\nزيت محرك", truckNumber: null, vendorTaxNumber: null, vendorName: "<img src=x>", invoiceNumber: null, senderId: "s", receivedAt: "2026-08-01T00:00:00.000Z", updatedAt: database.getBill(id)!.updatedAt }]);
   const apiPost = await handleReviewRequest(new Request("http://x/review/api/bills", { method: "POST", headers: basic() }), database, config);
@@ -86,6 +81,33 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   expect(stylesheet.status).toBe(200); expect(stylesheet.headers.get("content-type")).toContain("text/css"); expect(await stylesheet.text()).toContain(".review-page");
   expect((await handleReviewRequest(new Request("http://x/review/assets/other.js", { headers: basic() }), database, config)).status).toBe(404);
   expect((await handleReviewRequest(new Request("http://x/review/assets/client.css", { method: "POST", headers: basic() }), database, config)).status).toBe(405);
+});
+
+test("dashboard bootstrap and exported clear helper keep scopes and session bindings", async () => {
+  const request = new Request("http://x/review", { headers: basic() });
+  const auth = reviewAuth(config);
+  const html = await (await handleReviewRequest(request, database, config)).text();
+  const clear = /data-clear-csrf="([^"]+)"/.exec(html)?.[1] ?? null;
+  const logout = /data-logout-csrf="([^"]+)"/.exec(html)?.[1] ?? null;
+  expect(clear).toBe(/data-csrf="([^"]+)"/.exec(html)?.[1] ?? null);
+  expect(auth.csrfValid(request, "review-clear-bills", clear)).toBe(true);
+  expect(auth.csrfValid(request, "logout", logout)).toBe(true);
+  expect(auth.csrfValid(request, "logout", clear)).toBe(false);
+  expect(auth.csrfValid(request, "review-clear-bills", logout)).toBe(false);
+  const token = reviewClearCsrf(config, auth.user(request)!, auth.binding(request)!);
+  expect(auth.csrfValid(request, "review-clear-bills", token)).toBe(true);
+  const other = auth.login("alice", "password")!;
+  expect((await handleReviewRequest(new Request("http://x/review/api/bills/clear", { method: "POST", headers: { cookie: `review_session=${other}`, "x-csrf-token": token } }), database, config)).status).toBe(400);
+  expect(database.getBill(id)).not.toBeNull();
+});
+
+test("review errors preserve status and copy with dashboard recovery links", async () => {
+  const missing = await handleReviewRequest(new Request("http://x/review/bills/missing", { headers: basic() }), database, config);
+  expect(missing.status).toBe(404);
+  const html = await missing.text();
+  expect(html).toContain('<body><!-- dashboard-01:');
+  expect(html).toContain('<p role="alert">غير موجود</p>');
+  expect(html).toContain('href="/admin"'); expect(html).toContain('href="/review"');
 });
 
 test("review clear endpoint is authenticated, CSRF-protected, and leaves originals and non-bill state intact", async () => {

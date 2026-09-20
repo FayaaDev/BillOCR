@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { AppConfig } from "./config";
 import type { AdminUploadBatch, AdminUploadBatchStatusCounts, DashboardMetrics } from "./contracts";
 import { reviewAuth, type ReviewAuth } from "./review-auth";
+import { reviewClearCsrf } from "./review-ui";
 
 const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'" };
 
@@ -65,7 +66,7 @@ export async function handleAdminRequest(request: Request, config: AppConfig, ca
   if (pathname === "/admin") {
     if (request.method !== "GET") return methodNotAllowed("GET");
     const token = csrf(config, user, binding, "admin-whatsapp-action");
-    return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><link rel="icon" href="/admin/assets/favicon.png" type="image/png"><script src="/admin/assets/theme.js"></script><link rel="stylesheet" href="/admin/assets/client.css"></head><body><form method="post" action="/logout"><input type="hidden" name="logoutCsrf" value="${auth.csrf(request, "logout")!}"><button type="submit">تسجيل الخروج</button></form><div id="root" data-csrf="${token}"></div><script type="module" src="/admin/assets/client.js"></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+    return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ماسح الفواتير</title><link rel="icon" href="/admin/assets/favicon.png" type="image/png"><script src="/admin/assets/theme.js"></script><link rel="stylesheet" href="/admin/assets/client.css"></head><body><!-- dashboard-01: User-pinned neutral invoice dashboard. Four real scorecards, daily prices, and bills; responsive RTL navigation. --><div id="root" data-csrf="${token}" data-clear-csrf="${reviewClearCsrf(config, user, binding)}" data-logout-csrf="${auth.csrf(request, "logout")!}"></div><script type="module" src="/admin/assets/client.js"></script></body></html>`, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
   }
   if (!capabilities) return new Response("الخدمة غير متاحة", { status: 503, headers });
   const font = /^\/admin\/assets\/files\/(noto-sans-arabic-arabic-(?:400|700)-normal\.woff2)$/.exec(pathname)?.[1];
