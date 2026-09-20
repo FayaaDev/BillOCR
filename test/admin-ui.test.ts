@@ -21,7 +21,14 @@ test("admin routes require a review session and are never cached", async () => {
   expect(shell.status).toBe(200); expect(shell.headers.get("cache-control")).toBe("no-store"); expect(shell.headers.get("content-security-policy")).toContain("font-src 'self'");
   const html = await shell.text();
   expect(html).toContain('<html lang="ar" dir="rtl">');
-  expect(html).toContain('name="logoutCsrf"');
+   const session = reviewAuth(config);
+   const request = new Request("http://x/admin", { headers: auth });
+   const logout = /data-logout-csrf="([^"]+)"/.exec(html)?.[1] ?? null;
+   const clear = /data-clear-csrf="([^"]+)"/.exec(html)?.[1] ?? null;
+   expect(session.csrfValid(request, "logout", logout)).toBe(true);
+   expect(session.csrfValid(request, "review-clear-bills", clear)).toBe(true);
+   expect(session.csrfValid(request, "logout", clear)).toBe(false);
+   expect(session.csrfValid(request, "review-clear-bills", logout)).toBe(false);
   expect(html).toContain('<title>ماسح الفواتير</title>');
   expect(html).toContain('<link rel="icon" href="/admin/assets/favicon.png" type="image/png">');
   expect(html).toContain('src="/admin/assets/client.js"');

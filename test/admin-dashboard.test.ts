@@ -30,24 +30,28 @@ test("pairing view exposes QR and cancel only after it is ready, then offers a s
   expect(whatsappPairingView("connected", true)).toBe("connected");
 });
 
-test("admin navigation links to the authenticated review queue without operational failures card", () => {
+test("dashboard client uses the shared RTL dashboard, live bills, and real operational routes", () => {
   const client = readFileSync(join(import.meta.dir, "..", "src", "admin-client.tsx"), "utf8");
-  expect(client).toContain('<DropdownMenuTrigger render={<Button variant="outline" />}>التنقل</DropdownMenuTrigger>');
-  expect(client).toContain('render={<a href="/review" />}');
-  expect(client).not.toContain("ملخص الأعطال التشغيلية");
+  const sidebar = readFileSync(join(import.meta.dir, "..", "src", "components", "app-sidebar.tsx"), "utf8");
+  const reviewClient = readFileSync(join(import.meta.dir, "..", "src", "review-client.tsx"), "utf8");
+  expect(client).toContain('export function Dashboard');
+  expect(client).toContain('fetch("/review/api/bills"');
+  expect(client).toContain('setInterval(load, 15_000)');
+  expect(client).toContain('summarizeBills(bills, days)');
+  expect(sidebar).toContain('href="/review/export.xlsx"');
+  expect(sidebar).not.toContain('href="/admin?view=upload"');
+  expect(client).toContain('"/review/api/bills/clear"');
+  expect(sidebar).toContain('href="/admin?view=integrations"');
   expect(client).toContain('type="file"');
   expect(client).toContain("تقدم الرفع");
   expect(client).toContain("خدمة التحليل غير مهيأة");
-   expect(client).toContain('disabled aria-disabled="true" id="whatsapp-tab"');
-   expect(client).not.toContain("معرّف المجموعة المكوّنة");
-   expect(client).not.toContain("المجموعات المكتشفة");
-   expect(client).not.toContain("لا يدعم هذا النقل بدء الاقتران من لوحة الإدارة.");
-  expect(client).toContain('role="tablist"');
-   expect(client).toContain('id="telegram-panel"');
-   expect(client).toContain('id="zip-panel"');
-   expect(client).not.toContain('id="whatsapp-panel"');
-   expect(client).not.toContain('tabIndex={channel === "whatsapp" ? 0 : -1}');
-  expect(client).toContain("رمز البوت");
+  expect(client).toContain('root.dataset.clearCsrf ?? root.dataset.csrf');
+  expect(client).toContain('received-date-from');
+  expect(client).toContain('invoice-number');
+  expect(client).toContain('ToggleGroupItem value="90"');
+  expect(reviewClient).toContain('import { Dashboard } from "./admin-client"');
+  expect(reviewClient).toContain('import "./review-original-preview"');
+  expect(reviewClient).toContain('import "./review-form"');
 });
 
 test("ZIP status parser accepts safe aggregate and entry data only and identifies terminal batches", () => {
