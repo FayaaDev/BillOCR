@@ -195,6 +195,47 @@ test("reserved Drive ID survives a lost upload response and visibility lag witho
   expect(uploads).toEqual(["id-3"]); expect(database.getBill(item.id)?.driveFileId).toBe("id-3");
 });
 
+test("Drive root changes do not reuse folder reservations from the previous destination", async () => {
+  const item = bill(); const created: Array<{ id: string; parentId: string; name: string }> = []; let nextId = 0;
+  database.reserveDriveId({ key: "folder:Bills", kind: "folder", parentId: "old-root", logicalPath: "Bills", generatedId: "old-folder" });
+  database.confirmDriveReservation("folder:Bills");
+  const drive: DriveAdapter = {
+    findFolder: async () => null, createFolder: async () => { throw new Error("legacy path must not run"); },
+    findFilesByBillId: async () => [], uploadOriginal: async () => { throw new Error("legacy path must not run"); },
+    generateId: async () => `new-id-${++nextId}`,
+    getFile: async (id) => { if (id === "old-folder") throw new Error("stale destination reused"); return null; },
+    createFolderWithId: async (input) => { created.push(input); return { id: input.id }; },
+    uploadOriginalWithId: async (input) => {
+      expect(input.parentId).toBe("new-id-3");
+      return { id: input.id, webLink: "https://drive.example/new-file", appProperties: { billId: input.billId, contentSha256: input.contentSha256 } };
+    },
+  };
+  await new JobWorker(database, { archive_to_drive: createDriveArchiveHandler(database, drive, { driveRootId: "new-root" }) }, policy, "worker", createLogger("error")).runOnce();
+  expect(created).toEqual([
+    { id: "new-id-1", parentId: "new-root", name: "Bills" },
+    { id: "new-id-2", parentId: "new-id-1", name: "2026" },
+    { id: "new-id-3", parentId: "new-id-2", name: "08" },
+  ]);
+  expect(database.getDriveReservation("folder:Bills")?.drive_id).toBe("old-folder");
+  expect(database.getBill(item.id)?.driveFileId).toBe("new-id-4");
+});
+
+test("same-root replay preserves a legacy reserved folder ID", async () => {
+  const item = bill(); let generated = 0; const created: string[] = [];
+  database.reserveDriveId({ key: "folder:Bills", kind: "folder", parentId: "root", logicalPath: "Bills", generatedId: "reserved-bills" });
+  const drive: DriveAdapter = {
+    findFolder: async () => null, createFolder: async () => { throw new Error("legacy path must not run"); },
+    findFilesByBillId: async () => [], uploadOriginal: async () => { throw new Error("legacy path must not run"); },
+    generateId: async () => `new-${++generated}`, getFile: async () => null,
+    createFolderWithId: async ({ id }) => { created.push(id); return { id }; },
+    uploadOriginalWithId: async (input) => ({ id: input.id, webLink: "https://drive.example/file", appProperties: { billId: input.billId, contentSha256: input.contentSha256 } }),
+  };
+  await new JobWorker(database, { archive_to_drive: createDriveArchiveHandler(database, drive, { driveRootId: "root" }) }, policy, "worker", createLogger("error")).runOnce();
+  expect(created).toEqual(["reserved-bills", "new-1", "new-2"]);
+  expect(database.getDriveReservation("folder:Bills")?.state).toBe("confirmed");
+  expect(database.getBill(item.id)?.driveFileId).toBe("new-3");
+});
+
 test("Sheets uses the immutable hidden ID to append once then update correction values with RAW-safe strings", async () => {
   const item = approvedBill(); const rows = new Map<number, (string | number | null)[]>(); let next = 2; let appends = 0; let updates = 0;
   const sheets: SheetsAdapter = {

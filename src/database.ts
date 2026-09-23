@@ -62,6 +62,7 @@ export interface CompletedInvoiceExportRecord { receivedAt: string; senderId: st
 export interface ReviewQueueFilters { source?: BillSource; batchId?: string; status?: "complete" | "not_invoice" | Bill["status"]; }
 export interface ReviewQueueBill extends Bill { batchId: string | null; displayStatus: "Complete" | "NotInvoice" | Bill["status"]; extraction: ExtractedBill | null; }
 export interface ReviewClassificationOverride { billId: string; reviewerId: string; action: "mark_not_invoice" | "reclassify_invoice"; expectedContentRevision: number; expectedReviewRevision: number; }
+export type PrepareBillDeletionResult = { prepared: true } | { busy: true } | { stale: true } | { missing: true };
 
 function retryTransition(attempts: number, policy: RetryPolicy, now: Date): { state: "retryable_failure" | "permanent_failure"; availableAt: string } {
   if (attempts >= policy.maxAttempts) return { state: "permanent_failure", availableAt: now.toISOString() };
@@ -201,12 +202,72 @@ export class BillDatabase {
       this.sqlite.query("DELETE FROM bill_classification_events").run();
       this.sqlite.query("DELETE FROM provider_projection_metadata").run();
       this.sqlite.query("DELETE FROM effective_bill_data").run();
+      this.sqlite.query("DELETE FROM bill_deletion_requests").run();
       this.sqlite.query("DELETE FROM drive_reservations WHERE bill_id IS NOT NULL").run();
       this.sqlite.query("DELETE FROM extractions").run();
       this.sqlite.query("DELETE FROM bills").run();
       this.sqlite.query("DELETE FROM admin_upload_batch_items").run();
       this.sqlite.query("DELETE FROM admin_upload_batches").run();
       return { deleted };
+    })();
+  }
+
+  hasBillDeletionRequest(billId: string): boolean {
+    return this.sqlite.query<{ value: number }, [string]>("SELECT 1 AS value FROM bill_deletion_requests WHERE bill_id = ?").get(billId)?.value === 1;
+  }
+
+  /** Reserves deletion before filesystem work so workers cannot claim new jobs for this bill. */
+  prepareBillDeletion(input: { billId: string; expectedContentRevision: number; expectedReviewRevision: number }): PrepareBillDeletionResult {
+    return this.sqlite.transaction(() => {
+      const existing = this.sqlite.query<{ content_revision: number; review_revision: number }, [string]>("SELECT content_revision, review_revision FROM bill_deletion_requests WHERE bill_id = ?").get(input.billId);
+      if (existing) return existing.content_revision === input.expectedContentRevision && existing.review_revision === input.expectedReviewRevision ? { prepared: true as const } : { stale: true as const };
+      const now = new Date().toISOString();
+      const inserted = this.sqlite.query(`INSERT INTO bill_deletion_requests (bill_id, content_revision, review_revision, created_at)
+        SELECT id, content_revision, review_revision, ? FROM bills
+        WHERE id = ? AND content_revision = ? AND review_revision = ?
+          AND NOT EXISTS (SELECT 1 FROM jobs WHERE bill_id = bills.id AND state = 'running')`).run(now, input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      if (inserted.changes === 1) return { prepared: true as const };
+      const bill = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE id = ?").get(input.billId);
+      if (!bill) return { missing: true as const };
+      if (bill.content_revision !== input.expectedContentRevision || bill.review_revision !== input.expectedReviewRevision) return { stale: true as const };
+      return { busy: true as const };
+    })();
+  }
+
+  /** Finalizes a prepared deletion after its original has been removed. */
+  completeBillDeletion(billId: string): boolean {
+    return this.sqlite.transaction(() => {
+      const bill = this.sqlite.query<BillRow, [string]>(`SELECT bills.* FROM bills JOIN bill_deletion_requests request ON request.bill_id = bills.id
+        WHERE bills.id = ? AND bills.content_revision = request.content_revision AND bills.review_revision = request.review_revision`).get(billId);
+      if (!bill) return false;
+      const batchItemId = bill.batch_item_id;
+      const batchId = batchItemId ? this.sqlite.query<{ batch_id: string }, [string]>("SELECT batch_id FROM admin_upload_batch_items WHERE id = ?").get(batchItemId)?.batch_id ?? null : null;
+      this.sqlite.query("UPDATE extractions SET selected_invocation_id = NULL WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM job_transition_history WHERE job_id IN (SELECT id FROM jobs WHERE bill_id = ?)").run(billId);
+      this.sqlite.query("DELETE FROM azure_extraction_operations WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM extraction_invocations WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM extraction_attempts WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM jobs WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM validation_issues WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM review_events WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM bill_classification_events WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM provider_projection_metadata WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM effective_bill_data WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM drive_reservations WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM extractions WHERE bill_id = ?").run(billId);
+      if (batchItemId) {
+        this.sqlite.query("UPDATE bills SET batch_item_id = NULL WHERE id = ?").run(billId);
+        this.sqlite.query("UPDATE admin_upload_batch_items SET bill_id = NULL WHERE id = ?").run(batchItemId);
+      }
+      this.sqlite.query("DELETE FROM bill_deletion_requests WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM bills WHERE id = ?").run(billId);
+      if (batchItemId) this.sqlite.query("DELETE FROM admin_upload_batch_items WHERE id = ?").run(batchItemId);
+      if (batchId) {
+        this.sqlite.query(`UPDATE admin_upload_batches SET state = 'completed', updated_at = ? WHERE id = ? AND state = 'processing'
+          AND NOT EXISTS (SELECT 1 FROM admin_upload_batch_items WHERE batch_id = ? AND state IN ('queued', 'processing'))`).run(new Date().toISOString(), batchId, batchId);
+        this.sqlite.query("DELETE FROM admin_upload_batches WHERE id = ? AND NOT EXISTS (SELECT 1 FROM admin_upload_batch_items WHERE batch_id = ?)").run(batchId, batchId);
+      }
+      return true;
     })();
   }
 
@@ -495,7 +556,7 @@ export class BillDatabase {
   submitReview(input: ReviewSubmission, factualIssues: Array<Omit<ValidationIssue, "id" | "billId" | "createdAt">>): boolean {
     const now = new Date().toISOString();
     return this.sqlite.transaction(() => {
-      const bill = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND status IN ('needs_review','failed','approved')").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      const bill = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND status IN ('needs_review','failed','approved') AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = bills.id)").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
       if (!bill) return false;
       // Reject a crafted approval before any effective-data, audit, issue, or revision mutation.
       if (input.action === "approve" && bill.classification === "not_invoice") return false;
@@ -528,7 +589,7 @@ export class BillDatabase {
   overrideClassification(input: ReviewClassificationOverride): boolean {
     const now = new Date().toISOString();
     return this.sqlite.transaction(() => {
-      const bill = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ?").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      const bill = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = bills.id)").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
       if (!bill || this.sqlite.query<{ value: number }, [string, string]>("SELECT 1 AS value FROM jobs WHERE bill_id = ? AND type = 'extract' AND state = 'running' AND lease_expires_at > ?").get(input.billId, now)?.value) return false;
       const to = input.action === "mark_not_invoice" ? "not_invoice" : "invoice";
       if ((to === "not_invoice" && bill.classification === "not_invoice") || (to === "invoice" && bill.classification !== "not_invoice")) return false;
@@ -607,7 +668,7 @@ export class BillDatabase {
   persistValidationDecision(input: { billId: string; expectedContentRevision: number; expectedReviewRevision: number; decision: "approved" | "needs_review"; issues: Array<Omit<ValidationIssue, "id" | "billId" | "createdAt">> }): boolean {
     const now = new Date().toISOString();
     return this.sqlite.transaction(() => {
-      const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ?").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = bills.id)").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
       // A human workflow is sticky: only approveReviewCorrection may approve any review revision.
       if (!current || (current.classification === "not_invoice" && input.decision === "approved") || ((current.review_revision > 0 || current.manual_review_required === 1) && input.decision === "approved")) return false;
       this.sqlite.query("DELETE FROM validation_issues WHERE bill_id = ?").run(input.billId);
@@ -657,7 +718,7 @@ export class BillDatabase {
   approveReviewCorrection(input: { billId: string; reviewerId: string; expectedContentRevision: number; expectedReviewRevision: number; action?: string }): boolean {
     const now = new Date().toISOString();
     return this.sqlite.transaction(() => {
-      const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND manual_review_required = 1").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
+      const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND manual_review_required = 1 AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = bills.id)").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
       if (!current || current.classification === "not_invoice") return false;
       this.sqlite.query("UPDATE bills SET status = 'approved', manual_review_required = 0, updated_at = ? WHERE id = ?").run(now, input.billId);
       this.sqlite.query("INSERT INTO review_events (id, bill_id, reviewer_id, action, created_at) VALUES (?, ?, ?, ?, ?)").run(randomUUID(), input.billId, input.reviewerId, input.action ?? "approved", now);
@@ -707,7 +768,7 @@ export class BillDatabase {
   supersedeForReview(billId: string, reviewerId: string, action = "correction_started"): boolean {
     const now = new Date().toISOString();
     return this.sqlite.transaction(() => {
-      const result = this.sqlite.query("UPDATE bills SET status = 'needs_review', manual_review_required = 1, content_revision = content_revision + 1, review_revision = review_revision + 1, updated_at = ? WHERE id = ?").run(now, billId);
+      const result = this.sqlite.query("UPDATE bills SET status = 'needs_review', manual_review_required = 1, content_revision = content_revision + 1, review_revision = review_revision + 1, updated_at = ? WHERE id = ? AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = bills.id)").run(now, billId);
       if (result.changes !== 1) return false;
       this.sqlite.query("INSERT INTO review_events (id, bill_id, reviewer_id, action, created_at) VALUES (?, ?, ?, ?, ?)").run(randomUUID(), billId, reviewerId, action, now);
       this.invalidatePendingProjectJobs(billId, now);
@@ -862,7 +923,7 @@ export class BillDatabase {
     const retriesReady = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE state = 'retryable_failure' AND available_at <= ?");
     const releaseRetry = this.sqlite.query("UPDATE jobs SET state = 'pending', updated_at = ? WHERE id = ? AND state = 'retryable_failure'");
     const allowedTypes = supportedTypes.map((type) => `'${type}'`).join(",");
-    const claim = this.sqlite.query<JobRow, [string, string, string, string, string, string]>(`UPDATE jobs SET state = 'running', attempts = attempts + 1, lease_token = ?, lease_expires_at = ?, claimed_by = ?, claimed_at = ?, updated_at = ? WHERE id = (SELECT id FROM jobs WHERE state = 'pending' AND available_at <= ? AND type IN (${allowedTypes}) ORDER BY available_at, created_at LIMIT 1) AND state = 'pending' RETURNING *`);
+    const claim = this.sqlite.query<JobRow, [string, string, string, string, string, string]>(`UPDATE jobs SET state = 'running', attempts = attempts + 1, lease_token = ?, lease_expires_at = ?, claimed_by = ?, claimed_at = ?, updated_at = ? WHERE id = (SELECT id FROM jobs WHERE state = 'pending' AND available_at <= ? AND type IN (${allowedTypes}) AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = jobs.bill_id) ORDER BY available_at, created_at LIMIT 1) AND state = 'pending' RETURNING *`);
     return this.sqlite.transaction(() => {
       for (const expired of expiredLeases.all(nowIso)) {
         const transition = retryTransition(expired.attempts, policy, now);

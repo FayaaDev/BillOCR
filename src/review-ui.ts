@@ -5,7 +5,7 @@ import * as XLSX from "xlsx";
 import type { AppConfig } from "./config";
 import type { ExtractedBill } from "./contracts";
 import type { BillDatabase, CompletedInvoiceExportRecord, ReviewQueueFilters } from "./database";
-import { readVerifiedOriginal } from "./originals";
+import { readVerifiedOriginal, removeVerifiedOriginal } from "./originals";
 import { isSupportedImageMimeType } from "./attachment-mime";
 import { isReviewFormField, reviewFieldLimits, reviewFormMaxBytes } from "./review-form";
 import { reviewAuth, type ReviewAuth } from "./review-auth";
@@ -122,7 +122,24 @@ export async function handleReviewRequest(request: Request, database: BillDataba
     try {
       const form = await parseForm(request);
        if (!csrfValid(form.get("csrf"), config, user, binding, billId)) return page("تعذرت المراجعة", "تعذر إرسال المراجعة.", 400);
-      const action = form.get("action");
+       const action = form.get("action");
+       if (action === "delete_bill") {
+         const content = Number(form.get("contentRevision")); const review = Number(form.get("reviewRevision"));
+         if (!Number.isInteger(content) || !Number.isInteger(review)) return page("تعذر حذف الفاتورة", "تعذر حذف الفاتورة.", 400);
+         const resuming = database.hasBillDeletionRequest(billId);
+         if (!resuming) {
+           try { await readVerifiedOriginal({ path: bill.originalPath, root: config.originals.dir, maxBytes: config.originals.maxAttachmentBytes, sha256: bill.contentSha256, mimeType: bill.mimeType, requireMagic: false }); }
+           catch { return page("تعذر حذف الفاتورة", "تعذر التحقق من الملف الأصلي، لذلك لم تُحذف الفاتورة.", 409); }
+         }
+         const result = database.prepareBillDeletion({ billId, expectedContentRevision: content, expectedReviewRevision: review });
+         if ("busy" in result) return page("تعذر حذف الفاتورة", "تعذر حذف الفاتورة أثناء معالجة نشطة. حاول مرة أخرى بعد اكتمال المعالجة.", 409);
+         if ("stale" in result) return page("تعارض في المراجعة", "تعذر حذف الفاتورة بسبب تغيير أحدث.", 409);
+         if ("missing" in result) return page("غير موجود", "غير موجود", 404);
+         try { await removeVerifiedOriginal({ path: bill.originalPath, root: config.originals.dir, maxBytes: config.originals.maxAttachmentBytes, sha256: bill.contentSha256, mimeType: bill.mimeType }); }
+         catch { return page("تعذر حذف الفاتورة", "تعذر حذف الملف الأصلي. حاول مرة أخرى.", 500); }
+         if (!database.completeBillDeletion(billId)) return page("تعذر حذف الفاتورة", "تعذر إكمال حذف الفاتورة. حاول مرة أخرى.", 500);
+         return new Response(null, { status: 303, headers: { ...headers, location: "/review" } });
+       }
        if (action === "mark_not_invoice" || action === "reclassify_invoice") {
          const content = Number(form.get("contentRevision")); const review = Number(form.get("reviewRevision"));
          if (!Number.isInteger(content) || !Number.isInteger(review) || !database.overrideClassification({ billId, reviewerId: user, action, expectedContentRevision: content, expectedReviewRevision: review })) return page("تعارض في المراجعة", "تعذر إرسال المراجعة بسبب تغيير أحدث.", 409);
@@ -149,8 +166,9 @@ export async function handleReviewRequest(request: Request, database: BillDataba
   const originalUrl = `/review/bills/${encodeURIComponent(bill.id)}/original`;
   const originalPreview = isSupportedImageMimeType(bill.mimeType) ? `<a class="button-link original-preview-trigger" href="${originalUrl}">عرض الأصل</a><dialog id="original-preview-dialog" aria-labelledby="original-preview-title"><div class="original-preview-content"><h2 id="original-preview-title">عرض الأصل</h2><button class="button-link button-link-secondary" type="button" id="original-preview-close">إغلاق عرض الأصل</button><img id="original-preview-image" alt="معاينة الأصل"></div></dialog>` : `<a class="button-link" href="${originalUrl}">عرض الأصل</a>`;
    const csrfInput = `<input type="hidden" name="csrf" value="${esc(csrf(config, user, binding, bill.id))}"><input type="hidden" name="contentRevision" value="${bill.contentRevision}"><input type="hidden" name="reviewRevision" value="${bill.reviewRevision}">`;
-   const override = bill.classification === "not_invoice" ? `<button class="review-action" name="action" value="reclassify_invoice">إعادة تصنيفها كفاتورة للمراجعة اليدوية</button>` : `<button class="review-action reject-action" name="action" value="mark_not_invoice">وضع علامة ليست فاتورة</button>`;
-    const reviewActions = bill.classification === "not_invoice" ? override : `<button class="review-action approve-action" name="action" value="approve">${bill.status === "approved" ? "حفظ التعديلات" : "اعتماد الفاتورة"}</button><button class="review-action reject-action" name="action" value="reject">رفض الفاتورة</button>${override}`;
+    const override = bill.classification === "not_invoice" ? `<button class="review-action" name="action" value="reclassify_invoice">إعادة تصنيفها كفاتورة للمراجعة اليدوية</button>` : `<button class="review-action reject-action" name="action" value="mark_not_invoice">وضع علامة ليست فاتورة</button>`;
+    const deleteAction = `<button class="review-action delete-action" name="action" value="delete_bill">حذف الفاتورة</button>`;
+     const reviewActions = bill.classification === "not_invoice" ? `${override}${deleteAction}` : `<button class="review-action approve-action" name="action" value="approve">${bill.status === "approved" ? "حفظ التعديلات" : "اعتماد الفاتورة"}</button><button class="review-action reject-action" name="action" value="reject">رفض الفاتورة</button>${override}${deleteAction}`;
      const senderId = bill.source === "admin_upload" ? "" : bill.sourceSenderId;
     const sourceFields = `<label class="review-field" for="senderId"><span>رقم مرسل الفاتورة</span><input id="senderId" value="${esc(senderId)}" readonly></label><label class="review-field" for="receivedAt"><span>تاريخ وتوقيت الارسال</span><input id="receivedAt" value="${esc(bill.receivedAt)}" readonly></label>`;
     const correction = canSubmitReview

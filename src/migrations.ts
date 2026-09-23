@@ -231,6 +231,10 @@ const migrations = [
      WHERE id = (SELECT first.id FROM bills first WHERE first.content_sha256 = bills.content_sha256 ORDER BY first.created_at, first.id LIMIT 1);
    CREATE UNIQUE INDEX bills_dedup_sha256_idx ON bills(dedup_sha256) WHERE dedup_sha256 IS NOT NULL;
    CREATE INDEX bills_content_sha256_idx ON bills(content_sha256);`,
+  `CREATE TABLE bill_deletion_requests (
+      bill_id TEXT PRIMARY KEY REFERENCES bills(id), content_revision INTEGER NOT NULL,
+      review_revision INTEGER NOT NULL, created_at TEXT NOT NULL
+    );`,
 ];
 
 export function applyMigrations(db: Database): void {

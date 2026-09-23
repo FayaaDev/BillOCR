@@ -144,6 +144,8 @@ a:hover { text-decoration: underline; }
 .review-form-error:empty { display: none; }
 .reject-action { background: color-mix(in oklch, var(--destructive) 10%, transparent); color: var(--destructive); }
 .reject-action:hover { background: color-mix(in oklch, var(--destructive) 20%, transparent); color: var(--destructive); }
+.delete-action { border-color: var(--destructive); background: var(--destructive); color: white; }
+.delete-action:hover { background: color-mix(in oklch, var(--destructive) 85%, black); color: white; }
 .permanent-failure { margin: 0 0 1.5rem; }
 .original-preview-trigger:not(.button-link) { display: block; cursor: zoom-in; }
 .original-preview-trigger:not(.button-link):focus-visible { outline: 3px solid color-mix(in oklch, var(--ring) 50%, transparent); outline-offset: 2px; }

@@ -21,7 +21,7 @@ describe("migrations", () => {
   test("apply on a fresh database and safely reapply", () => {
     database.close();
     const reopened = new BillDatabase(path);
-    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(19);
+    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(20);
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'validation_issues'").get()?.name).toBe("validation_issues");
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'extraction_invocations'").get()?.name).toBe("extraction_invocations");
     reopened.close();
@@ -36,7 +36,7 @@ describe("migrations", () => {
     expect(await first.exited).toBe(0);
     expect(await second.exited).toBe(0);
     database = new BillDatabase(path);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(19);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(20);
   });
 
   test("upgrades existing duplicate hashes without removing bills or blocking new deduplication", () => {
@@ -95,7 +95,7 @@ describe("migrations", () => {
     database = new BillDatabase(path);
     expect(database.getExtraction("legacy-bill")).toMatchObject({ normalized: { vendorName: "Legacy" }, selectedProvider: null, fallbackStatus: null });
     expect(database.sqlite.query<{ provider: string }, [string]>("SELECT provider FROM extraction_attempts WHERE id = ?").get("legacy-attempt")?.provider).toBe("mistral");
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(19);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(20);
   });
 
   test("upgrades historical WhatsApp identity, jobs, foreign keys, and projections without loss", () => {
@@ -443,6 +443,18 @@ describe("canonical bill and jobs", () => {
     expect(firstClaim).not.toBeNull();
     expect(secondClaim).toBeNull();
     secondConnection.close();
+  });
+
+  test("a prepared bill deletion prevents new worker claims until deletion completes", () => {
+    const bill = database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "delete-job" }]).bill;
+    expect(database.prepareBillDeletion({ billId: bill.id, expectedContentRevision: 0, expectedReviewRevision: 0 })).toEqual({ prepared: true });
+    expect(database.hasBillDeletionRequest(bill.id)).toBe(true);
+    expect(database.prepareBillDeletion({ billId: bill.id, expectedContentRevision: 1, expectedReviewRevision: 0 })).toEqual({ stale: true });
+    expect(database.supersedeForReview(bill.id, "reviewer")).toBe(false);
+    expect(database.claimNextJob("worker", policy)).toBeNull();
+    expect(database.completeBillDeletion(bill.id)).toBe(true);
+    expect(database.getBill(bill.id)).toBeNull();
+    expect(database.sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
   test("records retryable failure with bounded exponential availability and then reclaims it", () => {

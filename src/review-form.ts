@@ -39,6 +39,7 @@ export function installReviewForm(document: Pick<Document, "getElementById">): v
   form.addEventListener("formdata", (event) => pruneReviewFormData(event.formData));
   form.addEventListener("submit", (event) => {
     const data = new FormData(form, event.submitter);
+    if (data.get("action") === "delete_bill" && !confirm("هل تريد حذف هذه الفاتورة وملفها الأصلي؟ لا يمكن التراجع عن هذا الإجراء.")) { event.preventDefault(); return; }
     pruneReviewFormData(data);
     const message = reviewFormValidationMessage(Array.from(data.entries()).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
     error.textContent = message ?? "";

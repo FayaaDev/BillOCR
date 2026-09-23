@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BillDatabase } from "../src/database";
@@ -11,6 +11,7 @@ import { JobWorker } from "../src/worker";
 import { createLogger } from "../src/logger";
 import { handleRequest } from "../src/http";
 import { reviewAuth } from "../src/review-auth";
+import { removeVerifiedOriginal } from "../src/originals";
 import * as XLSX from "xlsx";
 
 let dir: string; let assetDir: string; let database: BillDatabase; let config: AppConfig; let id: string; let sessionCookie: string;
@@ -50,6 +51,7 @@ test("review detail renders an accessible image-original preview while PDFs reta
   expect(pdfHtml).toContain('href="/review/bills/review-bill/original">عرض الأصل</a>'); expect(pdfHtml).not.toContain('original-preview-dialog'); expect(pdfHtml).toContain('type="module" src="/review/assets/client.js"');
   expect(html).toContain('id="review-correction-form" class="correction-form"'); expect(html).toContain('<label class="review-field" for="vendorName"><span>اسم المورد</span>'); expect(html).toContain('<textarea id="description" name="description" rows="4" maxlength="2000">فلتر زيت\nزيت محرك</textarea>'); expect(html).toContain('name="vendorName" value="&lt;img src=x&gt;" maxlength="1024"'); expect(html).toContain('id="review-form-error"'); expect(html).not.toContain('name="handwritten"'); expect(html).not.toContain('name="reason"'); expect(html).not.toContain('name="note"'); expect(html).not.toContain('Reason for decision'); expect(html).not.toContain('Review note'); expect(html).toContain('class="review-action approve-action"'); expect(html).toContain('>اعتماد الفاتورة</button>'); expect(html).toContain('class="review-action reject-action"'); expect(html).toContain('>رفض الفاتورة</button>');
   expect(html).toContain('name="truckNumber" value=""'); expect(html).toContain('name="vendorTaxNumber" value=""'); expect(html).toContain('<span>رقم مرسل الفاتورة</span><input id="senderId" value="s" readonly>');
+  expect(html).toContain('class="review-action reject-action" name="action" value="mark_not_invoice">وضع علامة ليست فاتورة</button><button class="review-action delete-action" name="action" value="delete_bill">حذف الفاتورة</button>');
   const orderedLabels = ["تاريخ الفاتورة", "مبلغ اجمالي بعد الضريبة", "قيمة الضريبة", "مبلغ قبل الضريبة", "وصف القطع وبيانها", "رقم الشاحنة ( المسؤليه )", "الرقم الضريبي للمورد", "اسم المورد", "رقم الفاتورة", "رقم مرسل الفاتورة", "تاريخ وتوقيت الارسال"];
   const labelOffsets = orderedLabels.map((label) => html.indexOf(`<span>${label}</span>`));
   expect(labelOffsets.every((offset, index) => offset >= 0 && (index === 0 || offset > labelOffsets[index - 1]!))).toBe(true);
@@ -67,6 +69,7 @@ test("review queue shell, API, and fixed assets are authenticated", async () => 
   expect(clientSource).toContain('import { Dashboard } from "./admin-client"');
   expect(clientSource).toContain('<Dashboard clearCsrf={root.dataset.clearCsrf ?? root.dataset.csrf ?? ""} logoutCsrf={root.dataset.logoutCsrf ?? ""}');
   expect(clientSource).toContain('import "./review-original-preview"'); expect(clientSource).toContain('import "./review-form"');
+  expect(readFileSync(join(import.meta.dir, "..", "src", "review-form.ts"), "utf8")).toContain('data.get("action") === "delete_bill" && !confirm(');
   const api = await handleReviewRequest(new Request("http://x/review/api/bills", { headers: basic() }), database, config);
    expect(api.headers.get("content-type")).toContain("application/json"); expect(api.headers.get("cache-control")).toBe("no-store"); expect(await api.json()).toEqual([{ id, source: "whatsapp", status: "needs_review", displayStatus: "needs_review", batchId: null, invoiceDate: "2026-08-01", total: 10, currency: "USD", vat: 1, subtotal: 9, description: "فلتر زيت\nزيت محرك", truckNumber: null, vendorTaxNumber: null, vendorName: "<img src=x>", invoiceNumber: null, senderId: "s", receivedAt: "2026-08-01T00:00:00.000Z", updatedAt: database.getBill(id)!.updatedAt }]);
   const apiPost = await handleReviewRequest(new Request("http://x/review/api/bills", { method: "POST", headers: basic() }), database, config);
@@ -139,11 +142,55 @@ test("review clear endpoint is authenticated, CSRF-protected, and leaves origina
   expect(await cleared.json()).toEqual({ deleted: 2 });
   expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(0);
   expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM admin_upload_batches").get()?.count).toBe(0);
-  for (const table of ["admin_upload_batch_items", "jobs", "job_transition_history", "extractions", "extraction_attempts", "extraction_invocations", "azure_extraction_operations", "validation_issues", "review_events", "bill_classification_events", "provider_projection_metadata", "effective_bill_data"]) expect(database.sqlite.query<{ count: number }, []>(`SELECT count(*) AS count FROM ${table}`).get()?.count).toBe(0);
+  for (const table of ["admin_upload_batch_items", "jobs", "job_transition_history", "extractions", "extraction_attempts", "extraction_invocations", "azure_extraction_operations", "validation_issues", "review_events", "bill_classification_events", "provider_projection_metadata", "effective_bill_data", "bill_deletion_requests"]) expect(database.sqlite.query<{ count: number }, []>(`SELECT count(*) AS count FROM ${table}`).get()?.count).toBe(0);
   expect(database.sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
   expect(database.getTelegramPollingCursor()).toBe(99); expect(database.getDriveReservation("folder")).not.toBeNull(); expect(database.getDriveReservation("bill")).toBeNull(); expect(readFileSync(join(config.originals.dir, "bill.png"))).toEqual(Buffer.from("original"));
   const second = await handleReviewRequest(new Request("http://x/review/api/bills/clear", { method: "POST", headers: { ...basic(), "x-csrf-token": csrf } }), database, config);
   expect(await second.json()).toEqual({ deleted: 0 });
+});
+
+test("single-bill deletion is guarded and removes local state plus the verified original", async () => {
+  const bytes = Buffer.from("delete-original"); const hash = createHash("sha256").update(bytes).digest("hex"); const originalPath = join(config.originals.dir, "bill.png");
+  writeFileSync(originalPath, bytes); config.originals.maxAttachmentBytes = bytes.byteLength;
+  database.sqlite.query("UPDATE bills SET content_sha256 = ?, dedup_sha256 = ? WHERE id = ?").run(hash, hash, id);
+  const jobId = database.listJobsForBill(id)[0]!.id; const now = new Date().toISOString();
+  database.sqlite.query("INSERT INTO extraction_attempts (id,bill_id,job_id,job_attempt,provider,requested_at,completed_at,outcome,created_at) VALUES ('delete-attempt',?,?,1,'azure',?,'now','succeeded',?)").run(id, jobId, now, now);
+  database.sqlite.query("INSERT INTO extraction_invocations (id,bill_id,job_id,job_attempt,provider,idempotency_key,requested_at,completed_at,outcome,created_at,updated_at) VALUES ('delete-invocation',?,?,1,'azure','delete-invocation',?,'now','succeeded',?,?)").run(id, jobId, now, now, now);
+  database.sqlite.query("INSERT INTO azure_extraction_operations (id,invocation_id,bill_id,job_id,operation_location,state,completed_at,created_at,updated_at) VALUES ('delete-operation','delete-invocation',?,?,'https://delete.example','succeeded','now',?,?)").run(id, jobId, now, now);
+  database.sqlite.query("UPDATE extractions SET selected_invocation_id = 'delete-invocation' WHERE bill_id = ?").run(id);
+  database.sqlite.query("INSERT INTO validation_issues (id,bill_id,field,code,message,severity,created_at) VALUES ('delete-issue',?,'total','missing_total','missing','blocking',?)").run(id, now);
+  database.sqlite.query("INSERT INTO review_events (id,bill_id,reviewer_id,action,created_at) VALUES ('delete-review',?,'alice','approve',?)").run(id, now);
+  database.sqlite.query("INSERT INTO bill_classification_events (id,bill_id,from_classification,to_classification,actor,content_revision,review_revision,created_at) VALUES ('delete-classification',?,'unclassified','invoice','alice',1,0,?)").run(id, now);
+  database.sqlite.query("INSERT INTO provider_projection_metadata (id,bill_id,provider,projection_key,created_at,updated_at) VALUES ('delete-projection',?,'drive','delete-projection',?,?)").run(id, now, now);
+  database.sqlite.query("INSERT INTO effective_bill_data (bill_id,normalized_json,revision,updated_at) VALUES (?, '{}', 1, ?)").run(id, now);
+  database.reserveDriveId({ key: "delete-file", kind: "file", parentId: null, logicalPath: "delete-file", generatedId: "delete-file-id", billId: id });
+  database.reserveDriveId({ key: "keep-folder", kind: "folder", parentId: null, logicalPath: "keep-folder", generatedId: "keep-folder-id" });
+
+  const detail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
+  const token = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; if (!token) throw new Error("missing csrf");
+  const post = (csrf: string, contentRevision = "1") => handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, contentRevision, reviewRevision: "0", action: "delete_bill" }) }), database, config);
+  expect((await post("bad")).status).toBe(400); expect(database.getBill(id)).not.toBeNull(); expect(existsSync(originalPath)).toBe(true);
+  database.sqlite.query("UPDATE jobs SET state = 'running' WHERE id = ?").run(jobId);
+  expect((await post(token)).status).toBe(409); expect(database.getBill(id)).not.toBeNull(); expect(existsSync(originalPath)).toBe(true);
+  database.sqlite.query("UPDATE jobs SET state = 'pending' WHERE id = ?").run(jobId);
+  expect((await post(token, "0")).status).toBe(409); expect(database.getBill(id)).not.toBeNull();
+  const deleted = await post(token); expect(deleted.status).toBe(303); expect(deleted.headers.get("location")).toBe("/review");
+  expect(database.getBill(id)).toBeNull(); expect(existsSync(originalPath)).toBe(false); expect(database.getDriveReservation("delete-file")).toBeNull(); expect(database.getDriveReservation("keep-folder")).not.toBeNull();
+  for (const table of ["jobs", "job_transition_history", "extractions", "extraction_attempts", "extraction_invocations", "azure_extraction_operations", "validation_issues", "review_events", "bill_classification_events", "provider_projection_metadata", "effective_bill_data", "bill_deletion_requests"]) expect(database.sqlite.query<{ count: number }, []>(`SELECT count(*) AS count FROM ${table}`).get()?.count).toBe(0);
+  expect(database.sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
+});
+
+test("single-bill deletion resumes after the original was removed before database finalization", async () => {
+  const bytes = Buffer.from("interrupted-delete"); const hash = createHash("sha256").update(bytes).digest("hex"); const originalPath = join(config.originals.dir, "bill.png");
+  writeFileSync(originalPath, bytes); config.originals.maxAttachmentBytes = bytes.byteLength;
+  database.sqlite.query("UPDATE bills SET content_sha256 = ?, dedup_sha256 = ? WHERE id = ?").run(hash, hash, id);
+  const detail = await handleReviewRequest(new Request(`http://x/review/bills/${id}`, { headers: basic() }), database, config);
+  const token = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; if (!token) throw new Error("missing csrf");
+  expect(database.prepareBillDeletion({ billId: id, expectedContentRevision: 1, expectedReviewRevision: 0 })).toEqual({ prepared: true });
+  expect(await removeVerifiedOriginal({ path: originalPath, root: config.originals.dir, maxBytes: bytes.byteLength, sha256: hash, mimeType: "image/png" })).toBe("removed");
+  expect(database.getBill(id)).not.toBeNull(); expect(database.hasBillDeletionRequest(id)).toBe(true); expect(existsSync(originalPath)).toBe(false);
+  const resumed = await handleReviewRequest(new Request(`http://x/review/bills/${id}/review`, { method: "POST", headers: { ...basic(), "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf: token, contentRevision: "1", reviewRevision: "0", action: "delete_bill" }) }), database, config);
+  expect(resumed.status).toBe(303); expect(database.getBill(id)).toBeNull(); expect(database.hasBillDeletionRequest(id)).toBe(false);
 });
 
 test("review lists and serves a verified Telegram original from shared storage", async () => {

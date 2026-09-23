@@ -1,6 +1,6 @@
 import { dlopen, FFIType } from "bun:ffi";
 
-type NativeOpen = { openat(dirfd: number, path: string, flags: number, mode: number): number; close(fd: number): number };
+type NativeOpen = { openat(dirfd: number, path: string, flags: number, mode: number): number; unlinkat(dirfd: number, path: string, flags: number): number; close(fd: number): number };
 export type BeforeOpenRootComponent = (component: string) => Promise<void>;
 
 const platform = process.platform === "darwin"
@@ -11,6 +11,7 @@ const platform = process.platform === "darwin"
 
 const native: NativeOpen | null = platform && dlopen(platform.library, {
   openat: { args: [FFIType.i32, FFIType.cstring, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+  unlinkat: { args: [FFIType.i32, FFIType.cstring, FFIType.i32], returns: FFIType.i32 },
   close: { args: [FFIType.i32], returns: FFIType.i32 },
 }).symbols;
 
@@ -46,6 +47,10 @@ export async function openOriginalRoot(components: readonly string[], beforeOpen
 export function openOriginalChild(rootFd: number, basename: string): number {
   const { native, platform } = requireNative();
   return native.openat(rootFd, cstring(basename), platform.readOnly | platform.noFollow | platform.closeOnExec, 0);
+}
+
+export function unlinkOriginalChild(rootFd: number, basename: string): boolean {
+  return requireNative().native.unlinkat(rootFd, cstring(basename), 0) === 0;
 }
 
 export function closeOriginalFd(fd: number): void {

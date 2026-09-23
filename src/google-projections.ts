@@ -198,10 +198,13 @@ function monthPath(receivedAt: string): [string, string] {
   if (Number.isNaN(date.getTime())) throw new GooglePermanentError("Google input failure: invalid received date");
   return [String(date.getUTCFullYear()), String(date.getUTCMonth() + 1).padStart(2, "0")];
 }
-async function ensureFolder(database: BillDatabase, drive: DriveAdapter, parentId: string, logicalPath: string, name: string): Promise<string> {
+async function ensureFolder(database: BillDatabase, drive: DriveAdapter, rootId: string, parentId: string, logicalPath: string, name: string): Promise<string> {
   if (drive.generateId && drive.getFile && drive.createFolderWithId) {
-    let reservation = database.getDriveReservation(`folder:${logicalPath}`);
-    if (!reservation) reservation = database.reserveDriveId({ key: `folder:${logicalPath}`, kind: "folder", parentId, logicalPath, generatedId: await drive.generateId() });
+    const legacyKey = `folder:${logicalPath}`;
+    const legacy = database.getDriveReservation(legacyKey);
+    const key = legacy?.parent_id === parentId ? legacyKey : `folder:${rootId}:${logicalPath}`;
+    let reservation = database.getDriveReservation(key);
+    if (!reservation) reservation = database.reserveDriveId({ key, kind: "folder", parentId, logicalPath: key, generatedId: await drive.generateId() });
     const existingById = await drive.getFile(reservation.drive_id);
     if (existingById) { database.confirmDriveReservation(reservation.reservation_key); return reservation.drive_id; }
     const created = await drive.createFolderWithId({ id: reservation.drive_id, parentId, name });
@@ -248,14 +251,17 @@ export function createDriveArchiveHandler(database: BillDatabase, drive: DriveAd
       let archived = match;
       if (!archived) {
         const [year, month] = monthPath(bill.receivedAt);
-        const bills = await ensureFolder(database, drive, config.driveRootId, "Bills", "Bills");
-        const yearFolder = await ensureFolder(database, drive, bills, `Bills/${year}`, year);
-        const monthFolder = await ensureFolder(database, drive, yearFolder, `Bills/${year}/${month}`, month);
+        const bills = await ensureFolder(database, drive, config.driveRootId, config.driveRootId, "Bills", "Bills");
+        const yearFolder = await ensureFolder(database, drive, config.driveRootId, bills, `Bills/${year}`, year);
+        const monthFolder = await ensureFolder(database, drive, config.driveRootId, yearFolder, `Bills/${year}/${month}`, month);
         context.assertLease();
          const bytes = (await readVerifiedOriginal({ path: bill.originalPath, root: config.originalsRoot ?? dirname(bill.originalPath), maxBytes: config.maxOriginalBytes ?? 20 * 1024 * 1024, sha256: bill.contentSha256, mimeType: bill.mimeType, requireMagic: true })).bytes;
         if (drive.generateId && drive.getFile && drive.uploadOriginalWithId) {
-          let reservation = database.getDriveReservation(`file:${bill.id}`);
-          if (!reservation) reservation = database.reserveDriveId({ key: `file:${bill.id}`, kind: "file", parentId: monthFolder, logicalPath: `file:${bill.id}`, generatedId: await drive.generateId(), billId: bill.id, contentSha256: bill.contentSha256 });
+          const legacyKey = `file:${bill.id}`;
+          const legacy = database.getDriveReservation(legacyKey);
+          const key = legacy?.parent_id === monthFolder && legacy.content_sha256 === bill.contentSha256 ? legacyKey : `file:${config.driveRootId}:${bill.id}`;
+          let reservation = database.getDriveReservation(key);
+          if (!reservation) reservation = database.reserveDriveId({ key, kind: "file", parentId: monthFolder, logicalPath: key, generatedId: await drive.generateId(), billId: bill.id, contentSha256: bill.contentSha256 });
           archived = (await drive.getFile(reservation.drive_id)) ?? undefined;
           if (!archived) archived = await drive.uploadOriginalWithId({ id: reservation.drive_id, parentId: monthFolder, name: `${bill.id}-${sanitizeFilename(bill.originalFilename)}`, mimeType: bill.mimeType, bytes, billId: bill.id, contentSha256: bill.contentSha256 });
           database.confirmDriveReservation(reservation.reservation_key);
