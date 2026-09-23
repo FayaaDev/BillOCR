@@ -21,7 +21,7 @@ describe("migrations", () => {
   test("apply on a fresh database and safely reapply", () => {
     database.close();
     const reopened = new BillDatabase(path);
-    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(18);
+    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(19);
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'validation_issues'").get()?.name).toBe("validation_issues");
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'extraction_invocations'").get()?.name).toBe("extraction_invocations");
     reopened.close();
@@ -36,7 +36,23 @@ describe("migrations", () => {
     expect(await first.exited).toBe(0);
     expect(await second.exited).toBe(0);
     database = new BillDatabase(path);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(18);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(19);
+  });
+
+  test("upgrades existing duplicate hashes without removing bills or blocking new deduplication", () => {
+    const first = database.createBillWithInitialJobs({ ...input(), contentSha256: "b".repeat(64) }, jobs()).bill;
+    const second = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "older-copy", contentSha256: "c".repeat(64) }, []).bill;
+    database.close();
+    const legacy = new SqliteDatabase(path, { strict: true });
+    legacy.exec("DROP INDEX bills_dedup_sha256_idx; DROP INDEX bills_content_sha256_idx; ALTER TABLE bills DROP COLUMN dedup_sha256; CREATE UNIQUE INDEX bills_filename_key_idx ON bills(filename_key COLLATE BINARY) WHERE filename_key IS NOT NULL; DELETE FROM schema_migrations WHERE version = 19");
+    legacy.query("UPDATE bills SET content_sha256 = ? WHERE id = ?").run(first.contentSha256, second.id);
+    legacy.close();
+    database = new BillDatabase(path);
+    expect(database.getBill(first.id)).not.toBeNull();
+    expect(database.getBill(second.id)).not.toBeNull();
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills WHERE dedup_sha256 IS NOT NULL").get()?.count).toBe(1);
+    const duplicate = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "third-copy", contentSha256: first.contentSha256 }, []);
+    expect(duplicate).toMatchObject({ created: false, duplicateContent: true, bill: { id: [first, second].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0]!.id } });
   });
 
   test("upgrades a v9 database with existing extraction records without changing canonical data", () => {
@@ -79,7 +95,7 @@ describe("migrations", () => {
     database = new BillDatabase(path);
     expect(database.getExtraction("legacy-bill")).toMatchObject({ normalized: { vendorName: "Legacy" }, selectedProvider: null, fallbackStatus: null });
     expect(database.sqlite.query<{ provider: string }, [string]>("SELECT provider FROM extraction_attempts WHERE id = ?").get("legacy-attempt")?.provider).toBe("mistral");
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(18);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(19);
   });
 
   test("upgrades historical WhatsApp identity, jobs, foreign keys, and projections without loss", () => {
@@ -208,9 +224,9 @@ describe("dashboard metrics", () => {
 
   test("counts canonical bill and background-job outcomes independently", () => {
     const received = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-received" }, [{ type: "extract", idempotencyKey: "metrics-received-job" }]).bill;
-    const approved = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-approved", attachmentIndex: 1 }, [{ type: "extract", idempotencyKey: "metrics-approved-job" }]).bill;
-    const failed = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-failed", attachmentIndex: 2 }, [{ type: "extract", idempotencyKey: "metrics-failed-job" }]).bill;
-    const needsReview = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-review", attachmentIndex: 3 }, [{ type: "extract", idempotencyKey: "metrics-review-job" }]).bill;
+    const approved = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-approved", attachmentIndex: 1, contentSha256: "b".repeat(64) }, [{ type: "extract", idempotencyKey: "metrics-approved-job" }]).bill;
+    const failed = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-failed", attachmentIndex: 2, contentSha256: "c".repeat(64) }, [{ type: "extract", idempotencyKey: "metrics-failed-job" }]).bill;
+    const needsReview = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "metrics-review", attachmentIndex: 3, contentSha256: "d".repeat(64) }, [{ type: "extract", idempotencyKey: "metrics-review-job" }]).bill;
 
     database.sqlite.query("UPDATE bills SET status = 'approved' WHERE id = ?").run(approved.id);
     database.sqlite.query("UPDATE bills SET status = 'failed' WHERE id = ?").run(failed.id);
@@ -241,7 +257,7 @@ describe("dual-provider extraction provenance", () => {
     expect(database.beginExtractionInvocation({ ...request, billId: "other-bill" })).toBeNull();
     expect(database.beginExtractionInvocation({ ...request, idempotencyKey: "other-key" })).toBeNull();
     expect(database.beginExtractionInvocation({ ...request, jobAttempt: job.attempts + 1 })).toBeNull();
-    const archiveBill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "archive-message", attachmentIndex: 1 }, [{ type: "archive_to_drive", idempotencyKey: "archive-identity-job" }]).bill;
+    const archiveBill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "archive-message", attachmentIndex: 1, contentSha256: "b".repeat(64) }, [{ type: "archive_to_drive", idempotencyKey: "archive-identity-job" }]).bill;
     const archiveJob = database.claimNextJob("worker", policy, new Date(), ["archive_to_drive"]);
     if (!archiveJob) throw new Error("expected archive claim");
     expect(database.beginExtractionInvocation({ ...request, billId: archiveBill.id, jobId: archiveJob.id, leaseToken: archiveJob.leaseToken, jobAttempt: archiveJob.attempts, idempotencyKey: archiveJob.idempotencyKey })).toBeNull();
@@ -348,15 +364,15 @@ describe("canonical bill and jobs", () => {
   test("uses source-scoped, collision-safe identity and permits equal message IDs across chats and transports", () => {
     const base = { sourceMessageId: "42", sourceSenderId: "sender", attachmentIndex: 0, receivedAt: "2026-08-27T00:00:00.000Z", mimeType: "image/png", originalPath: "/durable/source.png", contentSha256: "d".repeat(64) };
     const whatsapp = database.createBillWithInitialJobs({ ...base, source: "whatsapp", sourceChatId: "chat-a", sourceIdentity: "chat-a:42:0" }, [{ type: "extract", idempotencyKey: "source-wa" }]);
-    const telegram = database.createBillWithInitialJobs({ ...base, source: "telegram", sourceChatId: "chat-a", sourceIdentity: "chat-a:42:0" }, [{ type: "extract", idempotencyKey: "source-tg" }]);
-    const otherChat = database.createBillWithInitialJobs({ ...base, source: "whatsapp", sourceChatId: "chat-b", sourceIdentity: "chat-b:42:0" }, [{ type: "extract", idempotencyKey: "source-other" }]);
+    const telegram = database.createBillWithInitialJobs({ ...base, contentSha256: "e".repeat(64), source: "telegram", sourceChatId: "chat-a", sourceIdentity: "chat-a:42:0" }, [{ type: "extract", idempotencyKey: "source-tg" }]);
+    const otherChat = database.createBillWithInitialJobs({ ...base, contentSha256: "f".repeat(64), source: "whatsapp", sourceChatId: "chat-b", sourceIdentity: "chat-b:42:0" }, [{ type: "extract", idempotencyKey: "source-other" }]);
     expect([whatsapp.bill.id, telegram.bill.id, otherChat.bill.id]).toHaveLength(3);
     expect(database.getBillBySourceIdentity("telegram", "chat-a:42:0")?.sourceMessageId).toBe("42");
     expect(database.findBillsByIdentifier("chat-b").map((bill) => bill.id)).toEqual([otherChat.bill.id]);
     expect(() => database.createBillWithInitialJobs({ ...base, source: "telegram", sourceChatId: "chat-a", sourceIdentity: "telegram-batch", batchItemId: "nope" }, [])).toThrow("Transport bill");
 
-    const ambiguousFirst = database.createBillWithInitialJobs({ ...base, source: "telegram", sourceChatId: "a:b", sourceMessageId: "c", attachmentIndex: 0 }, [{ type: "extract", idempotencyKey: "identity-ambiguous-first" }]);
-    const ambiguousSecond = database.createBillWithInitialJobs({ ...base, source: "telegram", sourceChatId: "a", sourceMessageId: "b:c", attachmentIndex: 0 }, [{ type: "extract", idempotencyKey: "identity-ambiguous-second" }]);
+    const ambiguousFirst = database.createBillWithInitialJobs({ ...base, contentSha256: "1".repeat(64), source: "telegram", sourceChatId: "a:b", sourceMessageId: "c", attachmentIndex: 0 }, [{ type: "extract", idempotencyKey: "identity-ambiguous-first" }]);
+    const ambiguousSecond = database.createBillWithInitialJobs({ ...base, contentSha256: "2".repeat(64), source: "telegram", sourceChatId: "a", sourceMessageId: "b:c", attachmentIndex: 0 }, [{ type: "extract", idempotencyKey: "identity-ambiguous-second" }]);
     expect(ambiguousFirst.bill.id).not.toBe(ambiguousSecond.bill.id);
     expect(ambiguousFirst.bill.sourceIdentity).not.toBe(ambiguousSecond.bill.sourceIdentity);
   });
@@ -380,15 +396,29 @@ describe("canonical bill and jobs", () => {
     expect(database.countJobsForBill(first.bill.id)).toBe(2);
   });
 
-  test("uses the unique filename key as the cross-source race fence without adding duplicate jobs", () => {
+  test("uses the unique content hash as the cross-source race fence without adding duplicate jobs", () => {
     const first = database.createBillWithInitialJobs({ ...input(), sourceFilename: "Receipt.pdf" }, jobs());
     database.sqlite.query("UPDATE bills SET status = 'failed' WHERE id = ?").run(first.bill.id);
     const secondConnection = new BillDatabase(path);
-    const duplicate = secondConnection.createBillWithInitialJobs({ ...input(), whatsappMessageId: "message-2", attachmentIndex: 1, originalPath: "/durable/other.png", contentSha256: "b".repeat(64), sourceFilename: "Receipt.PNG" }, [{ type: "extract", idempotencyKey: "extract:message-2:1" }]);
-    expect(duplicate).toMatchObject({ created: false, duplicateFilename: true, bill: { id: first.bill.id, status: "failed" } });
+    const duplicate = secondConnection.createBillWithInitialJobs({ ...input(), whatsappMessageId: "message-2", attachmentIndex: 1, originalPath: "/durable/other.png", sourceFilename: "Other.PNG" }, [{ type: "extract", idempotencyKey: "extract:message-2:1" }]);
+    expect(duplicate).toMatchObject({ created: false, duplicateContent: true, bill: { id: first.bill.id, status: "failed" } });
     expect(database.countJobsForBill(first.bill.id)).toBe(2);
     expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
     secondConnection.close();
+  });
+
+  test("concurrent inserts of identical hashes from two channels create one bill", async () => {
+    const other = new BillDatabase(path);
+    try {
+      const [first, second] = await Promise.all([
+        Promise.resolve().then(() => database.createBillWithInitialJobs({ ...input(), source: "telegram" }, jobs())),
+        Promise.resolve().then(() => other.createBillWithInitialJobs({ ...input(), source: "whatsapp", whatsappMessageId: "second", sourceFilename: "other.pdf" }, [{ type: "extract", idempotencyKey: "other-extract" }])),
+      ]);
+      expect(first.bill.id).toBe(second.bill.id);
+      expect([first.created, second.created].sort()).toEqual([false, true]);
+      expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
+      expect(database.countJobsForBill(first.bill.id)).toBe(2);
+    } finally { other.close(); }
   });
 
   test("rejects direct source filenames containing either path separator", () => {
@@ -401,7 +431,7 @@ describe("canonical bill and jobs", () => {
 
   test("rolls back a new bill when a required job idempotency key belongs to another bill", () => {
     database.createBillWithInitialJobs(input(), [{ type: "extract", idempotencyKey: "shared-key" }]);
-    expect(() => database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "message-2", attachmentIndex: 1 }, [{ type: "extract", idempotencyKey: "shared-key" }])).toThrow("idempotency key");
+    expect(() => database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "message-2", attachmentIndex: 1, contentSha256: "b".repeat(64) }, [{ type: "extract", idempotencyKey: "shared-key" }])).toThrow("idempotency key");
     expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
   });
 

@@ -393,11 +393,12 @@ test("disabled ingestion leaves new jobs original while existing tagged jobs sti
   const annotation = { schemaVersion: "1" as const, vendorName: "Vendor", invoiceNumber: null, invoiceDate: "2026-08-28", currency: null, subtotal: null, vat: null, total: 1, description: null, fields: { vendorName: { confidence: 1, sourceText: "Vendor" }, invoiceDate: { confidence: 1, sourceText: "2026-08-28" }, total: { confidence: 1, sourceText: "1" } } };
   service = startService(config, {}, { createDatabase: () => database, whatsappTransport: { start: async (handler) => { receive = handler; }, stop: async () => undefined }, imagePreprocessor: { preprocess: async () => { preprocessCalls += 1; return { bytes: derivative, mimeType: "image/png", mode: "sharp", width: 1, height: 1 }; } }, mistralProvider: { extract: async (input) => { received.push(input.bytes); return { annotation, rawResponse: "raw", model: "mock" }; } } });
   for (let attempts = 0; !receive && attempts < 20; attempts += 1) await Bun.sleep(1);
-  await receive!({ id: "new", groupId: "group", senderId: "sender", timestamp: "2026-08-28T00:00:00.000Z", attachments: [{ kind: "image", mimeType: "image/png", download: async () => original }] });
+  const newOriginal = new Uint8Array([...original, 3]);
+  await receive!({ id: "new", groupId: "group", senderId: "sender", timestamp: "2026-08-28T00:00:00.000Z", attachments: [{ kind: "image", mimeType: "image/png", download: async () => newOriginal }] });
   for (let attempts = 0; received.length < 2 && attempts < 700; attempts += 1) await Bun.sleep(2);
   expect(preprocessCalls).toBe(1);
   expect(received).toContainEqual(derivative);
-  expect(received).toContainEqual(original);
+  expect(received).toContainEqual(newOriginal);
   const newBill = database.findBillsByIdentifier("new")[0]!;
   expect(database.getBill(tagged.id)?.status).toBe("needs_review");
   expect(database.sqlite.query<{ idempotency_key: string }, [string]>("SELECT idempotency_key FROM jobs WHERE bill_id = ? AND type = 'extract'").get(newBill.id)?.idempotency_key).toBe(`extract:${newBill.id}:original`);

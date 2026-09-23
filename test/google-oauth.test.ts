@@ -2,10 +2,17 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAuthorizationRequest, exchangeAuthorizationCode, parseDesktopClientJson, publishAuthorizedUserCredential, runGoogleOAuth, validateCallback } from "../src/google-oauth";
+import { createAuthorizationRequest, exchangeAuthorizationCode, googleOAuthSetupError, parseDesktopClientJson, publishAuthorizedUserCredential, runGoogleOAuth, validateCallback } from "../src/google-oauth";
 
 const directories: string[] = [];
 afterEach(() => directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true })));
+
+test("OAuth CLI explains safe setup failures without printing secrets", () => {
+  expect(googleOAuthSetupError(new Error("GOOGLE_OAUTH_CLIENT_JSON and GOOGLE_OAUTH_CREDENTIAL_JSON are required"))).toContain("GOOGLE_OAUTH_CLIENT_JSON");
+  expect(googleOAuthSetupError(Object.assign(new Error("/private/secret-client.json"), { code: "ENOENT" }))).toBe("Google OAuth client JSON file not found");
+  expect(googleOAuthSetupError(new Error("Google OAuth client JSON requires an installed desktop client"))).toContain("installed desktop client");
+  expect(googleOAuthSetupError(new Error("refresh-token=secret"))).toBe("Google OAuth setup failed");
+});
 
 test("OAuth helpers parse desktop clients, use PKCE/state, and reject invalid callbacks without secret output", async () => {
   const client = parseDesktopClientJson(JSON.stringify({ installed: { client_id: "desktop-client", client_secret: "desktop-secret", auth_uri: "https://accounts.example/auth", token_uri: "https://accounts.example/token", redirect_uris: ["http://localhost"] } }));

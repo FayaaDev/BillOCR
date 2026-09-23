@@ -225,6 +225,12 @@ const migrations = [
            AND NOT EXISTS (SELECT 1 FROM bills existing WHERE existing.filename_key = candidate.filename_key)
       );
     DROP TABLE legacy_zip_filename_candidates;`,
+  `DROP INDEX bills_filename_key_idx;
+   ALTER TABLE bills ADD COLUMN dedup_sha256 TEXT;
+   UPDATE bills SET dedup_sha256 = content_sha256
+     WHERE id = (SELECT first.id FROM bills first WHERE first.content_sha256 = bills.content_sha256 ORDER BY first.created_at, first.id LIMIT 1);
+   CREATE UNIQUE INDEX bills_dedup_sha256_idx ON bills(dedup_sha256) WHERE dedup_sha256 IS NOT NULL;
+   CREATE INDEX bills_content_sha256_idx ON bills(content_sha256);`,
 ];
 
 export function applyMigrations(db: Database): void {

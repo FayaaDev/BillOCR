@@ -9,13 +9,15 @@ services:
       - bill-data:/data
       - bill-originals:/data/originals
       - bill-whatsapp-auth:/data/whatsapp-auth
-      - ./secrets:/run/secrets:ro
+      - ./.secrets:/run/secrets:ro
     environment:
       APP_HOST: 0.0.0.0
       APP_DATA_DIR: /data
       APP_DATABASE_PATH: /data/bill-ledger.sqlite
       ORIGINALS_DIR: /data/originals
       WHATSAPP_AUTH_PATH: /data/whatsapp-auth
+      GOOGLE_ENABLED: "true"
+      GOOGLE_AUTH_MODE: user_oauth
       GOOGLE_SERVICE_ACCOUNT_JSON: /run/secrets/google-service-account.json
       GOOGLE_OAUTH_CREDENTIAL_JSON: /run/secrets/google-authorized-user.json
     healthcheck:

@@ -9,7 +9,6 @@ import type { AdminUploadBatch, Bill } from "./contracts";
 import type { BillDatabase } from "./database";
 import type { Logger } from "./logger";
 import { AttachmentContentConflictError, persistOriginal, removeVerifiedUnreferencedOriginal, safeAttachmentFilename, sourceBasename } from "./durable-attachment-ingestion";
-import { filenameKeyFromSourceBasename } from "./contracts";
 
 export interface ZipIngestionLimits { maxCompressedBytes: number; maxExpandedBytes: number; maxEntryBytes: number; maxEntries: number; }
 export interface AdminZipUpload { sourceId: string; originalFilename: string; bytes: Uint8Array | AsyncIterable<Uint8Array>; }
@@ -237,10 +236,9 @@ export class AdminZipIngestionService {
     const originalPath = join(this.options.originalsDir, `admin-${batch.id}-${itemIndex}-${contentSha256.slice(0, 16)}${extension}`);
     const existing = this.options.database.getBillBySourceIdentity("admin_upload", sourceIdentity);
     if (existing) { if (existing.contentSha256 !== contentSha256) throw new AdminZipContentConflictError("ZIP source content differs"); return existing; }
-    const filenameKey = filenameKeyFromSourceBasename(sourceFilename);
-    if (filenameKey !== null && this.options.database.getBillByFilenameKey(filenameKey)) {
+    if (this.options.database.getBillByContentSha256(contentSha256)) {
       await removeVerifiedUnreferencedOriginal(this.options.database, originalPath, contentSha256);
-      this.options.database.transitionAdminUploadBatchItemState({ itemId, state: "rejected", errorCode: "duplicate_filename", expectedStates: ["queued"] });
+      this.options.database.transitionAdminUploadBatchItemState({ itemId, state: "rejected", errorCode: "duplicate_content", expectedStates: ["queued"] });
       return null;
     }
     try { await persistOriginal(originalPath, bytes); }
@@ -255,9 +253,9 @@ export class AdminZipIngestionService {
       // A zero-document result is terminal but its immutable intake original is still archival work.
       { type: "archive_to_drive", idempotencyKey: `archive_to_drive:${sourceIdentity}` },
     ]);
-    if (result.duplicateFilename) {
+    if (result.duplicateContent) {
       await removeVerifiedUnreferencedOriginal(this.options.database, originalPath, contentSha256);
-      this.options.database.transitionAdminUploadBatchItemState({ itemId, state: "rejected", errorCode: "duplicate_filename", expectedStates: ["queued"] });
+      this.options.database.transitionAdminUploadBatchItemState({ itemId, state: "rejected", errorCode: "duplicate_content", expectedStates: ["queued"] });
       return null;
     }
     return result.bill;

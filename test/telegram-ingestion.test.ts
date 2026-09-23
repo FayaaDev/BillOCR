@@ -57,6 +57,22 @@ test("retains an update that arrives after the atomic startup boundary", async (
   ]);
 });
 
+test("deduplicates separate Telegram photos with identical downloaded bytes", async () => {
+  database.setTelegramPollingCursor(70);
+  const first = update(70, "-100", { photo: [{ file_id: "first" }] });
+  const second = update(71, "-100", { photo: [{ file_id: "second" }] });
+  const { service: poller } = service([
+    json([first, second]),
+    json({ file_path: "photos/first.jpg" }), new Response(new Uint8Array([255, 216, 255])),
+    json({ file_path: "photos/second.jpg" }), new Response(new Uint8Array([255, 216, 255])),
+  ]);
+  await poller.pollOnce();
+  const bills = database.listReviewBills({ source: "telegram" });
+  expect(bills).toHaveLength(1);
+  expect(database.countJobsForBill(bills[0]!.id)).toBe(2);
+  expect(database.getTelegramPollingCursor()).toBe(72);
+});
+
 test("filters all disallowed chats while safely advancing its serial cursor", async () => {
   database.setTelegramPollingCursor(10);
   const { service: poller } = service([json([update(10, "-999"), { update_id: 11, callback_query: { id: "irrelevant" } }])]);

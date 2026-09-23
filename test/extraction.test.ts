@@ -15,6 +15,7 @@ import { createExtractionValidationCallback } from "../src/validation";
 const policy: RetryPolicy = { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 };
 let directory: string;
 let database: BillDatabase;
+let nextOriginal = 0;
 
 const valid = (overrides: Record<string, unknown> = {}) => ({ schemaVersion: "1", vendorName: "Vendor", invoiceNumber: "INV-1", invoiceDate: "2026-08-28", currency: "USD", subtotal: 10, vat: 1, total: 11, description: "items", fields: { total: { confidence: 0.99, sourceText: "11.00" } }, ...overrides });
 const azureRaw = (documents: unknown[]) => JSON.stringify({ status: "succeeded", analyzeResult: { documents } });
@@ -23,8 +24,10 @@ const azureInvoiceRaw = (vendor = "Azure vendor") => azureRaw([{ fields: {
   InvoiceDate: { type: "date", valueDate: "2026-08-28", content: "2026-08-28", confidence: 0.99 },
   InvoiceTotal: { type: "currency", valueCurrency: { amount: 11, currencyCode: "USD" }, content: "11", confidence: 0.99 },
 } }]);
-function enqueue(mimeType = "image/png", caption: string | null = "caption", bytes = mimeType === "application/pdf" ? new TextEncoder().encode("%PDF-1.7") : new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])) {
-  const originalPath = join(directory, "originals", mimeType === "application/pdf" ? "bill.pdf" : "bill.png");
+function enqueue(mimeType = "image/png", caption: string | null = "caption", bytes?: Uint8Array) {
+  const index = ++nextOriginal;
+  bytes ??= mimeType === "application/pdf" ? new TextEncoder().encode(`%PDF-1.7 ${index}`) : new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, index]);
+  const originalPath = join(directory, "originals", `bill-${index}.${mimeType === "application/pdf" ? "pdf" : "png"}`);
   writeFileSync(originalPath, bytes);
   return database.createBillWithInitialJobs({ whatsappMessageId: `message-${Math.random()}`, whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: new Date().toISOString(), caption, mimeType, originalPath, contentSha256: createHash("sha256").update(bytes).digest("hex") }, [{ type: "extract", idempotencyKey: `extract-${Math.random()}` }]);
 }
@@ -33,7 +36,7 @@ function worker(provider: MistralOcrProvider) { return new JobWorker(database, {
 function workerWithPreprocessor(provider: MistralOcrProvider, preprocessor: ImagePreprocessor) { return new JobWorker(database, { extract: createExtractJobHandler(database, provider, policy.maxAttempts, () => undefined, originals(), preprocessor) }, policy, "extract-test", createLogger("error")); }
 function setExtractKey(billId: string, idempotencyKey: string): void { database.sqlite.query("UPDATE jobs SET idempotency_key = ? WHERE bill_id = ? AND type = 'extract'").run(idempotencyKey, billId); }
 
-beforeEach(() => { directory = realpathSync(mkdtempSync(join(tmpdir(), "bill-extract-"))); mkdirSync(join(directory, "originals")); database = new BillDatabase(join(directory, "ledger.sqlite")); });
+beforeEach(() => { nextOriginal = 0; directory = realpathSync(mkdtempSync(join(tmpdir(), "bill-extract-"))); mkdirSync(join(directory, "originals")); database = new BillDatabase(join(directory, "ledger.sqlite")); });
 afterEach(() => { database.close(); rmSync(directory, { recursive: true, force: true }); });
 
 test.each([
@@ -211,10 +214,11 @@ test("tagged image jobs send a derivative and assert the lease immediately befor
 test("tagged image preprocessing null or errors and PDFs use the exact verified original", async () => {
   const original = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   const keys: string[] = [];
-  for (const preprocessor of [{ preprocess: async () => null }, { preprocess: async () => { throw new Error("unavailable"); } }] satisfies ImagePreprocessor[]) {
-    const bill = enqueue("image/png", null, original);
+  for (const [index, preprocessor] of ([{ preprocess: async () => null }, { preprocess: async () => { throw new Error("unavailable"); } }] satisfies ImagePreprocessor[]).entries()) {
+    const bytes = new Uint8Array([...original, index]);
+    const bill = enqueue("image/png", null, bytes);
     setExtractKey(bill.bill.id, `extract:${bill.bill.id}:${IMAGE_PREPROCESSING_VERSION}`);
-    await workerWithPreprocessor({ extract: async (input) => { expect(input.bytes).toEqual(original); expect(input.mimeType).toBe("image/png"); keys.push(input.idempotencyKey); return { annotation: valid(), rawResponse: "raw", model: "mock" }; } }, preprocessor).runOnce();
+    await workerWithPreprocessor({ extract: async (input) => { expect(input.bytes).toEqual(bytes); expect(input.mimeType).toBe("image/png"); keys.push(input.idempotencyKey); return { annotation: valid(), rawResponse: "raw", model: "mock" }; } }, preprocessor).runOnce();
   }
   const pdf = enqueue("application/pdf");
   setExtractKey(pdf.bill.id, `extract:${pdf.bill.id}:${IMAGE_PREPROCESSING_VERSION}`);
@@ -480,7 +484,7 @@ test("persisted Azure-only admin uploads bypass configured Mistral while WhatsAp
   const adminBill = (index: number) => {
     const batch = database.createAdminUploadBatch({ idempotencyKey: `admin-batch-${index}`, originalFilename: "invoices.zip" }).batch;
     const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 0, entryPath: `invoice-${index}.pdf` }).item;
-    const bytes = new TextEncoder().encode("%PDF-1.7");
+    const bytes = new TextEncoder().encode(`%PDF-1.7 ${index}`);
     const originalPath = join(directory, "originals", `admin-${index}.pdf`);
     writeFileSync(originalPath, bytes);
     return database.createBillWithInitialJobs({

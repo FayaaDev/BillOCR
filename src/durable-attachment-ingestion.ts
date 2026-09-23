@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { link, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { filenameKeyFromSourceBasename, isSourceBasename, transportSourceIdentity, type Bill, type BillSource, type CreateBillInput } from "./contracts";
+import { isSourceBasename, transportSourceIdentity, type Bill, type BillSource, type CreateBillInput } from "./contracts";
 import type { BillDatabase } from "./database";
 import type { Logger } from "./logger";
 import { canonicalOriginalsDir } from "./config";
@@ -50,11 +50,10 @@ export class DurableAttachmentIngestionService {
       const sourceIdentity = this.sourceIdentity(message.id, message.chatId, attachmentIndex);
       const existing = this.options.database.getBillBySourceIdentity(this.options.source, sourceIdentity);
       if (existing) { bills.push(existing); continue; }
-      const sourceFilename = sourceBasename(attachment.filename);
-      const filenameKey = filenameKeyFromSourceBasename(sourceFilename);
-      if (filenameKey !== null) { const duplicate = this.options.database.getBillByFilenameKey(filenameKey); if (duplicate) { bills.push(duplicate); continue; } }
       try {
         const bytes = await readLimitedAttachment(attachment, this.options.maxAttachmentBytes ?? 20 * 1024 * 1024);
+        const duplicate = this.options.database.getBillByContentSha256(sha256(bytes));
+        if (duplicate) { bills.push(duplicate); continue; }
         const manifest = this.createManifest(message, attachment, attachmentIndex, timestamp, bytes);
         await this.stage(manifest, bytes); await this.options.beforeCommit?.();
         const bill = await this.reconcileOne(this.unitDirectory(manifest)); if (bill) bills.push(bill);
@@ -111,14 +110,14 @@ export class DurableAttachmentIngestionService {
     if (!manifest || !this.validManifest(manifest)) throw new Error("invalid staging manifest"); const bytes = await readFile(join(unit, "original")); if (sha256(bytes) !== manifest.contentSha256) throw new Error("staged content hash mismatch");
     const existing = this.options.database.getBillBySourceIdentity(manifest.source, manifest.sourceIdentity);
     if (existing) { if (manifest.contentSha256 !== existing.contentSha256) { await rm(unit, { recursive: true, force: true }); throw new AttachmentContentConflictError("existing bill content differs"); } await rm(unit, { recursive: true, force: true }); return existing; }
-    const filenameKey = filenameKeyFromSourceBasename(manifest.sourceFilename);
-    if (filenameKey !== null) { const duplicate = this.options.database.getBillByFilenameKey(filenameKey); if (duplicate) { await removeVerifiedUnreferencedOriginal(this.options.database, manifest.originalPath, manifest.contentSha256); await rm(unit, { recursive: true, force: true }); return duplicate; } }
+    const duplicate = this.options.database.getBillByContentSha256(manifest.contentSha256);
+    if (duplicate) { await removeVerifiedUnreferencedOriginal(this.options.database, manifest.originalPath, manifest.contentSha256); await rm(unit, { recursive: true, force: true }); return duplicate; }
     const originalPath = manifest.originalPath;
     try { await persistOriginal(originalPath, bytes); } catch (error) { if (error instanceof AttachmentContentConflictError) await rm(unit, { recursive: true, force: true }); throw error; }
     await this.options.afterOriginalPublished?.();
     let result; try { result = this.options.database.createBillWithInitialJobs({ ...manifest, originalPath }, [{ type: "extract", idempotencyKey: `extract:${manifest.id}:${this.options.extractionInputVersion}` }, { type: "archive_to_drive", idempotencyKey: `archive_to_drive:${manifest.id}` }]); }
     catch (error) { const raced = this.options.database.getBillBySourceIdentity(manifest.source, manifest.sourceIdentity); if (!raced) throw error; if (raced.contentSha256 !== manifest.contentSha256) { await rm(unit, { recursive: true, force: true }); throw new AttachmentContentConflictError("racing bill content differs"); } result = { bill: raced, created: false }; }
-    if (result.duplicateFilename) await removeVerifiedUnreferencedOriginal(this.options.database, originalPath, manifest.contentSha256);
+    if (result.duplicateContent) await removeVerifiedUnreferencedOriginal(this.options.database, originalPath, manifest.contentSha256);
     await rm(unit, { recursive: true, force: true }); return result.bill;
   }
   private validManifest(value: StagedAttachment): boolean { return value.version === 1 && value.source === this.options.source && typeof value.sourceIdentity === "string" && typeof value.id === "string" && typeof value.sourceMessageId === "string" && typeof value.sourceChatId === "string" && typeof value.sourceSenderId === "string" && Number.isInteger(value.attachmentIndex) && value.attachmentIndex >= 0 && typeof value.receivedAt === "string" && typeof value.mimeType === "string" && typeof value.originalPath === "string" && (value.sourceFilename === undefined || value.sourceFilename === null || isSourceBasename(value.sourceFilename)) && /^[a-f0-9]{64}$/.test(value.contentSha256) && isSupportedDocumentMimeType(value.mimeType) && value.sourceIdentity === this.sourceIdentity(value.sourceMessageId, value.sourceChatId, value.attachmentIndex) && (value.originalPath === this.canonicalOriginalPath(value.sourceIdentity, value.attachmentIndex, value.mimeType) || (value.source === "whatsapp" && value.originalPath === this.legacyWhatsAppOriginalPath(value.sourceMessageId, value.attachmentIndex, value.mimeType))); }

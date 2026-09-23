@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --watch src/server.ts",
+    "dev": "APP_DATA_DIR=./data/dev APP_DATABASE_PATH=./data/dev/bill-ledger.sqlite ORIGINALS_DIR=./data/dev/originals WHATSAPP_AUTH_PATH=./data/dev/whatsapp-auth bun --watch src/server.ts",
     "start": "bun run src/server.ts",
     "lint": "oxlint",
     "typecheck": "tsc --noEmit",

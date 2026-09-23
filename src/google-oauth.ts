@@ -96,4 +96,20 @@ export async function runGoogleOAuth(env: Record<string, string | undefined> = B
     publishAuthorizedUserCredential(destination, credential); output("Google OAuth credential saved. Set GOOGLE_ENABLED=true and GOOGLE_AUTH_MODE=user_oauth, restart the service, then retry failed jobs.");
   } finally { server.stop(true); }
 }
-if (import.meta.main) void runGoogleOAuth().catch(() => { console.error("Google OAuth setup failed"); process.exitCode = 1; });
+export function googleOAuthSetupError(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return "Google OAuth client JSON file not found";
+  if (error instanceof Error && [
+    "GOOGLE_OAUTH_CLIENT_JSON and GOOGLE_OAUTH_CREDENTIAL_JSON are required",
+    "Google OAuth refuses to overwrite an existing credential file",
+    "Invalid Google OAuth client JSON",
+    "Google OAuth client JSON requires an installed desktop client",
+    "Google OAuth authorization timed out",
+    "Google OAuth token exchange timed out",
+    "Google OAuth token exchange failed",
+    "Google OAuth token response too large",
+    "Google OAuth token response was invalid",
+    "Google OAuth token response missing refresh token",
+  ].includes(error.message)) return error.message;
+  return "Google OAuth setup failed";
+}
+if (import.meta.main) void runGoogleOAuth().catch((error) => { console.error(googleOAuthSetupError(error)); process.exitCode = 1; });

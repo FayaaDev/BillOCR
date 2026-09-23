@@ -1,8 +1,12 @@
 node_modules/
 data/
 .env
+.env.local
 .git/
+.beads/
+**/.DS_Store
 secrets/
+.secrets/
 *-auth/
 whatsapp-auth/
 dist/
