@@ -2,7 +2,7 @@
 
 ## Workflow
 
-- Use Bun: `bun install --frozen-lockfile`. Verify code in this order: `bun run typecheck && bun test && bun run verify-build`; this repo has no lint or formatter script.
+- Use Bun: `bun install --frozen-lockfile`. Verify code in this order: `bun run lint && bun run typecheck && bun test && bun run verify-build`.
 - Focus a test with `bun test test/<name>.test.ts -t '<test name>'`. `dist/` is generated and ignored; never edit it.
 - Start locally with `bun run start` or `bun run dev`; migrate with `bun run migrate`; health is `GET http://127.0.0.1:3000/health`.
 - Operations are `bun run ops inspect <id>`, `failed-jobs`, `retry [--include-permanent] <job-id>`, and `backup <directory>`. They load all configuration, including shared Azure/review settings and settings for configured delivery channels, even when only SQLite is used.
