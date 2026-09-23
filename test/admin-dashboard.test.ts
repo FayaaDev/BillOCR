@@ -38,6 +38,8 @@ test("dashboard client uses the shared RTL dashboard, live bills, and real opera
   expect(client).toContain('fetch("/review/api/bills"');
   expect(client).toContain('setInterval(load, 15_000)');
   expect(client).toContain('summarizeBills(bills, days)');
+  expect(client).toContain('allBills.filter((bill) => matchesReceivedDate(bill, receivedDateFrom, receivedDateTo))');
+  expect(client).toContain('<QueueControls bills={bills}');
   expect(sidebar).toContain('href="/review/export.xlsx"');
   expect(sidebar).not.toContain('href="/admin?view=upload"');
   expect(client).toContain('"/review/api/bills/clear"');

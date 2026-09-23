@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { formatDate, matchesBillStatus, summarizeBills } from "../src/dashboard-data";
+import { matchesReceivedDate } from "../src/review-ticket-list";
 import type { ReviewBill } from "../src/review-ticket-list";
 
 function bill(overrides: Partial<ReviewBill> = {}): ReviewBill {
@@ -87,6 +88,19 @@ test("chart uses only exact valid invoice dates in range while financial totals 
     { date: "2026-03-01", total: 1, vat: 0.15 },
   ]);
   expect(summarizeBills([bill({ invoiceDate: "2026-02-22" })], 7, now).daily.every((day) => day.total === 0)).toBe(true);
+});
+
+test("receipt-date range filters scorecards and invoice-date chart together, including empty results", () => {
+  const bills = [bill({ id: "before", receivedAt: "2026-02-28T23:59:59Z", invoiceDate: "2026-03-01", total: 100 }),
+    bill({ id: "inside", receivedAt: "2026-03-01T23:59:59Z", invoiceDate: "2026-02-28", total: 200 }),
+    bill({ id: "review", status: "needs_review", receivedAt: "2026-03-01T00:00:00Z" })];
+  const selected = bills.filter((item) => matchesReceivedDate(item, "2026-03-01", "2026-03-01"));
+  const summary = summarizeBills(selected, 7, now);
+  expect(selected.map((item) => item.id)).toEqual(["inside", "review"]);
+  expect(summary).toMatchObject({ totalIncludingVat: 200, processedBills: 2, awaitingReview: 1 });
+  expect(summary.daily.at(-2)).toMatchObject({ date: "2026-02-28", total: 200 });
+  expect(summary.daily.at(-1)).toMatchObject({ date: "2026-03-01", total: 0 });
+  expect(summarizeBills(bills.filter((item) => matchesReceivedDate(item, "2026-03-02", "")), 7, now)).toMatchObject({ totalIncludingVat: 0, processedBills: 0 });
 });
 
 test("sums rounded integer cents and ignores nonfinite monetary data", () => {

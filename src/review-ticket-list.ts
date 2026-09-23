@@ -23,6 +23,11 @@ export type ReviewSort = "received-desc" | "received-asc" | "invoice-desc" | "in
 
 export const REVIEW_PAGE_SIZE = 10;
 
+export function matchesReceivedDate(bill: ReviewBill, from: string, to: string): boolean {
+  const date = bill.receivedAt.slice(0, 10);
+  return (!from || date >= from) && (!to || date <= to);
+}
+
 export function sumReviewBillTotals(bills: ReviewBill[]): number {
   return bills.reduce((sum, bill) => sum + (bill.total ?? 0), 0);
 }
@@ -38,7 +43,7 @@ function nullableCompare<T>(left: T | null, right: T | null, compare: (a: T, b: 
 export function prepareReviewBills(bills: ReviewBill[], search: string, sort: ReviewSort, receivedDateFrom = "", receivedDateTo = ""): ReviewBill[] {
   const needle = search.trim();
   return bills
-    .filter((bill) => (needle === "" || bill.invoiceNumber?.toLocaleLowerCase("ar").includes(needle.toLocaleLowerCase("ar"))) && ((!receivedDateFrom && !receivedDateTo) || ((!receivedDateFrom || bill.receivedAt.slice(0, 10) >= receivedDateFrom) && (!receivedDateTo || bill.receivedAt.slice(0, 10) <= receivedDateTo))))
+    .filter((bill) => (needle === "" || bill.invoiceNumber?.toLocaleLowerCase("ar").includes(needle.toLocaleLowerCase("ar"))) && matchesReceivedDate(bill, receivedDateFrom, receivedDateTo))
     .toSorted((left, right) => {
       let result: number;
       switch (sort) {
