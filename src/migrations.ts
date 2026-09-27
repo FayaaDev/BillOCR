@@ -261,6 +261,12 @@ const migrations = [
      SELECT lower(hex(randomblob(16))), id, state, 'permanent_failure', 'duplicate_invoice',
        strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM suppressed_duplicate_jobs;
    DROP TABLE suppressed_duplicate_jobs;`,
+  /* Restore exact-byte intake ownership. Rows accepted while the index was absent have no
+     marker; mark only the earliest row for each such hash, retaining every historical row. */
+  `UPDATE bills SET dedup_sha256 = content_sha256
+     WHERE dedup_sha256 IS NULL
+       AND id = (SELECT first.id FROM bills first WHERE first.content_sha256 = bills.content_sha256 ORDER BY first.created_at, first.id LIMIT 1);
+   CREATE UNIQUE INDEX IF NOT EXISTS bills_dedup_sha256_idx ON bills(dedup_sha256) WHERE dedup_sha256 IS NOT NULL;`,
 ];
 
 export function applyMigrations(db: Database): void {

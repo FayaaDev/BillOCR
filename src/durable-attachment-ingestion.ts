@@ -52,6 +52,8 @@ export class DurableAttachmentIngestionService {
       if (existing) { bills.push(existing); continue; }
       try {
         const bytes = await readLimitedAttachment(attachment, this.options.maxAttachmentBytes ?? 20 * 1024 * 1024);
+        const duplicate = this.options.database.getBillByContentSha256(sha256(bytes));
+        if (duplicate) { bills.push(duplicate); continue; }
         const manifest = this.createManifest(message, attachment, attachmentIndex, timestamp, bytes);
         await this.stage(manifest, bytes); await this.options.beforeCommit?.();
         const bill = await this.reconcileOne(this.unitDirectory(manifest)); if (bill) bills.push(bill);
@@ -108,16 +110,28 @@ export class DurableAttachmentIngestionService {
     if (!manifest || !this.validManifest(manifest)) throw new Error("invalid staging manifest"); const bytes = await readFile(join(unit, "original")); if (sha256(bytes) !== manifest.contentSha256) throw new Error("staged content hash mismatch");
     const existing = this.options.database.getBillBySourceIdentity(manifest.source, manifest.sourceIdentity);
     if (existing) { if (manifest.contentSha256 !== existing.contentSha256) { await rm(unit, { recursive: true, force: true }); throw new AttachmentContentConflictError("existing bill content differs"); } await rm(unit, { recursive: true, force: true }); return existing; }
+    const duplicate = this.options.database.getBillByContentSha256(manifest.contentSha256);
+    if (duplicate) { await removeVerifiedUnreferencedOriginal(this.options.database, manifest.originalPath, manifest.contentSha256); await rm(unit, { recursive: true, force: true }); return duplicate; }
     const originalPath = manifest.originalPath;
     try { await persistOriginal(originalPath, bytes); } catch (error) { if (error instanceof AttachmentContentConflictError) await rm(unit, { recursive: true, force: true }); throw error; }
     await this.options.afterOriginalPublished?.();
     let result; try { result = this.options.database.createBillWithInitialJobs({ ...manifest, originalPath }, [{ type: "extract", idempotencyKey: `extract:${manifest.id}:${this.options.extractionInputVersion}` }, { type: "archive_to_drive", idempotencyKey: `archive_to_drive:${manifest.id}` }]); }
     catch (error) { const raced = this.options.database.getBillBySourceIdentity(manifest.source, manifest.sourceIdentity); if (!raced) throw error; if (raced.contentSha256 !== manifest.contentSha256) { await rm(unit, { recursive: true, force: true }); throw new AttachmentContentConflictError("racing bill content differs"); } result = { bill: raced, created: false }; }
+    if (result.duplicateContent) await removeVerifiedUnreferencedOriginal(this.options.database, originalPath, manifest.contentSha256);
     await rm(unit, { recursive: true, force: true }); return result.bill;
   }
   private validManifest(value: StagedAttachment): boolean { return value.version === 1 && value.source === this.options.source && typeof value.sourceIdentity === "string" && typeof value.id === "string" && typeof value.sourceMessageId === "string" && typeof value.sourceChatId === "string" && typeof value.sourceSenderId === "string" && Number.isInteger(value.attachmentIndex) && value.attachmentIndex >= 0 && typeof value.receivedAt === "string" && typeof value.mimeType === "string" && typeof value.originalPath === "string" && (value.sourceFilename === undefined || value.sourceFilename === null || isSourceBasename(value.sourceFilename)) && /^[a-f0-9]{64}$/.test(value.contentSha256) && isSupportedDocumentMimeType(value.mimeType) && value.sourceIdentity === this.sourceIdentity(value.sourceMessageId, value.sourceChatId, value.attachmentIndex) && (value.originalPath === this.canonicalOriginalPath(value.sourceIdentity, value.attachmentIndex, value.mimeType) || (value.source === "whatsapp" && value.originalPath === this.legacyWhatsAppOriginalPath(value.sourceMessageId, value.attachmentIndex, value.mimeType))); }
 }
 
 export async function readLimitedAttachment(attachment: IncomingAttachment, maxBytes: number): Promise<Uint8Array> { const downloaded = await attachment.download(); if (downloaded instanceof Uint8Array) { if (downloaded.byteLength > maxBytes) throw new Error("attachment exceeds configured size limit"); return downloaded; } const chunks: Uint8Array[] = []; let size = 0; for await (const chunk of downloaded) { size += chunk.byteLength; if (size > maxBytes) throw new Error("attachment exceeds configured size limit"); chunks.push(chunk); } const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; } return bytes; }
+/** Removes only a verified delivery orphan; canonical DB-referenced originals are never candidates. */
+export async function removeVerifiedUnreferencedOriginal(database: BillDatabase, path: string, contentSha256: string): Promise<boolean> {
+  if (database.hasBillOriginalPath(path)) return false;
+  let info; try { info = await lstat(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  if (!info.isFile() || info.isSymbolicLink()) return false;
+  if (sha256(await readFile(path)) !== contentSha256 || database.hasBillOriginalPath(path)) return false;
+  await rm(path);
+  return true;
+}
 /** Atomically publishes a completed original without replacement. */
 export async function persistOriginal(path: string, bytes: Uint8Array): Promise<void> { await mkdir(dirname(path), { recursive: true }); const temporaryPath = `${path}.${randomUUID()}.tmp`; try { await writeFile(temporaryPath, bytes); try { await link(temporaryPath, path); } catch (error) { if (!alreadyExists(error)) throw error; const existingInfo = await lstat(path); if (existingInfo.isSymbolicLink()) throw new Error("canonical original is symlink"); const existing = await readFile(path); if (sha256(existing) !== sha256(bytes)) throw new AttachmentContentConflictError("canonical original content differs"); } await rm(temporaryPath, { force: true }); } catch (error) { await rm(temporaryPath, { force: true }).catch(() => undefined); throw error; } }
