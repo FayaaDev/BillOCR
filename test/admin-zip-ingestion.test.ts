@@ -65,25 +65,25 @@ describe("admin ZIP ingestion", () => {
     expect(itemRows().map((item) => item.state)).toEqual(["processing", "processing"]);
   });
 
-  test("terminally rejects a ZIP entry whose bytes duplicate an existing bill", async () => {
+  test("accepts a ZIP entry with the same bytes as another channel pending OCR identity", async () => {
     const durable = new (await import("../src/durable-attachment-ingestion")).DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["tg"], originalsDir: join(directory, "originals"), database, logger: silentLogger });
     const existing = (await durable.ingest({ id: "tg-existing", chatId: "tg", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ kind: "document", mimeType: "application/pdf", filename: "Receipt.pdf", download: async () => pdf("first") }] })).bills[0]!;
     const result = await service.ingest({ sourceId: "duplicate-name", originalFilename: "duplicates.zip", bytes: zip([{ name: "nested/Other.pdf", bytes: pdf("first") }]) });
-    expect(result.counts).toEqual({ accepted: 0, rejected: 1, ignored: 0 });
-    expect(database.getAdminUploadBatchStatus(result.batch.id)).toMatchObject({ batch: { state: "completed" }, counts: { queued: 0, processing: 0, rejected: 1 }, items: [{ entryPath: "nested/Other.pdf", state: "rejected", errorCode: "duplicate_content", billId: null }] });
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
+    expect(result.counts).toEqual({ accepted: 1, rejected: 0, ignored: 0 });
+    expect(database.getAdminUploadBatchStatus(result.batch.id)).toMatchObject({ batch: { state: "processing" }, counts: { queued: 0, processing: 1, rejected: 0 }, items: [{ entryPath: "nested/Other.pdf", state: "processing" }] });
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(2);
     expect(database.countJobsForBill(existing.id)).toBe(2);
   });
 
-  test("cleans a matching ZIP orphan when another source already owns its hash", async () => {
+  test("links an existing verified ZIP original even when another source shares its hash", async () => {
     const batch = database.createAdminUploadBatch({ id: "orphan-batch", idempotencyKey: "admin-zip:orphan-cleanup", originalFilename: "orphan.zip" }).batch;
     const bytes = pdf("orphan"); const hash = createHash("sha256").update(bytes).digest("hex");
     database.createBillWithInitialJobs({ source: "telegram", sourceMessageId: "existing", sourceChatId: "tg", sourceSenderId: "sender", attachmentIndex: 0, receivedAt: batch.createdAt, sourceFilename: "Receipt.pdf", originalFilename: "Receipt.pdf", mimeType: "application/pdf", originalPath: join(directory, "existing.pdf"), contentSha256: hash }, [{ type: "extract", idempotencyKey: "existing-receipt" }]);
     const orphan = join(directory, "originals", `admin-${batch.id}-0-${hash.slice(0, 16)}.pdf`); mkdirSync(join(directory, "originals"), { recursive: true }); writeFileSync(orphan, bytes);
     const result = await service.ingest({ sourceId: "orphan-cleanup", originalFilename: "orphan.zip", bytes: zip([{ name: "nested/Receipt.PDF", bytes }]) });
-    expect(result.counts).toEqual({ accepted: 0, rejected: 1, ignored: 0 });
-    expect(existsSync(orphan)).toBe(false);
-    expect(database.getAdminUploadBatchStatus(batch.id)?.items).toEqual([expect.objectContaining({ state: "rejected", errorCode: "duplicate_content", billId: null })]);
+    expect(result.counts).toEqual({ accepted: 1, rejected: 0, ignored: 0 });
+    expect(existsSync(orphan)).toBe(true);
+    expect(database.getAdminUploadBatchStatus(batch.id)?.items).toEqual([expect.objectContaining({ state: "processing", billId: expect.any(String) })]);
   });
 
   test("records hostile entries, ignores junk, and accepts valid later entries", async () => {
@@ -178,7 +178,7 @@ describe("admin ZIP ingestion", () => {
     const batch = await service.ingest({ sourceId: "integrated-replay", originalFilename: "integrated.zip", bytes: archive });
     const operations = new Map<string, string>(); let sequence = 0;
     const approved = { schemaVersion: "1" as const, vendorName: "Approved Store", invoiceNumber: "A-1", invoiceDate: "2026-08-01", currency: "USD", subtotal: 9, vat: 1, total: 10, description: null, fields: { vendorName: { confidence: .99, sourceText: "Approved Store" }, invoiceDate: { confidence: .99, sourceText: "2026-08-01" }, total: { confidence: .99, sourceText: "10" } } };
-    const review = { ...approved, vendorName: null, fields: { ...approved.fields, vendorName: { confidence: .1, sourceText: "Review Store" } } };
+    const review = { ...approved, invoiceNumber: "R-1", vendorName: null, fields: { ...approved.fields, vendorName: { confidence: .1, sourceText: "Review Store" } } };
     const empty = { schemaVersion: "1" as const, vendorName: null, invoiceNumber: null, invoiceDate: null, currency: null, subtotal: null, vat: null, total: null, description: null, fields: {} };
     const azure: AzureInvoiceProvider = {
       submit: async ({ bytes }) => { const location = `operation-${sequence++}`; operations.set(location, new TextDecoder().decode(bytes)); return { operationLocation: location }; },
@@ -221,7 +221,7 @@ describe("admin ZIP ingestion", () => {
     expect(database.getAdminUploadBatchStatus(batch.batch.id)?.batch.state).toBe("processing");
 
     const current = database.getBill(reviewId)!;
-    expect(database.submitReview({ billId: reviewId, reviewerId: "qa", action: "approve", reason: "verified", note: "manual correction", expectedContentRevision: current.contentRevision, expectedReviewRevision: current.reviewRevision, corrected: approved }, [])).toBe(true);
+    expect(database.submitReview({ billId: reviewId, reviewerId: "qa", action: "approve", reason: "verified", note: "manual correction", expectedContentRevision: current.contentRevision, expectedReviewRevision: current.reviewRevision, corrected: { ...approved, invoiceNumber: "R-1" } }, [])).toBe(true);
     for (let attempts = 0; attempts < 20; attempts += 1) { await worker.runOnce(); await Bun.sleep(2); }
     expect(database.getAdminUploadBatchStatus(batch.batch.id)).toMatchObject({ batch: { state: "completed" }, counts: { complete: 2, notInvoice: 1, processing: 0 } });
     expect([...rows.values()].filter((values) => values[13] === approvedId)).toHaveLength(1);

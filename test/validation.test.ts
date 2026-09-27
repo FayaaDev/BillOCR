@@ -119,6 +119,7 @@ test("manual-review supersession is sticky until explicit reviewer approval", ()
   const callback = createExtractionValidationCallback(database, config, () => now);
   callback(bill.id);
   expect(database.getBill(bill.id)).toMatchObject({ status: "needs_review", contentRevision: 2, reviewRevision: 1 });
+  expect(database.completeJob(job.id, job.leaseToken)).toBe(true);
   const review = database.getBill(bill.id)!;
   expect(database.approveReviewCorrection({ billId: bill.id, reviewerId: "reviewer", expectedContentRevision: review.contentRevision, expectedReviewRevision: review.reviewRevision })).toBe(true);
   callback(bill.id); // A replay after manual approval still cannot be the authority that approves.
@@ -160,6 +161,7 @@ test("running old projection keeps its lease while reviewer approval creates one
   const extractJob = database.claimNextJob("extractor", policy)!;
   database.persistExtractionSuccess({ billId: bill.id, jobId: extractJob.id, leaseToken: extractJob.leaseToken, jobAttempt: extractJob.attempts, normalized: extracted(), rawProviderResponse: "raw", providerModel: "mock", promptSchemaVersion: "1", requestedAt: now.toISOString(), completedAt: now.toISOString() });
   createExtractionValidationCallback(database, config, () => now)(bill.id);
+  expect(database.completeJob(extractJob.id, extractJob.leaseToken)).toBe(true);
   const old = database.claimNextJob("old-worker", policy, new Date(), ["project_to_sheet"])!;
   expect(old.expectedRevision).toBe(1);
   expect(database.supersedeForReview(bill.id, "reviewer")).toBe(true);

@@ -13,7 +13,7 @@ type BillRow = {
   id: string; source_message_id: string; source_chat_id: string; source_sender_id: string; attachment_index: number;
   received_at: string; caption: string | null; original_filename: string | null; source_filename: string | null; filename_key: string | null; mime_type: string; original_path: string;
   content_sha256: string; status: Bill["status"]; drive_file_id: string | null; sheet_row_key: string | null; created_at: string; updated_at: string; content_revision: number; review_revision: number; manual_review_required: number;
-  source: BillSource; source_identity: string; extraction_policy: ExtractionPolicy; classification: BillClassification; batch_item_id: string | null;
+  source: BillSource; source_identity: string; extraction_policy: ExtractionPolicy; classification: BillClassification; batch_item_id: string | null; invoice_dedup_required: number;
 };
 type JobTransitionRow = { id: string; job_id: string; from_state: JobState | null; to_state: JobState; reason: string; created_at: string };
 type ExtractionRow = { id: string; bill_id: string; schema_version: string; selected_provider: ExtractionProvider | null; fallback_status: ExtractionFallbackStatus | null; selected_invocation_id: string | null; normalized_json: string | null; raw_provider_response: string | null; provider_model: string | null; prompt_schema_version: string | null; requested_at: string | null; completed_at: string | null; error_details: string | null; created_at: string; updated_at: string };
@@ -56,7 +56,7 @@ function recordTransition(db: Database, jobId: string, fromState: JobState | nul
 }
 
 export interface RetryPolicy { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number; }
-export interface CreateBillResult { bill: Bill; created: boolean; duplicateContent: boolean; }
+export interface CreateBillResult { bill: Bill; created: boolean; }
 export interface ReviewSubmission { billId: string; reviewerId: string; action: "approve" | "reject"; reason: string | null; note: string | null; expectedContentRevision: number; expectedReviewRevision: number; corrected: ExtractedBill; }
 export interface CompletedInvoiceExportRecord { receivedAt: string; senderId: string | null; extraction: ExtractedBill; }
 export interface ReviewQueueFilters { source?: BillSource; batchId?: string; status?: "complete" | "not_invoice" | Bill["status"]; }
@@ -108,9 +108,8 @@ export class BillDatabase {
     if (source !== "admin_upload" && input.batchItemId) throw new Error("Transport bill cannot link an admin-upload batch item");
     if (source === "admin_upload" && !input.batchItemId) throw new Error("Admin-upload bill requires a batch item");
     if (classification === "not_invoice" && initialJobs.some((job) => job.type === "project_to_sheet")) throw new Error("NotInvoice bills cannot create sheet projection jobs");
-    const insertBill = this.sqlite.query(`INSERT INTO bills (id, source_message_id, source_chat_id, source_sender_id, attachment_index, received_at, caption, original_filename, source_filename, filename_key, mime_type, original_path, content_sha256, dedup_sha256, status, source, source_identity, extraction_policy, classification, batch_item_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
+    const insertBill = this.sqlite.query(`INSERT INTO bills (id, source_message_id, source_chat_id, source_sender_id, attachment_index, received_at, caption, original_filename, source_filename, filename_key, mime_type, original_path, content_sha256, status, source, source_identity, extraction_policy, classification, batch_item_id, invoice_dedup_required, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, 1, ?, ?) ON CONFLICT DO NOTHING`);
     const bySource = this.sqlite.query<BillRow, [BillSource, string]>("SELECT * FROM bills WHERE source = ? AND source_identity = ?");
-    const byHash = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE content_sha256 = ? ORDER BY created_at, id LIMIT 1");
     const insertJob = this.sqlite.query(`INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, 0, ?, ?, ?)`);
     const jobByKey = this.sqlite.query<{ bill_id: string }, [string]>("SELECT bill_id FROM jobs WHERE idempotency_key = ?");
     return this.sqlite.transaction(() => {
@@ -125,16 +124,11 @@ export class BillDatabase {
           JOIN admin_upload_batches batch ON batch.id = item.batch_id WHERE item.id = ? AND item.bill_id IS NULL AND item.state = 'queued'`).get(input.batchItemId);
         if (!compatible) throw new Error("Admin-upload batch item is missing or already linked");
       }
-      if (!existingBill) {
-        const duplicate = byHash.get(input.contentSha256);
-        if (duplicate) return { bill: toBill(duplicate), created: false, duplicateContent: true };
-      }
-      const result = insertBill.run(billId, sourceMessageId, sourceChatId, sourceSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, sourceFilename, filenameKey, input.mimeType, input.originalPath, input.contentSha256, input.contentSha256, source, sourceIdentity, extractionPolicy, classification, input.batchItemId ?? null, now, now);
+      const result = insertBill.run(billId, sourceMessageId, sourceChatId, sourceSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, sourceFilename, filenameKey, input.mimeType, input.originalPath, input.contentSha256, source, sourceIdentity, extractionPolicy, classification, input.batchItemId ?? null, now, now);
       const resolvedBySource = existingBill ?? bySource.get(source, sourceIdentity);
-      const row = resolvedBySource ?? byHash.get(input.contentSha256);
+      const row = resolvedBySource;
       if (!row) throw new Error("Bill source identity conflicts with another bill");
       const created = result.changes === 1;
-      if (!created && !resolvedBySource) return { bill: toBill(row), created: false, duplicateContent: true };
       for (const job of initialJobs) {
         const existing = jobByKey.get(job.idempotencyKey);
         if (existing && existing.bill_id !== row.id) throw new Error(`Required job idempotency key belongs to another bill: ${job.idempotencyKey}`);
@@ -150,22 +144,13 @@ export class BillDatabase {
           WHERE id = ? AND bill_id IS NULL AND state = 'queued' AND EXISTS (SELECT 1 FROM admin_upload_batches WHERE id = admin_upload_batch_items.batch_id)`).run(row.id, now, input.batchItemId);
         if (linked.changes !== 1) throw new Error("Admin-upload batch item is missing or already linked");
       }
-      return { bill: toBill(row), created, duplicateContent: false };
+      return { bill: toBill(row), created };
     })();
   }
 
   getBillBySourceIdentity(source: BillSource, sourceIdentity: string): Bill | null {
     const row = this.sqlite.query<BillRow, [BillSource, string]>("SELECT * FROM bills WHERE source = ? AND source_identity = ?").get(source, sourceIdentity);
     return row ? toBill(row) : null;
-  }
-
-  getBillByContentSha256(contentSha256: string): Bill | null {
-    const row = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE content_sha256 = ? ORDER BY created_at, id LIMIT 1").get(contentSha256);
-    return row ? toBill(row) : null;
-  }
-
-  hasBillOriginalPath(originalPath: string): boolean {
-    return this.sqlite.query<{ value: number }, [string]>("SELECT 1 AS value FROM bills WHERE original_path = ? LIMIT 1").get(originalPath)?.value === 1;
   }
 
   getTelegramPollingCursor(): number | null {
@@ -181,6 +166,58 @@ export class BillDatabase {
   getBill(id: string): Bill | null {
     const row = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE id = ?").get(id);
     return row ? toBill(row) : null;
+  }
+
+  /** Historical rows are read-only candidates; only future owners enter the unique index.
+   * A duplicate retains its own bill and original for audit. Reviewer corrections are revision-fenced. */
+  getInvoiceDedupOwner(billId: string): string | null {
+    return this.sqlite.query<{ owner_id: string }, [string]>("SELECT owner_id FROM invoice_dedup_decisions WHERE bill_id = ?").get(billId)?.owner_id ?? null;
+  }
+
+  /** Legacy bills and future bills with a canonical non-duplicate decision may archive. */
+  isDriveArchiveAllowed(billId: string): boolean {
+    return Boolean(this.sqlite.query<{ value: number }, [string]>(`SELECT 1 AS value FROM bills b WHERE b.id = ?
+      AND (b.invoice_dedup_required = 0
+        OR EXISTS (SELECT 1 FROM invoice_dedup_decisions d WHERE d.bill_id = b.id AND d.owner_id = b.id))`).get(billId)?.value);
+  }
+
+  /** Suppress queued and leased effects in the same transaction as the duplicate decision. */
+  private suppressDuplicateJobs(billId: string, now: string): void {
+    const jobs = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE bill_id = ? AND type IN ('archive_to_drive','project_to_sheet') AND state IN ('pending','retryable_failure','running')").all(billId);
+    for (const job of jobs) {
+      this.sqlite.query(`UPDATE jobs SET state = 'permanent_failure', last_error = 'duplicate_invoice', lease_token = NULL, lease_expires_at = NULL,
+        claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ?`).run(now, job.id);
+      recordTransition(this.sqlite, job.id, job.state, "permanent_failure", "duplicate_invoice", now);
+    }
+  }
+
+  private decideInvoiceIdentity(billId: string, normalized: ExtractedBill, now: string): string {
+    const existing = this.getInvoiceDedupOwner(billId);
+    if (existing) return existing;
+    const number = normalized.invoiceNumber?.trim() || null;
+    const date = normalized.invoiceDate?.trim() || null;
+    let owner = billId;
+    if (number && date) {
+      owner = this.findInvoiceOwner(number, date) ?? billId;
+      if (owner !== billId && this.hasBillDeletionRequest(owner)) throw new Error("Invoice owner deletion is pending");
+      if (owner === billId) this.sqlite.query("INSERT INTO invoice_dedup_owners (invoice_number, invoice_date, bill_id) VALUES (?, ?, ?)").run(number, date, billId);
+    }
+    this.sqlite.query("INSERT INTO invoice_dedup_decisions (bill_id, invoice_number, invoice_date, owner_id, decided_at) VALUES (?, ?, ?, ?, ?)").run(billId, number && date ? number : null, number && date ? date : null, owner, now);
+    return owner;
+  }
+
+  private findInvoiceOwner(number: string, date: string): string | null {
+    // A previously reserved owner stays authoritative even if a legacy bill is corrected
+    // to this identity later. Otherwise use the earliest matching historical bill.
+    const historical = this.sqlite.query<{ id: string }, [string, string]>(`SELECT b.id FROM bills b
+        LEFT JOIN effective_bill_data effective ON effective.bill_id = b.id
+        LEFT JOIN extractions e ON e.bill_id = b.id
+        WHERE b.invoice_dedup_required = 0
+          AND json_extract(COALESCE(effective.normalized_json, e.normalized_json), '$.invoiceNumber') = ?
+          AND json_extract(COALESCE(effective.normalized_json, e.normalized_json), '$.invoiceDate') = ?
+        ORDER BY b.created_at, b.id LIMIT 1`).get(number, date);
+    const future = this.sqlite.query<{ bill_id: string }, [string, string]>("SELECT bill_id FROM invoice_dedup_owners WHERE invoice_number = ? AND invoice_date = ?").get(number, date);
+    return future?.bill_id ?? historical?.id ?? null;
   }
 
   /** Deletes canonical bill data and ZIP-upload tracking, without touching originals or non-bill state. */
@@ -203,6 +240,8 @@ export class BillDatabase {
       this.sqlite.query("DELETE FROM provider_projection_metadata").run();
       this.sqlite.query("DELETE FROM effective_bill_data").run();
       this.sqlite.query("DELETE FROM bill_deletion_requests").run();
+      this.sqlite.query("DELETE FROM invoice_dedup_decisions").run();
+      this.sqlite.query("DELETE FROM invoice_dedup_owners").run();
       this.sqlite.query("DELETE FROM drive_reservations WHERE bill_id IS NOT NULL").run();
       this.sqlite.query("DELETE FROM extractions").run();
       this.sqlite.query("DELETE FROM bills").run();
@@ -219,6 +258,7 @@ export class BillDatabase {
   /** Reserves deletion before filesystem work so workers cannot claim new jobs for this bill. */
   prepareBillDeletion(input: { billId: string; expectedContentRevision: number; expectedReviewRevision: number }): PrepareBillDeletionResult {
     return this.sqlite.transaction(() => {
+      if (this.sqlite.query<{ value: number }, [string, string]>("SELECT 1 AS value FROM invoice_dedup_decisions WHERE owner_id = ? AND bill_id != ? LIMIT 1").get(input.billId, input.billId)) return { busy: true as const };
       const existing = this.sqlite.query<{ content_revision: number; review_revision: number }, [string]>("SELECT content_revision, review_revision FROM bill_deletion_requests WHERE bill_id = ?").get(input.billId);
       if (existing) return existing.content_revision === input.expectedContentRevision && existing.review_revision === input.expectedReviewRevision ? { prepared: true as const } : { stale: true as const };
       const now = new Date().toISOString();
@@ -240,6 +280,7 @@ export class BillDatabase {
       const bill = this.sqlite.query<BillRow, [string]>(`SELECT bills.* FROM bills JOIN bill_deletion_requests request ON request.bill_id = bills.id
         WHERE bills.id = ? AND bills.content_revision = request.content_revision AND bills.review_revision = request.review_revision`).get(billId);
       if (!bill) return false;
+      if (this.sqlite.query<{ value: number }, [string, string]>("SELECT 1 AS value FROM invoice_dedup_decisions WHERE owner_id = ? AND bill_id != ? LIMIT 1").get(billId, billId)) return false;
       const batchItemId = bill.batch_item_id;
       const batchId = batchItemId ? this.sqlite.query<{ batch_id: string }, [string]>("SELECT batch_id FROM admin_upload_batch_items WHERE id = ?").get(batchItemId)?.batch_id ?? null : null;
       this.sqlite.query("UPDATE extractions SET selected_invocation_id = NULL WHERE bill_id = ?").run(billId);
@@ -260,6 +301,8 @@ export class BillDatabase {
         this.sqlite.query("UPDATE admin_upload_batch_items SET bill_id = NULL WHERE id = ?").run(batchItemId);
       }
       this.sqlite.query("DELETE FROM bill_deletion_requests WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM invoice_dedup_decisions WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM invoice_dedup_owners WHERE bill_id = ?").run(billId);
       this.sqlite.query("DELETE FROM bills WHERE id = ?").run(billId);
       if (batchItemId) this.sqlite.query("DELETE FROM admin_upload_batch_items WHERE id = ?").run(batchItemId);
       if (batchId) {
@@ -373,6 +416,9 @@ export class BillDatabase {
       const contentRevision = bill.content_revision + 1;
       if (input.classification === "not_invoice") this.sqlite.query("UPDATE bills SET classification = ?, status = 'failed', manual_review_required = 1, content_revision = ?, updated_at = ? WHERE id = ?").run(input.classification, contentRevision, now, input.billId);
       else this.sqlite.query("UPDATE bills SET classification = ?, content_revision = ?, updated_at = ? WHERE id = ?").run(input.classification, contentRevision, now, input.billId);
+      if (input.classification === "not_invoice" && bill.invoice_dedup_required === 1 && !this.getInvoiceDedupOwner(input.billId)) {
+        this.sqlite.query("INSERT INTO invoice_dedup_decisions (bill_id, owner_id, decided_at) VALUES (?, ?, ?)").run(input.billId, input.billId, now);
+      }
       this.sqlite.query("INSERT INTO bill_classification_events (id, bill_id, from_classification, to_classification, actor, reason, content_revision, review_revision, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(randomUUID(), input.billId, bill.classification, input.classification, input.actor, input.reason ?? null, contentRevision, bill.review_revision, now);
       if (bill.batch_item_id) {
         if (input.classification === "not_invoice") {
@@ -388,11 +434,11 @@ export class BillDatabase {
   /** Read-only canonical dashboard totals. Bill and background-job failures are distinct. */
   getDashboardMetrics(): DashboardMetrics {
     const row = this.sqlite.query<DashboardMetricsRow, []>(`SELECT
-      (SELECT COUNT(*) FROM bills) AS received_bills,
-      (SELECT COUNT(*) FROM bills WHERE status = 'approved') AS approved_bills,
-      (SELECT COUNT(*) FROM bills WHERE status = 'failed') AS failed_bills,
-      (SELECT COUNT(*) FROM jobs WHERE state = 'retryable_failure') AS retryable_jobs,
-      (SELECT COUNT(*) FROM jobs WHERE state = 'permanent_failure') AS permanent_failure_jobs`).get();
+      (SELECT COUNT(*) FROM bills b WHERE NOT EXISTS (SELECT 1 FROM invoice_dedup_decisions d WHERE d.bill_id = b.id AND d.owner_id != b.id)) AS received_bills,
+      (SELECT COUNT(*) FROM bills b WHERE b.status = 'approved' AND NOT EXISTS (SELECT 1 FROM invoice_dedup_decisions d WHERE d.bill_id = b.id AND d.owner_id != b.id)) AS approved_bills,
+      (SELECT COUNT(*) FROM bills b WHERE b.status = 'failed' AND NOT EXISTS (SELECT 1 FROM invoice_dedup_decisions d WHERE d.bill_id = b.id AND d.owner_id != b.id)) AS failed_bills,
+      (SELECT COUNT(*) FROM jobs j WHERE j.state = 'retryable_failure' AND NOT EXISTS (SELECT 1 FROM invoice_dedup_decisions d WHERE d.bill_id = j.bill_id AND d.owner_id != j.bill_id)) AS retryable_jobs,
+      (SELECT COUNT(*) FROM jobs j WHERE j.state = 'permanent_failure' AND NOT EXISTS (SELECT 1 FROM invoice_dedup_decisions d WHERE d.bill_id = j.bill_id AND d.owner_id != j.bill_id)) AS permanent_failure_jobs`).get();
     if (!row) throw new Error("Dashboard metrics query returned no row");
     return {
       receivedBills: row.received_bills,
@@ -526,14 +572,15 @@ export class BillDatabase {
       LEFT JOIN admin_upload_batch_items item ON item.id = b.batch_item_id
       LEFT JOIN effective_bill_data effective ON effective.bill_id = b.id
       LEFT JOIN extractions extraction ON extraction.bill_id = b.id
-      WHERE b.status = 'approved' AND b.classification = 'invoice'
+       WHERE b.status = 'approved' AND b.classification = 'invoice'
+         AND NOT EXISTS (SELECT 1 FROM invoice_dedup_decisions d WHERE d.bill_id = b.id AND d.owner_id != b.id)
         AND (b.source != 'admin_upload' OR item.state = 'complete')
         AND COALESCE(effective.normalized_json, extraction.normalized_json) IS NOT NULL
       ORDER BY b.received_at, b.id`).all().map((row) => ({ receivedAt: row.received_at, senderId: row.source === "admin_upload" ? null : row.source_sender_id, extraction: JSON.parse(row.normalized_json) as ExtractedBill }));
   }
 
   listReviewBills(filters: ReviewQueueFilters = {}): ReviewQueueBill[] {
-    const where: string[] = [];
+    const where: string[] = ["NOT EXISTS (SELECT 1 FROM invoice_dedup_decisions d WHERE d.bill_id = b.id AND d.owner_id != b.id)"];
     const values: string[] = [];
     if (filters.source) { where.push("b.source = ?"); values.push(filters.source); }
     if (filters.batchId) { where.push("item.batch_id = ?"); values.push(filters.batchId); }
@@ -552,6 +599,28 @@ export class BillDatabase {
     return this.sqlite.query<ReviewEventRow, [string]>("SELECT * FROM review_events WHERE bill_id = ? ORDER BY created_at, rowid").all(billId).map((row) => ({ id: row.id, billId: row.bill_id, reviewerId: row.reviewer_id, action: row.action, previousValues: row.previous_values, correctedValues: row.corrected_values, reason: row.reason, note: row.note, createdAt: row.created_at }));
   }
 
+  /** Called inside the reviewer transaction, before changing effective data or approval. */
+  private approveCorrectedIdentity(billId: string, corrected: ExtractedBill, now: string): boolean {
+    const previous = this.sqlite.query<{ invoice_number: string | null; invoice_date: string | null; owner_id: string }, [string]>("SELECT invoice_number, invoice_date, owner_id FROM invoice_dedup_decisions WHERE bill_id = ?").get(billId);
+    if (previous && previous.owner_id !== billId) return false;
+    const number = corrected.invoiceNumber?.trim() || null;
+    const date = corrected.invoiceDate?.trim() || null;
+    const competing = number && date ? this.findInvoiceOwner(number, date) : null;
+    if (competing && competing !== billId) return false;
+    if (previous && (previous.invoice_number !== (number && date ? number : null) || previous.invoice_date !== (number && date ? date : null))) {
+      // A linked owner cannot discard the identity its duplicates point to.
+      if (this.sqlite.query<{ value: number }, [string, string]>("SELECT 1 AS value FROM invoice_dedup_decisions WHERE owner_id = ? AND bill_id != ? LIMIT 1").get(billId, billId)) return false;
+      this.sqlite.query("DELETE FROM invoice_dedup_decisions WHERE bill_id = ?").run(billId);
+      this.sqlite.query("DELETE FROM invoice_dedup_owners WHERE bill_id = ?").run(billId);
+    }
+    return this.decideInvoiceIdentity(billId, corrected, now) === billId;
+  }
+
+  private hasUnsettledExtraction(billId: string): boolean {
+    return Boolean(this.sqlite.query<{ value: number }, [string]>(`SELECT 1 AS value FROM jobs WHERE bill_id = ? AND type = 'extract'
+      AND state IN ('pending','running','retryable_failure') LIMIT 1`).get(billId));
+  }
+
   /** Reviewer mutation is one SQLite transaction. A stale/replayed form changes nothing. */
   submitReview(input: ReviewSubmission, factualIssues: Array<Omit<ValidationIssue, "id" | "billId" | "createdAt">>): boolean {
     const now = new Date().toISOString();
@@ -560,6 +629,7 @@ export class BillDatabase {
       if (!bill) return false;
       // Reject a crafted approval before any effective-data, audit, issue, or revision mutation.
       if (input.action === "approve" && bill.classification === "not_invoice") return false;
+      if (input.action === "approve" && bill.invoice_dedup_required === 1 && (this.hasUnsettledExtraction(bill.id) || !this.approveCorrectedIdentity(bill.id, input.corrected, now))) return false;
       const original = this.getEffectiveExtraction(input.billId);
       const nextContent = bill.content_revision + 1;
       const nextReview = bill.review_revision + 1;
@@ -632,7 +702,9 @@ export class BillDatabase {
   persistDriveArchive(input: { billId: string; jobId: string; leaseToken: string; contentSha256: string; fileId: string; webLink: string }): boolean {
     const now = new Date().toISOString();
     return this.sqlite.transaction(() => {
-      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
+      if (!this.isDriveArchiveAllowed(input.billId) || !this.sqlite.query<{ value: number }, [string, string, string, string]>(`SELECT 1 AS value FROM jobs
+        WHERE id = ? AND bill_id = ? AND type = 'archive_to_drive' AND state = 'running'
+          AND lease_token = ? AND lease_expires_at > ?`).get(input.jobId, input.billId, input.leaseToken, now)) return false;
       const bill = this.sqlite.query<BillRow, [string, string]>("SELECT * FROM bills WHERE id = ? AND content_sha256 = ?").get(input.billId, input.contentSha256);
       if (!bill) return false;
       const metadata = JSON.stringify({ billId: input.billId, contentSha256: input.contentSha256 });
@@ -670,23 +742,36 @@ export class BillDatabase {
     return this.sqlite.transaction(() => {
       const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = bills.id)").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
       // A human workflow is sticky: only approveReviewCorrection may approve any review revision.
-      if (!current || (current.classification === "not_invoice" && input.decision === "approved") || ((current.review_revision > 0 || current.manual_review_required === 1) && input.decision === "approved")) return false;
+      if (!current || (current.classification === "not_invoice" && input.decision === "approved") || (current.review_revision > 0 && current.status === "approved")) return false;
+      const normalized = this.getExtraction(input.billId)?.normalized;
+      if (current.invoice_dedup_required === 1 && !normalized) return false;
+      const owner = current.invoice_dedup_required === 1 ? this.decideInvoiceIdentity(input.billId, normalized!, now) : input.billId;
+      const duplicate = owner !== input.billId;
       this.sqlite.query("DELETE FROM validation_issues WHERE bill_id = ?").run(input.billId);
       const insertIssue = this.sqlite.query("INSERT INTO validation_issues (id, bill_id, field, code, message, severity, observed_value, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
       for (const item of input.issues) insertIssue.run(randomUUID(), input.billId, item.field, item.code, item.message, item.severity, item.observedValue, now);
-      this.sqlite.query("UPDATE bills SET status = ?, updated_at = ? WHERE id = ?").run(input.decision, now, input.billId);
-      if (input.decision === "approved" && current.batch_item_id) {
+      if (duplicate) insertIssue.run(randomUUID(), input.billId, "invoiceNumber", "duplicate_invoice", "Invoice number and date already belong to another bill.", "blocking", JSON.stringify({ ownerId: owner }), now);
+      const decision = current.review_revision > 0 || current.manual_review_required === 1 ? "needs_review" : input.decision;
+      this.sqlite.query("UPDATE bills SET status = ?, updated_at = ? WHERE id = ?").run(duplicate ? "failed" : decision, now, input.billId);
+      if (duplicate) this.suppressDuplicateJobs(input.billId, now);
+      if (duplicate && current.batch_item_id) {
+        this.sqlite.query("UPDATE admin_upload_batch_items SET state = 'rejected', error_code = 'duplicate_invoice', updated_at = ? WHERE id = ? AND state = 'processing'").run(now, current.batch_item_id);
+        this.completeAdminUploadBatchIfTerminal(current.batch_item_id, now);
+      }
+      if (!duplicate && decision === "approved" && current.batch_item_id) {
         this.sqlite.query("UPDATE admin_upload_batch_items SET state = 'complete', updated_at = ? WHERE id = ? AND state = 'processing'").run(now, current.batch_item_id);
         this.completeAdminUploadBatchIfTerminal(current.batch_item_id, now);
       }
-      this.ensureArchiveJob(input.billId, now);
-      if (input.decision === "approved") this.activateProjectJob(input.billId, input.expectedContentRevision, now);
+      if (!duplicate) this.ensureArchiveJob(input.billId, now);
+      if (!duplicate && decision === "approved") this.activateProjectJob(input.billId, input.expectedContentRevision, now);
       else this.invalidatePendingProjectJobs(input.billId, now);
       return true;
     })();
   }
 
   private ensureArchiveJob(billId: string, now: string): void {
+    const owner = this.getInvoiceDedupOwner(billId);
+    if (owner !== null && owner !== billId) return;
     const existing = this.sqlite.query<JobRow, [string, JobType]>("SELECT * FROM jobs WHERE bill_id = ? AND type = ?").get(billId, "archive_to_drive");
     if (existing) return;
     const id = randomUUID();
@@ -720,6 +805,11 @@ export class BillDatabase {
     return this.sqlite.transaction(() => {
       const current = this.sqlite.query<BillRow, [string, number, number]>("SELECT * FROM bills WHERE id = ? AND content_revision = ? AND review_revision = ? AND manual_review_required = 1 AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = bills.id)").get(input.billId, input.expectedContentRevision, input.expectedReviewRevision);
       if (!current || current.classification === "not_invoice") return false;
+      if (current.invoice_dedup_required === 1) {
+        if (this.hasUnsettledExtraction(input.billId)) return false;
+        const effective = this.getEffectiveExtraction(input.billId);
+        if (!effective || !this.approveCorrectedIdentity(input.billId, effective, now)) return false;
+      }
       this.sqlite.query("UPDATE bills SET status = 'approved', manual_review_required = 0, updated_at = ? WHERE id = ?").run(now, input.billId);
       this.sqlite.query("INSERT INTO review_events (id, bill_id, reviewer_id, action, created_at) VALUES (?, ?, ?, ?, ?)").run(randomUUID(), input.billId, input.reviewerId, input.action ?? "approved", now);
       if (current.batch_item_id) {
@@ -742,7 +832,8 @@ export class BillDatabase {
 
   /** Used by Sheets handlers immediately before their provider effect. */
   isApprovedAtRevision(billId: string, revision: number | null): boolean {
-    return revision !== null && Boolean(this.sqlite.query<{ value: number }, [string, number]>("SELECT 1 AS value FROM bills WHERE id = ? AND status = 'approved' AND classification != 'not_invoice' AND content_revision = ?").get(billId, revision)?.value);
+    return revision !== null && Boolean(this.sqlite.query<{ value: number }, [string, number]>(`SELECT 1 AS value FROM bills WHERE id = ? AND status = 'approved' AND classification != 'not_invoice' AND content_revision = ?
+      AND (invoice_dedup_required = 0 OR EXISTS (SELECT 1 FROM invoice_dedup_decisions WHERE bill_id = bills.id AND owner_id = bills.id))`).get(billId, revision)?.value);
   }
   private isProjectableInvoice(billId: string): boolean { return Boolean(this.sqlite.query<{ value: number }, [string]>("SELECT 1 AS value FROM bills WHERE id = ? AND classification != 'not_invoice'").get(billId)?.value); }
   isUnapprovedAtReviewRevision(billId: string, revision: number | null): boolean {
@@ -894,9 +985,9 @@ export class BillDatabase {
     const now = new Date().toISOString();
     return this.sqlite.transaction(() => {
       const job = this.getJob(id);
-      if (!job || (job.state !== "retryable_failure" && (!includePermanent || job.state !== "permanent_failure")) || job.lastError === "validation_invalidated") return false;
+      if (!job || (job.state !== "retryable_failure" && (!includePermanent || job.state !== "permanent_failure")) || job.lastError === "validation_invalidated" || job.lastError === "duplicate_invoice") return false;
       const bill = this.getBill(job.billId);
-      if (!bill || (job.type === "project_to_sheet" && !this.isApprovedAtRevision(job.billId, job.expectedRevision)) || (job.type === "sync_review_correction" && bill.status !== "failed" && bill.status !== "needs_review" && bill.status !== "approved")) return false;
+      if (!bill || (job.type === "archive_to_drive" && !this.isDriveArchiveAllowed(job.billId)) || (job.type === "project_to_sheet" && !this.isApprovedAtRevision(job.billId, job.expectedRevision)) || (job.type === "sync_review_correction" && bill.status !== "failed" && bill.status !== "needs_review" && bill.status !== "approved")) return false;
       const result = this.sqlite.query("UPDATE jobs SET state = 'pending', available_at = ?, lease_token = NULL, lease_expires_at = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ? AND state IN ('retryable_failure', 'permanent_failure')").run(now, now, id);
       if (result.changes === 1) recordTransition(this.sqlite, id, job.state, "pending", "operator_replay", now);
       return result.changes === 1;
@@ -923,7 +1014,9 @@ export class BillDatabase {
     const retriesReady = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE state = 'retryable_failure' AND available_at <= ?");
     const releaseRetry = this.sqlite.query("UPDATE jobs SET state = 'pending', updated_at = ? WHERE id = ? AND state = 'retryable_failure'");
     const allowedTypes = supportedTypes.map((type) => `'${type}'`).join(",");
-    const claim = this.sqlite.query<JobRow, [string, string, string, string, string, string]>(`UPDATE jobs SET state = 'running', attempts = attempts + 1, lease_token = ?, lease_expires_at = ?, claimed_by = ?, claimed_at = ?, updated_at = ? WHERE id = (SELECT id FROM jobs WHERE state = 'pending' AND available_at <= ? AND type IN (${allowedTypes}) AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = jobs.bill_id) ORDER BY available_at, created_at LIMIT 1) AND state = 'pending' RETURNING *`);
+    const claim = this.sqlite.query<JobRow, [string, string, string, string, string, string]>(`UPDATE jobs SET state = 'running', attempts = attempts + 1, lease_token = ?, lease_expires_at = ?, claimed_by = ?, claimed_at = ?, updated_at = ? WHERE id = (SELECT id FROM jobs WHERE state = 'pending' AND available_at <= ? AND type IN (${allowedTypes}) AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = jobs.bill_id)
+      AND (type != 'archive_to_drive' OR EXISTS (SELECT 1 FROM bills b WHERE b.id = jobs.bill_id AND (b.invoice_dedup_required = 0 OR EXISTS (SELECT 1 FROM invoice_dedup_decisions d WHERE d.bill_id = b.id AND d.owner_id = b.id))))
+      ORDER BY available_at, created_at LIMIT 1) AND state = 'pending' RETURNING *`);
     return this.sqlite.transaction(() => {
       for (const expired of expiredLeases.all(nowIso)) {
         const transition = retryTransition(expired.attempts, policy, now);

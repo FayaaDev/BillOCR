@@ -110,6 +110,7 @@ test("normal worker validation completion atomically completes its terminal admi
   const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 0, entryPath: "invoice.png" }).item;
   expect(database.setAdminUploadBatchState(batch.id, "processing")).toBe(true);
   const bill = database.createBillWithInitialJobs({ whatsappMessageId: "admin-worker", whatsappGroupId: "admin-upload", whatsappSenderId: "admin-upload", attachmentIndex: 0, receivedAt: new Date().toISOString(), mimeType: "image/png", originalPath: "/file", contentSha256: "c".repeat(64), source: "admin_upload", sourceIdentity: "admin-worker", extractionPolicy: "azure_only", classification: "invoice", batchItemId: item.id }, [{ type: "extract", idempotencyKey: "extract:admin-worker" }]).bill;
+  database.sqlite.query("UPDATE bills SET invoice_dedup_required = 0 WHERE id = ?").run(bill.id);
   const worker = new JobWorker(database, { extract: async () => { expect(database.persistValidationDecision({ billId: bill.id, expectedContentRevision: 0, expectedReviewRevision: 0, decision: "approved", issues: [] })).toBe(true); } }, policy, "worker", createLogger("error"));
   expect(await worker.runOnce()).toBe(true);
   expect(database.getBill(bill.id)?.status).toBe("approved");

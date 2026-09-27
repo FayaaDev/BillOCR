@@ -242,32 +242,48 @@ export function createDriveArchiveHandler(database: BillDatabase, drive: DriveAd
     try {
       const bill = database.getBill(job.billId);
       if (!bill) throw new GooglePermanentError("Google input failure: bill missing");
-      context.assertLease();
+      const assertArchivable = (): void => {
+        context.assertLease();
+        if (!database.isDriveArchiveAllowed(bill.id)) throw new GooglePermanentError("Google input failure: invoice archival suppressed");
+      };
+      assertArchivable();
       const persisted = database.getProjectionMetadata("drive", bill.id);
       if (persisted?.externalId && persisted.externalUrl) return;
       const existing = await drive.findFilesByBillId(bill.id);
+      assertArchivable();
       const match = existing.find((file) => file.appProperties.contentSha256 === bill.contentSha256);
       if (existing.some((file) => file.appProperties.contentSha256 !== bill.contentSha256)) throw new GooglePermanentError("Google conflict: bill ID belongs to a different content hash");
       let archived = match;
       if (!archived) {
         const [year, month] = monthPath(bill.receivedAt);
         const bills = await ensureFolder(database, drive, config.driveRootId, config.driveRootId, "Bills", "Bills");
+        assertArchivable();
         const yearFolder = await ensureFolder(database, drive, config.driveRootId, bills, `Bills/${year}`, year);
+        assertArchivable();
         const monthFolder = await ensureFolder(database, drive, config.driveRootId, yearFolder, `Bills/${year}/${month}`, month);
-        context.assertLease();
+        assertArchivable();
          const bytes = (await readVerifiedOriginal({ path: bill.originalPath, root: config.originalsRoot ?? dirname(bill.originalPath), maxBytes: config.maxOriginalBytes ?? 20 * 1024 * 1024, sha256: bill.contentSha256, mimeType: bill.mimeType, requireMagic: true })).bytes;
         if (drive.generateId && drive.getFile && drive.uploadOriginalWithId) {
           const legacyKey = `file:${bill.id}`;
           const legacy = database.getDriveReservation(legacyKey);
           const key = legacy?.parent_id === monthFolder && legacy.content_sha256 === bill.contentSha256 ? legacyKey : `file:${config.driveRootId}:${bill.id}`;
           let reservation = database.getDriveReservation(key);
-          if (!reservation) reservation = database.reserveDriveId({ key, kind: "file", parentId: monthFolder, logicalPath: key, generatedId: await drive.generateId(), billId: bill.id, contentSha256: bill.contentSha256 });
+          if (!reservation) {
+            const generatedId = await drive.generateId();
+            assertArchivable();
+            reservation = database.reserveDriveId({ key, kind: "file", parentId: monthFolder, logicalPath: key, generatedId, billId: bill.id, contentSha256: bill.contentSha256 });
+          }
           archived = (await drive.getFile(reservation.drive_id)) ?? undefined;
+          assertArchivable();
           if (!archived) archived = await drive.uploadOriginalWithId({ id: reservation.drive_id, parentId: monthFolder, name: `${bill.id}-${sanitizeFilename(bill.originalFilename)}`, mimeType: bill.mimeType, bytes, billId: bill.id, contentSha256: bill.contentSha256 });
+          assertArchivable();
           database.confirmDriveReservation(reservation.reservation_key);
-        } else archived = await drive.uploadOriginal({ parentId: monthFolder, name: `${bill.id}-${sanitizeFilename(bill.originalFilename)}`, mimeType: bill.mimeType, bytes, billId: bill.id, contentSha256: bill.contentSha256 });
+        } else {
+          assertArchivable();
+          archived = await drive.uploadOriginal({ parentId: monthFolder, name: `${bill.id}-${sanitizeFilename(bill.originalFilename)}`, mimeType: bill.mimeType, bytes, billId: bill.id, contentSha256: bill.contentSha256 });
+        }
       }
-      context.assertLease();
+      assertArchivable();
       if (!database.persistDriveArchive({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, contentSha256: bill.contentSha256, fileId: archived.id, webLink: archived.webLink })) throw new Error("Job lease is no longer owned");
     } catch (error) { throw googleFailure(error); }
   };

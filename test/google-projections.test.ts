@@ -24,7 +24,10 @@ async function serviceAccountJson(): Promise<string> {
 }
 
 function bill(jobType: "archive_to_drive" | "project_to_sheet" = "archive_to_drive") {
-  return database.createBillWithInitialJobs({ id: "bill-immutable", whatsappMessageId: "message", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: "2026-08-15T12:00:00.000Z", originalFilename: "../evil:=invoice?.pdf", mimeType: "application/pdf", originalPath: join(directory, "source.pdf"), contentSha256: createHash("sha256").update(original).digest("hex") }, [{ type: jobType, idempotencyKey: `${jobType}:bill-immutable` }]).bill;
+  const item = database.createBillWithInitialJobs({ id: "bill-immutable", whatsappMessageId: "message", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: "2026-08-15T12:00:00.000Z", originalFilename: "../evil:=invoice?.pdf", mimeType: "application/pdf", originalPath: join(directory, "source.pdf"), contentSha256: createHash("sha256").update(original).digest("hex") }, [{ type: jobType, idempotencyKey: `${jobType}:bill-immutable` }]).bill;
+  // These projection fixtures model bills that predate the OCR identity gate.
+  database.sqlite.query("UPDATE bills SET invoice_dedup_required = 0 WHERE id = ?").run(item.id);
+  return item;
 }
 function approvedBill() {
   const item = bill("project_to_sheet");
