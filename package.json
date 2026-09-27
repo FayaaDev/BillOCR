@@ -13,8 +13,7 @@
     "ops": "bun run src/ops.ts",
     "migrate": "bun run src/ops.ts migrate",
     "whatsapp:qr": "bun run src/render-whatsapp-qr.ts",
-    "google:oauth": "bun run src/google-oauth.ts",
-    "evaluate:approved-examples": "bun run src/evaluate-approved-examples.ts"
+    "google:oauth": "bun run src/google-oauth.ts"
   },
   "devDependencies": {
     "@shadcn/lint": "^0.2.0",
