@@ -56,7 +56,7 @@ function recordTransition(db: Database, jobId: string, fromState: JobState | nul
 }
 
 export interface RetryPolicy { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number; }
-export interface CreateBillResult { bill: Bill; created: boolean; }
+export interface CreateBillResult { bill: Bill; created: boolean; duplicateContent: boolean; }
 export interface ReviewSubmission { billId: string; reviewerId: string; action: "approve" | "reject"; reason: string | null; note: string | null; expectedContentRevision: number; expectedReviewRevision: number; corrected: ExtractedBill; }
 export interface CompletedInvoiceExportRecord { receivedAt: string; senderId: string | null; extraction: ExtractedBill; }
 export interface ReviewQueueFilters { source?: BillSource; batchId?: string; status?: "complete" | "not_invoice" | Bill["status"]; }
@@ -108,8 +108,9 @@ export class BillDatabase {
     if (source !== "admin_upload" && input.batchItemId) throw new Error("Transport bill cannot link an admin-upload batch item");
     if (source === "admin_upload" && !input.batchItemId) throw new Error("Admin-upload bill requires a batch item");
     if (classification === "not_invoice" && initialJobs.some((job) => job.type === "project_to_sheet")) throw new Error("NotInvoice bills cannot create sheet projection jobs");
-    const insertBill = this.sqlite.query(`INSERT INTO bills (id, source_message_id, source_chat_id, source_sender_id, attachment_index, received_at, caption, original_filename, source_filename, filename_key, mime_type, original_path, content_sha256, status, source, source_identity, extraction_policy, classification, batch_item_id, invoice_dedup_required, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, 1, ?, ?) ON CONFLICT DO NOTHING`);
+    const insertBill = this.sqlite.query(`INSERT INTO bills (id, source_message_id, source_chat_id, source_sender_id, attachment_index, received_at, caption, original_filename, source_filename, filename_key, mime_type, original_path, content_sha256, dedup_sha256, status, source, source_identity, extraction_policy, classification, batch_item_id, invoice_dedup_required, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, 1, ?, ?) ON CONFLICT DO NOTHING`);
     const bySource = this.sqlite.query<BillRow, [BillSource, string]>("SELECT * FROM bills WHERE source = ? AND source_identity = ?");
+    const byHash = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE dedup_sha256 = ?");
     const insertJob = this.sqlite.query(`INSERT INTO jobs (id, bill_id, type, state, idempotency_key, attempts, available_at, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, 0, ?, ?, ?)`);
     const jobByKey = this.sqlite.query<{ bill_id: string }, [string]>("SELECT bill_id FROM jobs WHERE idempotency_key = ?");
     return this.sqlite.transaction(() => {
@@ -124,11 +125,16 @@ export class BillDatabase {
           JOIN admin_upload_batches batch ON batch.id = item.batch_id WHERE item.id = ? AND item.bill_id IS NULL AND item.state = 'queued'`).get(input.batchItemId);
         if (!compatible) throw new Error("Admin-upload batch item is missing or already linked");
       }
-      const result = insertBill.run(billId, sourceMessageId, sourceChatId, sourceSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, sourceFilename, filenameKey, input.mimeType, input.originalPath, input.contentSha256, source, sourceIdentity, extractionPolicy, classification, input.batchItemId ?? null, now, now);
+      if (!existingBill) {
+        const duplicate = byHash.get(input.contentSha256);
+        if (duplicate) return { bill: toBill(duplicate), created: false, duplicateContent: true };
+      }
+      const result = insertBill.run(billId, sourceMessageId, sourceChatId, sourceSenderId, input.attachmentIndex, input.receivedAt, input.caption ?? null, input.originalFilename ?? null, sourceFilename, filenameKey, input.mimeType, input.originalPath, input.contentSha256, input.contentSha256, source, sourceIdentity, extractionPolicy, classification, input.batchItemId ?? null, now, now);
       const resolvedBySource = existingBill ?? bySource.get(source, sourceIdentity);
-      const row = resolvedBySource;
+      const row = resolvedBySource ?? byHash.get(input.contentSha256);
       if (!row) throw new Error("Bill source identity conflicts with another bill");
       const created = result.changes === 1;
+      if (!created && !resolvedBySource) return { bill: toBill(row), created: false, duplicateContent: true };
       for (const job of initialJobs) {
         const existing = jobByKey.get(job.idempotencyKey);
         if (existing && existing.bill_id !== row.id) throw new Error(`Required job idempotency key belongs to another bill: ${job.idempotencyKey}`);
@@ -144,13 +150,22 @@ export class BillDatabase {
           WHERE id = ? AND bill_id IS NULL AND state = 'queued' AND EXISTS (SELECT 1 FROM admin_upload_batches WHERE id = admin_upload_batch_items.batch_id)`).run(row.id, now, input.batchItemId);
         if (linked.changes !== 1) throw new Error("Admin-upload batch item is missing or already linked");
       }
-      return { bill: toBill(row), created };
+      return { bill: toBill(row), created, duplicateContent: false };
     })();
   }
 
   getBillBySourceIdentity(source: BillSource, sourceIdentity: string): Bill | null {
     const row = this.sqlite.query<BillRow, [BillSource, string]>("SELECT * FROM bills WHERE source = ? AND source_identity = ?").get(source, sourceIdentity);
     return row ? toBill(row) : null;
+  }
+
+  getBillByContentSha256(contentSha256: string): Bill | null {
+    const row = this.sqlite.query<BillRow, [string]>("SELECT * FROM bills WHERE dedup_sha256 = ?").get(contentSha256);
+    return row ? toBill(row) : null;
+  }
+
+  hasBillOriginalPath(originalPath: string): boolean {
+    return Boolean(this.sqlite.query<{ value: number }, [string]>("SELECT 1 AS value FROM bills WHERE original_path = ?").get(originalPath)?.value);
   }
 
   getTelegramPollingCursor(): number | null {

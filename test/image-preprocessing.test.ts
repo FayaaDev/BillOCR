@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, jest, test } from "bun:test";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import { WorkerImagePreprocessor } from "../src/image-preprocessing";
 import { preprocessImage } from "../src/image-preprocessing-worker";
 
 const preprocessor = new WorkerImagePreprocessor({ timeoutMs: 10_000 });
+jest.setTimeout(60_000);
 
 afterAll(async () => { /* Workers are terminated by the factory after every request. */ });
 

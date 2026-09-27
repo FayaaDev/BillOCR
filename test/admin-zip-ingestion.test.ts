@@ -65,25 +65,25 @@ describe("admin ZIP ingestion", () => {
     expect(itemRows().map((item) => item.state)).toEqual(["processing", "processing"]);
   });
 
-  test("accepts a ZIP entry with the same bytes as another channel pending OCR identity", async () => {
+  test("terminally rejects a ZIP entry whose bytes duplicate an existing bill", async () => {
     const durable = new (await import("../src/durable-attachment-ingestion")).DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["tg"], originalsDir: join(directory, "originals"), database, logger: silentLogger });
     const existing = (await durable.ingest({ id: "tg-existing", chatId: "tg", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ kind: "document", mimeType: "application/pdf", filename: "Receipt.pdf", download: async () => pdf("first") }] })).bills[0]!;
     const result = await service.ingest({ sourceId: "duplicate-name", originalFilename: "duplicates.zip", bytes: zip([{ name: "nested/Other.pdf", bytes: pdf("first") }]) });
-    expect(result.counts).toEqual({ accepted: 1, rejected: 0, ignored: 0 });
-    expect(database.getAdminUploadBatchStatus(result.batch.id)).toMatchObject({ batch: { state: "processing" }, counts: { queued: 0, processing: 1, rejected: 0 }, items: [{ entryPath: "nested/Other.pdf", state: "processing" }] });
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(2);
+    expect(result.counts).toEqual({ accepted: 0, rejected: 1, ignored: 0 });
+    expect(database.getAdminUploadBatchStatus(result.batch.id)).toMatchObject({ batch: { state: "completed" }, counts: { queued: 0, processing: 0, rejected: 1 }, items: [{ entryPath: "nested/Other.pdf", state: "rejected", errorCode: "duplicate_content", billId: null }] });
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
     expect(database.countJobsForBill(existing.id)).toBe(2);
   });
 
-  test("links an existing verified ZIP original even when another source shares its hash", async () => {
+  test("cleans a matching ZIP orphan when another source already owns its hash", async () => {
     const batch = database.createAdminUploadBatch({ id: "orphan-batch", idempotencyKey: "admin-zip:orphan-cleanup", originalFilename: "orphan.zip" }).batch;
     const bytes = pdf("orphan"); const hash = createHash("sha256").update(bytes).digest("hex");
     database.createBillWithInitialJobs({ source: "telegram", sourceMessageId: "existing", sourceChatId: "tg", sourceSenderId: "sender", attachmentIndex: 0, receivedAt: batch.createdAt, sourceFilename: "Receipt.pdf", originalFilename: "Receipt.pdf", mimeType: "application/pdf", originalPath: join(directory, "existing.pdf"), contentSha256: hash }, [{ type: "extract", idempotencyKey: "existing-receipt" }]);
     const orphan = join(directory, "originals", `admin-${batch.id}-0-${hash.slice(0, 16)}.pdf`); mkdirSync(join(directory, "originals"), { recursive: true }); writeFileSync(orphan, bytes);
     const result = await service.ingest({ sourceId: "orphan-cleanup", originalFilename: "orphan.zip", bytes: zip([{ name: "nested/Receipt.PDF", bytes }]) });
-    expect(result.counts).toEqual({ accepted: 1, rejected: 0, ignored: 0 });
-    expect(existsSync(orphan)).toBe(true);
-    expect(database.getAdminUploadBatchStatus(batch.id)?.items).toEqual([expect.objectContaining({ state: "processing", billId: expect.any(String) })]);
+    expect(result.counts).toEqual({ accepted: 0, rejected: 1, ignored: 0 });
+    expect(existsSync(orphan)).toBe(false);
+    expect(database.getAdminUploadBatchStatus(batch.id)?.items).toEqual([expect.objectContaining({ state: "rejected", errorCode: "duplicate_content", billId: null })]);
   });
 
   test("records hostile entries, ignores junk, and accepts valid later entries", async () => {

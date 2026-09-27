@@ -21,7 +21,7 @@ describe("migrations", () => {
   test("apply on a fresh database and safely reapply", () => {
     database.close();
     const reopened = new BillDatabase(path);
-    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(22);
+    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(23);
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'validation_issues'").get()?.name).toBe("validation_issues");
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'extraction_invocations'").get()?.name).toBe("extraction_invocations");
     reopened.close();
@@ -36,7 +36,7 @@ describe("migrations", () => {
     expect(await first.exited).toBe(0);
     expect(await second.exited).toBe(0);
     database = new BillDatabase(path);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(22);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(23);
   });
 
   test("upgrades existing duplicate hashes without removing bills or blocking new deduplication", () => {
@@ -44,16 +44,17 @@ describe("migrations", () => {
     const second = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "older-copy", contentSha256: "c".repeat(64) }, []).bill;
     database.close();
     const legacy = new SqliteDatabase(path, { strict: true });
-    legacy.exec("DROP TABLE invoice_dedup_decisions; DROP TABLE invoice_dedup_owners; DROP INDEX bills_content_sha256_idx; ALTER TABLE bills DROP COLUMN invoice_dedup_required; ALTER TABLE bills DROP COLUMN dedup_sha256; CREATE UNIQUE INDEX bills_filename_key_idx ON bills(filename_key COLLATE BINARY) WHERE filename_key IS NOT NULL; DELETE FROM schema_migrations WHERE version IN (19, 21)");
+    legacy.exec("DROP INDEX bills_dedup_sha256_idx; DELETE FROM schema_migrations WHERE version = 23");
     legacy.query("UPDATE bills SET content_sha256 = ? WHERE id = ?").run(first.contentSha256, second.id);
+    legacy.query("UPDATE bills SET dedup_sha256 = NULL WHERE id = ?").run(second.id);
     legacy.close();
     database = new BillDatabase(path);
     expect(database.getBill(first.id)).not.toBeNull();
     expect(database.getBill(second.id)).not.toBeNull();
     expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills WHERE dedup_sha256 IS NOT NULL").get()?.count).toBe(1);
     const duplicate = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "third-copy", contentSha256: first.contentSha256 }, []);
-    expect(duplicate).toMatchObject({ created: true });
-    expect(duplicate.bill.id).not.toBe(first.id);
+    expect(duplicate).toMatchObject({ created: false, duplicateContent: true });
+    expect(duplicate.bill.id).toBe(first.id);
   });
 
   test("upgrades a v9 database with existing extraction records without changing canonical data", () => {
@@ -99,7 +100,7 @@ describe("migrations", () => {
     database = new BillDatabase(path);
     expect(database.getExtraction("legacy-bill")).toMatchObject({ normalized: { vendorName: "Legacy" }, selectedProvider: null, fallbackStatus: null });
     expect(database.sqlite.query<{ provider: string }, [string]>("SELECT provider FROM extraction_attempts WHERE id = ?").get("legacy-attempt")?.provider).toBe("mistral");
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(22);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(23);
   });
 
   test("upgrades historical WhatsApp identity, jobs, foreign keys, and projections without loss", () => {
@@ -407,28 +408,29 @@ describe("canonical bill and jobs", () => {
     expect(database.countJobsForBill(first.bill.id)).toBe(2);
   });
 
-  test("keeps separate source deliveries even with identical content hashes", () => {
+  test("returns the canonical bill for a distinct source delivery with identical bytes", () => {
     const first = database.createBillWithInitialJobs({ ...input(), sourceFilename: "Receipt.pdf" }, jobs());
     database.sqlite.query("UPDATE bills SET status = 'failed' WHERE id = ?").run(first.bill.id);
     const secondConnection = new BillDatabase(path);
     const duplicate = secondConnection.createBillWithInitialJobs({ ...input(), whatsappMessageId: "message-2", attachmentIndex: 1, originalPath: "/durable/other.png", sourceFilename: "Other.PNG" }, [{ type: "extract", idempotencyKey: "extract:message-2:1" }]);
-    expect(duplicate).toMatchObject({ created: true });
-    expect(duplicate.bill.id).not.toBe(first.bill.id);
+    expect(duplicate).toMatchObject({ created: false, duplicateContent: true });
+    expect(duplicate.bill.id).toBe(first.bill.id);
     expect(database.countJobsForBill(first.bill.id)).toBe(2);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(2);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
     secondConnection.close();
   });
 
-  test("concurrent inserts of identical hashes from two channels keep both originals", async () => {
+  test("concurrent inserts of identical hashes from two channels retain one canonical bill", async () => {
     const other = new BillDatabase(path);
     try {
       const [first, second] = await Promise.all([
         Promise.resolve().then(() => database.createBillWithInitialJobs({ ...input(), source: "telegram" }, jobs())),
         Promise.resolve().then(() => other.createBillWithInitialJobs({ ...input(), source: "whatsapp", whatsappMessageId: "second", sourceFilename: "other.pdf" }, [{ type: "extract", idempotencyKey: "other-extract" }])),
       ]);
-      expect(first.bill.id).not.toBe(second.bill.id);
-      expect([first.created, second.created]).toEqual([true, true]);
-      expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(2);
+      expect(first.bill.id).toBe(second.bill.id);
+      expect([first.created, second.created].filter(Boolean)).toHaveLength(1);
+      expect([first.duplicateContent, second.duplicateContent].filter(Boolean)).toHaveLength(1);
+      expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
       expect(database.countJobsForBill(first.bill.id)).toBe(2);
     } finally { other.close(); }
   });

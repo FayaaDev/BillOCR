@@ -21,7 +21,7 @@ let db: BillDatabase;
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), "invoice-dedup-")); path = join(directory, "db.sqlite"); db = new BillDatabase(path); });
 afterEach(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
 
-function create(database: BillDatabase, id: string, hash = "a".repeat(64)) {
+function create(database: BillDatabase, id: string, hash = id.charCodeAt(0).toString(16).padStart(2, "0").repeat(32)) {
   return database.createBillWithInitialJobs({ id, source: "telegram", sourceMessageId: id, sourceChatId: "chat", sourceSenderId: "sender", attachmentIndex: 0,
     receivedAt: now, mimeType: "application/pdf", originalPath: join(directory, `${id}.pdf`), contentSha256: hash },
   [{ type: "extract", idempotencyKey: `extract:${id}` }, { type: "archive_to_drive", idempotencyKey: `archive:${id}` }]).bill;
@@ -35,8 +35,8 @@ function finish(database: BillDatabase, id: string, value: ExtractedBill): void 
   expect(database.completeJob(job!.id, job!.leaseToken)).toBe(true);
 }
 
-test("hashes, vendor and total do not determine identity; replay retains the first invoice owner and both originals", () => {
-  const first = create(db, "first"); const second = create(db, "second", first.contentSha256);
+test("vendor and total do not determine invoice identity; replay retains the first invoice owner and both originals", () => {
+  const first = create(db, "first"); const second = create(db, "second");
   expect(first.id).not.toBe(second.id);
   expect(db.claimNextJob("archiver", policy, new Date(), ["archive_to_drive"])).toBeNull();
   finish(db, first.id, extracted("INV-1"));
@@ -63,7 +63,7 @@ test("hashes, vendor and total do not determine identity; replay retains the fir
   expect(db.getJobTransitions(suppressed.id)).toHaveLength(2);
 });
 
-test("the same hash with another invoice number is approved; missing identity does not reserve a key", () => {
+test("different files with another invoice number are approved; missing identity does not reserve a key", () => {
   create(db, "one"); create(db, "two"); create(db, "unknown");
   finish(db, "one", extracted("A")); finish(db, "two", extracted("B")); finish(db, "unknown", extracted(null));
   expect(db.getBill("two")?.status).toBe("approved");
