@@ -21,7 +21,7 @@ describe("migrations", () => {
   test("apply on a fresh database and safely reapply", () => {
     database.close();
     const reopened = new BillDatabase(path);
-    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(20);
+    expect(reopened.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(22);
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'validation_issues'").get()?.name).toBe("validation_issues");
     expect(reopened.sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'extraction_invocations'").get()?.name).toBe("extraction_invocations");
     reopened.close();
@@ -36,7 +36,7 @@ describe("migrations", () => {
     expect(await first.exited).toBe(0);
     expect(await second.exited).toBe(0);
     database = new BillDatabase(path);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(20);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(22);
   });
 
   test("upgrades existing duplicate hashes without removing bills or blocking new deduplication", () => {
@@ -44,7 +44,7 @@ describe("migrations", () => {
     const second = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "older-copy", contentSha256: "c".repeat(64) }, []).bill;
     database.close();
     const legacy = new SqliteDatabase(path, { strict: true });
-    legacy.exec("DROP INDEX bills_dedup_sha256_idx; DROP INDEX bills_content_sha256_idx; ALTER TABLE bills DROP COLUMN dedup_sha256; CREATE UNIQUE INDEX bills_filename_key_idx ON bills(filename_key COLLATE BINARY) WHERE filename_key IS NOT NULL; DELETE FROM schema_migrations WHERE version = 19");
+    legacy.exec("DROP TABLE invoice_dedup_decisions; DROP TABLE invoice_dedup_owners; DROP INDEX bills_content_sha256_idx; ALTER TABLE bills DROP COLUMN invoice_dedup_required; ALTER TABLE bills DROP COLUMN dedup_sha256; CREATE UNIQUE INDEX bills_filename_key_idx ON bills(filename_key COLLATE BINARY) WHERE filename_key IS NOT NULL; DELETE FROM schema_migrations WHERE version IN (19, 21)");
     legacy.query("UPDATE bills SET content_sha256 = ? WHERE id = ?").run(first.contentSha256, second.id);
     legacy.close();
     database = new BillDatabase(path);
@@ -52,7 +52,8 @@ describe("migrations", () => {
     expect(database.getBill(second.id)).not.toBeNull();
     expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills WHERE dedup_sha256 IS NOT NULL").get()?.count).toBe(1);
     const duplicate = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "third-copy", contentSha256: first.contentSha256 }, []);
-    expect(duplicate).toMatchObject({ created: false, duplicateContent: true, bill: { id: [first, second].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0]!.id } });
+    expect(duplicate).toMatchObject({ created: true });
+    expect(duplicate.bill.id).not.toBe(first.id);
   });
 
   test("upgrades a v9 database with existing extraction records without changing canonical data", () => {
@@ -69,7 +70,10 @@ describe("migrations", () => {
         review_revision INTEGER NOT NULL DEFAULT 0, manual_review_required INTEGER NOT NULL DEFAULT 0,
         UNIQUE (whatsapp_message_id, attachment_index)
       );
-      CREATE TABLE jobs (id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id));
+       CREATE TABLE jobs (id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), type TEXT, state TEXT,
+         lease_token TEXT, lease_expires_at TEXT, claimed_by TEXT, claimed_at TEXT, last_error TEXT, updated_at TEXT);
+       CREATE TABLE job_transition_history (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), from_state TEXT,
+         to_state TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE extractions (
         id TEXT PRIMARY KEY, bill_id TEXT NOT NULL UNIQUE REFERENCES bills(id), schema_version TEXT NOT NULL,
         normalized_json TEXT, raw_provider_response TEXT, provider_model TEXT, prompt_schema_version TEXT,
@@ -95,7 +99,7 @@ describe("migrations", () => {
     database = new BillDatabase(path);
     expect(database.getExtraction("legacy-bill")).toMatchObject({ normalized: { vendorName: "Legacy" }, selectedProvider: null, fallbackStatus: null });
     expect(database.sqlite.query<{ provider: string }, [string]>("SELECT provider FROM extraction_attempts WHERE id = ?").get("legacy-attempt")?.provider).toBe("mistral");
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(20);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get()?.count).toBe(22);
   });
 
   test("upgrades historical WhatsApp identity, jobs, foreign keys, and projections without loss", () => {
@@ -112,11 +116,13 @@ describe("migrations", () => {
         content_revision INTEGER NOT NULL DEFAULT 0, review_revision INTEGER NOT NULL DEFAULT 0, manual_review_required INTEGER NOT NULL DEFAULT 0,
         UNIQUE (whatsapp_message_id, attachment_index)
       );
-      CREATE TABLE jobs (
-        id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), type TEXT NOT NULL, state TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
-        attempts INTEGER NOT NULL DEFAULT 0, available_at TEXT NOT NULL, lease_token TEXT, lease_expires_at TEXT, claimed_by TEXT, claimed_at TEXT,
-        last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expected_revision INTEGER
-      );
+       CREATE TABLE jobs (
+         id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), type TEXT NOT NULL, state TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
+         attempts INTEGER NOT NULL DEFAULT 0, available_at TEXT NOT NULL, lease_token TEXT, lease_expires_at TEXT, claimed_by TEXT, claimed_at TEXT,
+         last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expected_revision INTEGER
+       );
+       CREATE TABLE job_transition_history (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), from_state TEXT,
+         to_state TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE provider_projection_metadata (
         id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), provider TEXT NOT NULL, projection_key TEXT NOT NULL,
         external_id TEXT, external_url TEXT, metadata_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (provider, projection_key)
@@ -161,14 +167,18 @@ describe("migrations", () => {
       CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
       CREATE TABLE admin_upload_batches (id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, original_filename TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE admin_upload_batch_items (id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES admin_upload_batches(id), item_index INTEGER NOT NULL, entry_path TEXT NOT NULL, state TEXT NOT NULL, error_code TEXT, bill_id TEXT REFERENCES bills(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (batch_id, item_index));
-      CREATE TABLE bills (
-        id TEXT PRIMARY KEY, whatsapp_message_id TEXT NOT NULL, whatsapp_group_id TEXT NOT NULL, whatsapp_sender_id TEXT NOT NULL, attachment_index INTEGER NOT NULL,
+       CREATE TABLE bills (
+         id TEXT PRIMARY KEY, whatsapp_message_id TEXT NOT NULL, whatsapp_group_id TEXT NOT NULL, whatsapp_sender_id TEXT NOT NULL, attachment_index INTEGER NOT NULL,
         received_at TEXT NOT NULL, caption TEXT, original_filename TEXT, mime_type TEXT NOT NULL, original_path TEXT NOT NULL, content_sha256 TEXT NOT NULL,
         status TEXT NOT NULL, drive_file_id TEXT, sheet_row_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         content_revision INTEGER NOT NULL DEFAULT 0, review_revision INTEGER NOT NULL DEFAULT 0, manual_review_required INTEGER NOT NULL DEFAULT 0,
         source TEXT NOT NULL, source_identity TEXT, extraction_policy TEXT NOT NULL, classification TEXT NOT NULL, batch_item_id TEXT REFERENCES admin_upload_batch_items(id),
-        UNIQUE (whatsapp_message_id, attachment_index)
-      );`);
+         UNIQUE (whatsapp_message_id, attachment_index)
+       );
+       CREATE TABLE jobs (id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), type TEXT, state TEXT,
+         lease_token TEXT, lease_expires_at TEXT, claimed_by TEXT, claimed_at TEXT, last_error TEXT, updated_at TEXT);
+       CREATE TABLE job_transition_history (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), from_state TEXT,
+         to_state TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL);`);
     for (let version = 1; version <= 14; version += 1) legacy.query("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, appliedAt);
     legacy.query("INSERT INTO admin_upload_batches (id, idempotency_key, original_filename, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run("zip-batch", "admin-zip:legacy", "legacy.zip", "processing", appliedAt, appliedAt);
     legacy.query("INSERT INTO admin_upload_batch_items (id, batch_id, item_index, entry_path, state, error_code, bill_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run("zip-item", "zip-batch", 0, "nested/receipt.pdf", "processing", null, null, appliedAt, appliedAt);
@@ -258,6 +268,7 @@ describe("dual-provider extraction provenance", () => {
     expect(database.beginExtractionInvocation({ ...request, idempotencyKey: "other-key" })).toBeNull();
     expect(database.beginExtractionInvocation({ ...request, jobAttempt: job.attempts + 1 })).toBeNull();
     const archiveBill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "archive-message", attachmentIndex: 1, contentSha256: "b".repeat(64) }, [{ type: "archive_to_drive", idempotencyKey: "archive-identity-job" }]).bill;
+    database.sqlite.query("UPDATE bills SET invoice_dedup_required = 0 WHERE id = ?").run(archiveBill.id);
     const archiveJob = database.claimNextJob("worker", policy, new Date(), ["archive_to_drive"]);
     if (!archiveJob) throw new Error("expected archive claim");
     expect(database.beginExtractionInvocation({ ...request, billId: archiveBill.id, jobId: archiveJob.id, leaseToken: archiveJob.leaseToken, jobAttempt: archiveJob.attempts, idempotencyKey: archiveJob.idempotencyKey })).toBeNull();
@@ -396,27 +407,28 @@ describe("canonical bill and jobs", () => {
     expect(database.countJobsForBill(first.bill.id)).toBe(2);
   });
 
-  test("uses the unique content hash as the cross-source race fence without adding duplicate jobs", () => {
+  test("keeps separate source deliveries even with identical content hashes", () => {
     const first = database.createBillWithInitialJobs({ ...input(), sourceFilename: "Receipt.pdf" }, jobs());
     database.sqlite.query("UPDATE bills SET status = 'failed' WHERE id = ?").run(first.bill.id);
     const secondConnection = new BillDatabase(path);
     const duplicate = secondConnection.createBillWithInitialJobs({ ...input(), whatsappMessageId: "message-2", attachmentIndex: 1, originalPath: "/durable/other.png", sourceFilename: "Other.PNG" }, [{ type: "extract", idempotencyKey: "extract:message-2:1" }]);
-    expect(duplicate).toMatchObject({ created: false, duplicateContent: true, bill: { id: first.bill.id, status: "failed" } });
+    expect(duplicate).toMatchObject({ created: true });
+    expect(duplicate.bill.id).not.toBe(first.bill.id);
     expect(database.countJobsForBill(first.bill.id)).toBe(2);
-    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
+    expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(2);
     secondConnection.close();
   });
 
-  test("concurrent inserts of identical hashes from two channels create one bill", async () => {
+  test("concurrent inserts of identical hashes from two channels keep both originals", async () => {
     const other = new BillDatabase(path);
     try {
       const [first, second] = await Promise.all([
         Promise.resolve().then(() => database.createBillWithInitialJobs({ ...input(), source: "telegram" }, jobs())),
         Promise.resolve().then(() => other.createBillWithInitialJobs({ ...input(), source: "whatsapp", whatsappMessageId: "second", sourceFilename: "other.pdf" }, [{ type: "extract", idempotencyKey: "other-extract" }])),
       ]);
-      expect(first.bill.id).toBe(second.bill.id);
-      expect([first.created, second.created].sort()).toEqual([false, true]);
-      expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(1);
+      expect(first.bill.id).not.toBe(second.bill.id);
+      expect([first.created, second.created]).toEqual([true, true]);
+      expect(database.sqlite.query<{ count: number }, []>("SELECT count(*) AS count FROM bills").get()?.count).toBe(2);
       expect(database.countJobsForBill(first.bill.id)).toBe(2);
     } finally { other.close(); }
   });
@@ -581,6 +593,7 @@ describe("admin-upload source and classification persistence", () => {
     const item = database.createAdminUploadBatchItem({ batchId: batch.id, itemIndex: 0, entryPath: "review.pdf" }).item;
     expect(database.setAdminUploadBatchState(batch.id, "processing")).toBe(true);
     const bill = database.createBillWithInitialJobs({ ...input(), whatsappMessageId: "review-approval", source: "admin_upload", sourceIdentity: "review-approval", extractionPolicy: "azure_only", classification: "invoice", batchItemId: item.id }, [{ type: "extract", idempotencyKey: "extract:review-approval" }]).bill;
+    database.sqlite.query("UPDATE bills SET invoice_dedup_required = 0 WHERE id = ?").run(bill.id);
     database.sqlite.query("UPDATE bills SET status = 'needs_review', manual_review_required = 1, content_revision = 3, review_revision = 2 WHERE id = ?").run(bill.id);
     expect(database.approveReviewCorrection({ billId: bill.id, reviewerId: "reviewer", expectedContentRevision: 3, expectedReviewRevision: 2 })).toBe(true);
     expect(database.getAdminUploadBatchStatus(batch.id)?.batch.state).toBe("completed");

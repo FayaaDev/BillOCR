@@ -235,6 +235,32 @@ const migrations = [
       bill_id TEXT PRIMARY KEY REFERENCES bills(id), content_revision INTEGER NOT NULL,
       review_revision INTEGER NOT NULL, created_at TEXT NOT NULL
     );`,
+   `DROP INDEX IF EXISTS bills_dedup_sha256_idx;
+    DROP INDEX IF EXISTS bills_filename_key_idx;
+    ALTER TABLE bills ADD COLUMN invoice_dedup_required INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE invoice_dedup_decisions (
+      bill_id TEXT PRIMARY KEY REFERENCES bills(id), invoice_number TEXT, invoice_date TEXT,
+      owner_id TEXT NOT NULL REFERENCES bills(id), decided_at TEXT NOT NULL,
+      CHECK ((invoice_number IS NULL AND invoice_date IS NULL) OR (invoice_number IS NOT NULL AND invoice_date IS NOT NULL))
+    );
+   CREATE TABLE invoice_dedup_owners (
+      invoice_number TEXT NOT NULL, invoice_date TEXT NOT NULL, bill_id TEXT NOT NULL UNIQUE REFERENCES bills(id),
+      PRIMARY KEY (invoice_number, invoice_date)
+    );
+    CREATE INDEX invoice_dedup_decisions_owner_idx ON invoice_dedup_decisions(owner_id);`,
+  /* Reconcile jobs left claimable by older code after a duplicate decision. Keep their
+     original state in transition history and revoke any outstanding archive lease. */
+  `CREATE TEMP TABLE suppressed_duplicate_jobs AS
+     SELECT j.id, j.state FROM jobs j JOIN invoice_dedup_decisions d ON d.bill_id = j.bill_id
+     WHERE d.owner_id != d.bill_id AND j.type IN ('archive_to_drive','project_to_sheet')
+       AND j.state IN ('pending','retryable_failure','running');
+   UPDATE jobs SET state = 'permanent_failure', last_error = 'duplicate_invoice', lease_token = NULL,
+     lease_expires_at = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+     WHERE id IN (SELECT id FROM suppressed_duplicate_jobs);
+   INSERT INTO job_transition_history (id, job_id, from_state, to_state, reason, created_at)
+     SELECT lower(hex(randomblob(16))), id, state, 'permanent_failure', 'duplicate_invoice',
+       strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM suppressed_duplicate_jobs;
+   DROP TABLE suppressed_duplicate_jobs;`,
 ];
 
 export function applyMigrations(db: Database): void {

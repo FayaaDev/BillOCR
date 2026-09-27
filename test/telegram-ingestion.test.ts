@@ -57,7 +57,7 @@ test("retains an update that arrives after the atomic startup boundary", async (
   ]);
 });
 
-test("deduplicates separate Telegram photos with identical downloaded bytes", async () => {
+test("retains separate Telegram photos with identical downloaded bytes until OCR", async () => {
   database.setTelegramPollingCursor(70);
   const first = update(70, "-100", { photo: [{ file_id: "first" }] });
   const second = update(71, "-100", { photo: [{ file_id: "second" }] });
@@ -68,8 +68,8 @@ test("deduplicates separate Telegram photos with identical downloaded bytes", as
   ]);
   await poller.pollOnce();
   const bills = database.listReviewBills({ source: "telegram" });
-  expect(bills).toHaveLength(1);
-  expect(database.countJobsForBill(bills[0]!.id)).toBe(2);
+  expect(bills).toHaveLength(2);
+  for (const bill of bills) expect(database.countJobsForBill(bill.id)).toBe(2);
   expect(database.getTelegramPollingCursor()).toBe(72);
 });
 
