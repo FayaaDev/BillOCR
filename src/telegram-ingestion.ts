@@ -27,7 +27,7 @@ export interface TelegramIngestionOptions {
 }
 
 /** Lifecycle boundary used by the composition root; stop resolves after the active poll drains. */
-export interface TelegramPollingService { start(): void | Promise<void>; stop(): void | Promise<void>; pollOnce(): Promise<void>; reconcilePending(): Promise<Bill[]>; }
+export interface TelegramPollingService { start(): void | Promise<void>; stop(): void | Promise<void>; pollOnce(): Promise<void>; reconcilePending(): Promise<Bill[]>; status?(): { state: "starting" | "connected" | "failed" | "stopped" }; }
 
 class TelegramTransientError extends Error {}
 class TelegramPermanentError extends Error {}
@@ -73,14 +73,26 @@ export class TelegramBotApiIngestionService implements TelegramPollingService {
   private readonly controller = new AbortController();
   private running = false;
   private loop: Promise<void> | null = null;
+  private pollState: "starting" | "connected" | "failed" = "starting";
+  private lastPollAt = Date.now();
 
   constructor(private readonly options: TelegramIngestionOptions) {
     this.fetcher = options.fetch ?? fetch;
     this.ingestion = new DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: options.groupIds, originalsDir: options.originalsDir, database: options.database, logger: options.logger, maxAttachmentBytes: options.maxAttachmentBytes, logLabel: "Telegram", propagateAttachmentErrors: true });
   }
 
-  start(): void { if (this.running) return; this.running = true; this.loop = this.run(); }
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.pollState = "starting";
+    this.lastPollAt = Date.now();
+    this.loop = this.run().catch(() => { this.pollState = "failed"; }).finally(() => { this.running = false; });
+  }
   async stop(): Promise<void> { this.running = false; this.controller.abort(); await this.loop; }
+
+  status(now = Date.now()): { state: "starting" | "connected" | "failed" | "stopped" } {
+    return { state: !this.running ? "stopped" : now - this.lastPollAt > Math.max(15 * 60_000, this.options.requestTimeoutMs * 3) ? "failed" : this.pollState };
+  }
 
   reconcilePending(): Promise<Bill[]> { return this.ingestion.reconcilePending(); }
 
@@ -105,8 +117,8 @@ export class TelegramBotApiIngestionService implements TelegramPollingService {
 
   private async run(): Promise<void> {
     while (this.running && !this.controller.signal.aborted) {
-      try { await this.pollOnce(); }
-      catch (error) { if (this.controller.signal.aborted) return; this.options.logger.warn("Telegram polling failed", { code: "telegram_poll_failed", transient: true }); await this.delay(); }
+      try { await this.pollOnce(); this.pollState = "connected"; this.lastPollAt = Date.now(); }
+      catch (error) { if (this.controller.signal.aborted) return; this.pollState = "failed"; this.options.logger.warn("Telegram polling failed", { code: "telegram_poll_failed", transient: true }); await this.delay(); }
     }
   }
 

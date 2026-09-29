@@ -15,11 +15,24 @@ test("production image ships both bundles and prepares named-volume mount points
 test("deployment resource and preprocessing worker contracts are static", () => {
   const root = join(import.meta.dir, ".."); const compose = readFileSync(join(root, "docker-compose.yml"), "utf8"); const worker = readFileSync(join(root, "src/image-preprocessing-worker.ts"), "utf8");
   expect(compose).toContain("mem_limit: 512m");
+  expect(compose).toContain("restart: unless-stopped");
+  expect(compose).toContain("stop_grace_period: 2m");
+  expect(compose).toContain("http://127.0.0.1:3000/ready");
   expect(compose).toContain("ORIGINALS_DIR: /data/originals");
   expect(compose).not.toMatch(/telegram[^\n]*:\/data\//i);
   expect(worker).toContain('type Success = { ok: true; bytes: ArrayBuffer; mode: "sharp" | "opencv"; width: number; height: number };');
   expect(worker).toContain("workerScope.postMessage(response, [response.bytes])");
   expect(worker).toContain("workerScope.postMessage({ ok: false })");
+});
+
+test("customer deployments require a public origin and monitor has recovery healthchecks", () => {
+  const root = join(import.meta.dir, "..");
+  const customer = readFileSync(join(root, "docker-compose.customer.yml"), "utf8");
+  const monitor = readFileSync(join(root, "docker-compose.monitor.yml"), "utf8");
+  expect(customer).toContain("REVIEW_ORIGIN: ${REVIEW_ORIGIN:?");
+  expect(monitor).toContain("restart: unless-stopped");
+  expect(monitor).toContain("http://127.0.0.1:3000/health");
+  expect(monitor).not.toContain("disable: true");
 });
 
 test("environment sample documents both user OAuth credential paths", () => {

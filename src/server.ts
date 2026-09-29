@@ -16,9 +16,11 @@ import { createDriveArchiveHandler, createGoogleAdapters, createReviewCorrection
 import { AzureDocumentIntelligenceInvoiceProvider, type AzureInvoiceProvider } from "./azure-invoice";
 import { AdminZipIngestionService } from "./admin-zip-ingestion";
 import { createReviewAuth } from "./review-auth";
+import type { ServiceHealth } from "./service-health";
 
 export interface RunningService { url: string; whatsappAdmin: WhatsAppAdminOperations; shutdown(): Promise<void>; }
 export interface ServiceDependencies {
+  startupRetryMs?: number;
   createDatabase?: (path: string) => BillDatabase;
   serve?: typeof Bun.serve;
   whatsappTransport?: WhatsAppTransport;
@@ -104,8 +106,30 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
     })(),
   };
   let server: ReturnType<typeof Bun.serve>;
+  let startupComplete = false;
+  let stopping = false;
+  const startupFailures = new Set<string>();
+  // Allow multiple provider calls within a job, but never let lease renewal hide a hung handler.
+  const maxJobMs = Math.max(15 * 60_000, 4 * (config.azure.requestTimeoutMs + config.google.requestTimeoutMs + config.imagePreprocessing.timeoutMs + config.mistral.requestTimeoutMs));
+  const health = (): ServiceHealth => {
+    const reasons = [...startupFailures];
+    if (!startupComplete) reasons.push("startup_pending");
+    if (stopping) reasons.push("shutting_down");
+    try {
+      if (whatsappEnabled && transport.status && transport.status().state !== "connected") reasons.push("whatsapp_disconnected");
+      if (telegramEnabled && telegram?.status && telegram.status().state !== "connected") reasons.push("telegram_unavailable");
+    } catch { reasons.push("intake_status_failed"); }
+    const { reasons: workerReasons, ...workerHealth } = workerLoop.health(Date.now(), maxJobMs);
+    reasons.push(...workerReasons);
+    let backlog: ServiceHealth["backlog"];
+    try {
+      backlog = database.getJobHealth(new Date(), worker.supportedTypes);
+      if (backlog.oldestDueAt && Date.now() - Date.parse(backlog.oldestDueAt) > maxJobMs) reasons.push("backlog_stalled");
+    } catch { reasons.push("database_unavailable"); }
+    return { status: reasons.length ? "degraded" : "ready", reasons, worker: workerHealth, backlog };
+  };
   try {
-    server = (dependencies.serve ?? Bun.serve)({ hostname: config.host, port: config.port, idleTimeout: 255, fetch: (request) => handleRequest(request, database, config, admin, auth) });
+    server = (dependencies.serve ?? Bun.serve)({ hostname: config.host, port: config.port, idleTimeout: 255, fetch: (request) => handleRequest(request, database, config, admin, auth, health) });
   } catch (error) {
     database.close();
     throw error;
@@ -121,22 +145,41 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
     inFlightIngestion.add(task);
     await task;
   };
-  const startListener = (source: "whatsapp" | "telegram", start: () => void | Promise<void>): Promise<void> =>
-    Promise.resolve().then(start).catch(() => logger.error(`${source} listener failed to start`, { code: `${source}_listener_start_failed` }));
-  const listenerStartup = (async () => {
-    await admin.zip.reconcilePending();
-    const reconciliations = await Promise.allSettled([
-      whatsappEnabled ? ingestion.reconcilePending() : Promise.resolve(),
-      telegramEnabled ? telegram!.reconcilePending() : Promise.resolve(),
-    ]);
-    for (const [index, result] of reconciliations.entries()) {
-      if (result.status === "rejected") logger.error(index === 0 ? "whatsapp staging reconciliation failed" : "telegram staging reconciliation failed", { code: index === 0 ? "whatsapp_staging_reconciliation_failed" : "telegram_staging_reconciliation_failed" });
+  const initialized = new Set<string>();
+  const initialize = async (failure: string, run: () => unknown | Promise<unknown>): Promise<boolean> => {
+    if (initialized.has(failure)) return true;
+    if (stopping) return false;
+    try {
+      await run();
+      initialized.add(failure);
+      startupFailures.delete(failure);
+      return true;
+    } catch {
+      startupFailures.add(failure);
+      logger.error("intake initialization failed", { code: failure });
+      return false;
     }
-    await Promise.all([
-      whatsappEnabled && acceptingIngestion ? startListener("whatsapp", () => transport.start(receiveMessage)) : Promise.resolve(),
-      telegramEnabled && acceptingIngestion ? startListener("telegram", () => telegram!.start()) : Promise.resolve(),
-    ]);
-  })().catch(() => logger.error("ingestion staging reconciliation failed", { code: "ingestion_staging_reconciliation_failed" }));
+  };
+  const startupRetryMs = Number.isFinite(dependencies.startupRetryMs) ? Math.max(1, dependencies.startupRetryMs!) : 30_000;
+  let startupTimer: ReturnType<typeof setTimeout> | undefined;
+  const initializeIntake = async (): Promise<void> => {
+    if (await initialize("ingestion_reconciliation_failed", () => admin.zip.reconcilePending())) {
+      const [whatsappReconciled, telegramReconciled] = await Promise.all([
+        whatsappEnabled ? initialize("whatsapp_reconciliation_failed", () => ingestion.reconcilePending()) : true,
+        telegramEnabled ? initialize("telegram_reconciliation_failed", () => telegram!.reconcilePending()) : true,
+      ]);
+      const started = await Promise.all([
+        !whatsappEnabled || (whatsappReconciled && initialize("whatsapp_listener_start_failed", () => transport.start(receiveMessage))),
+        !telegramEnabled || (telegramReconciled && initialize("telegram_listener_start_failed", () => telegram!.start())),
+      ]);
+      startupComplete = started.every(Boolean);
+    }
+    if (!startupComplete && !stopping) {
+      startupTimer = setTimeout(() => { listenerStartup = initializeIntake(); }, startupRetryMs);
+      startupTimer.unref();
+    }
+  };
+  let listenerStartup = initializeIntake();
 
   let shutdownPromise: Promise<void> | null = null;
   return {
@@ -144,6 +187,8 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
     whatsappAdmin,
     shutdown(): Promise<void> {
       if (shutdownPromise) return shutdownPromise;
+      stopping = true;
+      clearTimeout(startupTimer);
       shutdownPromise = (async () => {
         acceptingIngestion = false;
         logger.info("service stopping");

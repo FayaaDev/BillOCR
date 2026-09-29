@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { realpathSync } from "node:fs";
+import { isIP } from "node:net";
 
 export type GoogleConfig =
   | { enabled: false; authMode: "disabled"; credentialJson: null; driveFolderId: null; sheetId: null; sheetName: string; requestTimeoutMs: number; maxResponseBytes: number }
@@ -24,7 +25,7 @@ export interface AppConfig {
   azure: AzureConfig;
   imagePreprocessing: { enabled: boolean; timeoutMs: number };
   google: GoogleConfig;
-  review: { username: string; password: string };
+  review: { username: string; password: string; origin?: string };
   validation: { currencyRoundingTolerance: number; maxFutureInvoiceDays: number };
   jobs: { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number };
 }
@@ -56,6 +57,18 @@ function boolean(env: Env, key: string, fallback: boolean): boolean {
 }
 function csv(env: Env, key: string): string[] {
   return [...new Set((env[key] ?? "").split(",").map((value) => value.trim()).filter(Boolean))];
+}
+
+function reviewOrigin(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const url = new URL(value);
+    const labels = url.hostname.split(".");
+    if (value === url.origin && url.protocol === "https:" && !url.port && !isIP(url.hostname) &&
+      labels.length >= 2 && url.hostname.length <= 253 && !url.hostname.endsWith(".localhost") &&
+      labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return url.origin;
+  } catch { /* Invalid URL uses the same configuration error. */ }
+  throw new Error("REVIEW_ORIGIN must be a canonical HTTPS origin with a qualified DNS hostname, no port, path, credentials, query or fragment; localhost and IP addresses are not allowed");
 }
 
 /** Resolve this controlled directory once after it has been created; readers never realpath request/DB paths. */
@@ -118,7 +131,7 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
        if (authMode !== "service_account" && authMode !== "user_oauth") throw new Error("GOOGLE_AUTH_MODE must be service_account or user_oauth");
        return { enabled: true, authMode, credentialJson: resolve(required(env, authMode === "service_account" ? "GOOGLE_SERVICE_ACCOUNT_JSON" : "GOOGLE_OAUTH_CREDENTIAL_JSON")), driveFolderId: required(env, "GOOGLE_DRIVE_FOLDER_ID"), sheetId: required(env, "GOOGLE_SHEET_ID"), sheetName: env.GOOGLE_SHEET_NAME ?? "Ledger", requestTimeoutMs, maxResponseBytes };
     })(),
-    review: { username: required(env, "REVIEW_USERNAME"), password: required(env, "REVIEW_PASSWORD") },
+    review: { username: required(env, "REVIEW_USERNAME"), password: required(env, "REVIEW_PASSWORD"), origin: reviewOrigin(env.REVIEW_ORIGIN) },
     validation: loadValidationConfig(env),
     jobs: { maxAttempts: integer(env, "JOB_MAX_ATTEMPTS", 5, 1), retryBaseMs, retryMaxMs, leaseMs: integer(env, "JOB_LEASE_MS", 60_000, 1) },
   };
