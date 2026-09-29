@@ -1,0 +1,14 @@
+services:
+  bill-ledger:
+    environment:
+      GOOGLE_ENABLED: ${GOOGLE_ENABLED:?Set GOOGLE_ENABLED in the customer env file}
+      GOOGLE_AUTH_MODE: ${GOOGLE_AUTH_MODE:?Set GOOGLE_AUTH_MODE in the customer env file}
+    networks:
+      default:
+      monitoring:
+        aliases:
+          - ${CUSTOMER_ID:?Set CUSTOMER_ID in the customer env file}
+networks:
+  monitoring:
+    external: true
+    name: bill-monitoring
