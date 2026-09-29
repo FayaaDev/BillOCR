@@ -16,6 +16,7 @@ export interface AppConfig {
   dataDir: string;
   databasePath: string;
   logLevel: "debug" | "info" | "warn" | "error";
+  monitorToken?: string;
   originals: { dir: string; maxAttachmentBytes: number };
   whatsapp: { enabled: boolean; groupId: string | null; authPath: string; originalsDir: string; maxAttachmentBytes: number };
   telegram: TelegramConfig;
@@ -72,6 +73,8 @@ export function loadValidationConfig(env: Env = Bun.env): AppConfig["validation"
 export function loadConfig(env: Env = Bun.env): AppConfig {
   const dataDir = resolve(required(env, "APP_DATA_DIR"));
   const logLevel = env.APP_LOG_LEVEL ?? "info";
+  const monitorToken = env.MONITOR_TOKEN?.trim();
+  if (monitorToken !== undefined && monitorToken.length < 32) throw new Error("MONITOR_TOKEN must be at least 32 characters");
   if (!levels.has(logLevel)) throw new Error("APP_LOG_LEVEL must be debug, info, warn, or error");
   const retryBaseMs = integer(env, "JOB_RETRY_BASE_MS", 1_000, 1);
   const retryMaxMs = integer(env, "JOB_RETRY_MAX_MS", 300_000, retryBaseMs);
@@ -82,6 +85,7 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
     dataDir,
     databasePath: resolve(env.APP_DATABASE_PATH ?? `${dataDir}/bill-ledger.sqlite`),
     logLevel: logLevel as AppConfig["logLevel"],
+    monitorToken,
     originals,
     whatsapp: { enabled: boolean(env, "WHATSAPP_ENABLED", true), groupId: env.WHATSAPP_GROUP_ID?.trim() || null, authPath: resolve(required(env, "WHATSAPP_AUTH_PATH")), originalsDir: originals.dir, maxAttachmentBytes: originals.maxAttachmentBytes },
     telegram: (() => {

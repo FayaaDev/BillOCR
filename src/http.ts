@@ -3,10 +3,23 @@ import type { BillDatabase } from "./database";
 import { handleAdminRequest, type AdminHttpCapabilities } from "./admin-ui";
 import { handleReviewRequest } from "./review-ui";
 import { handleLoginRequest, reviewAuth, type ReviewAuth } from "./review-auth";
+import { createHash, timingSafeEqual } from "node:crypto";
+
+function tokenMatches(supplied: string | null, expected: string): boolean {
+  const digest = (value: string) => createHash("sha256").update(value).digest();
+  return !!supplied && timingSafeEqual(digest(supplied), digest(`Bearer ${expected}`));
+}
 
 export function handleRequest(request: Request, database?: BillDatabase, config?: AppConfig, admin?: AdminHttpCapabilities, auth?: ReviewAuth): Response | Promise<Response> {
   if (new URL(request.url).pathname === "/health") return Response.json({ status: "ok" });
   const pathname = new URL(request.url).pathname;
+  if (pathname === "/monitor/status") {
+    const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
+    if (!config?.monitorToken || !tokenMatches(request.headers.get("authorization"), config.monitorToken)) return new Response("Unauthorized", { status: 401, headers });
+    if (request.method !== "GET") return new Response("Method not allowed", { status: 405, headers: { ...headers, allow: "GET" } });
+    if (!database) return new Response("Unavailable", { status: 503, headers });
+    return Response.json({ metrics: database.getDashboardMetrics() }, { headers });
+  }
   const session = config ? auth ?? reviewAuth(config) : undefined;
   if (config && pathname === "/login") return handleLoginRequest(request, config, session);
   if (config && pathname === "/logout") {
