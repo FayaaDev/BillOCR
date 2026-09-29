@@ -1,7 +1,7 @@
 import type { Bill } from "./contracts";
 import type { Logger } from "./logger";
 import { AttachmentContentConflictError, DurableAttachmentIngestionService, type IncomingAttachment, type IncomingSourceMessage, type IngestionResult } from "./durable-attachment-ingestion";
-import type { BillDatabase } from "./database";
+import type { BillDatabase } from "../db/database";
 import { IMAGE_PREPROCESSING_VERSION } from "./image-preprocessing";
 
 export type { AttachmentKind, IncomingAttachment, IngestionResult } from "./durable-attachment-ingestion";

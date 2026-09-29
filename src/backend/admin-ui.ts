@@ -60,7 +60,7 @@ async function parseUnpairForm(request: Request): Promise<URLSearchParams | null
   return [...form].length <= 2 && [...form].every(([key, value]) => key.length <= 32 && value.length <= 256) ? form : null;
 }
 
-export async function handleAdminRequest(request: Request, config: AppConfig, capabilities?: AdminHttpCapabilities, assetDir = join(import.meta.dir, "..", "dist", "admin"), auth: ReviewAuth = reviewAuth(config)): Promise<Response> {
+export async function handleAdminRequest(request: Request, config: AppConfig, capabilities?: AdminHttpCapabilities, assetDir = join(import.meta.dir, import.meta.path.endsWith(".ts") ? "../../dist/admin" : "admin"), auth: ReviewAuth = reviewAuth(config)): Promise<Response> {
   const pathname = new URL(request.url).pathname;
   const user = auth.user(request); const binding = auth.binding(request); if (!user || !binding) return unauthorized(request, pathname);
   if (pathname === "/admin") {

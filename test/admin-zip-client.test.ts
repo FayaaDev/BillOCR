@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { ZipUploadSession, zipUploadControlDisabled, type ZipUploadRequest } from "../src/admin-zip-client";
-import type { AdminZipStatus } from "../src/admin-dashboard";
+import { ZipUploadSession, zipUploadControlDisabled, type ZipUploadRequest } from "../src/frontend/admin-zip-client";
+import type { AdminZipStatus } from "../src/frontend/admin-dashboard";
 
 const pending = (id = "batch-1"): AdminZipStatus => ({ batch: { id, originalFilename: "bills.zip", state: "queued" }, counts: { total: 1, queued: 1, processing: 0, complete: 0, notInvoice: 0, rejected: 0, failed: 0 }, items: [{ entryPath: "invoice.pdf", state: "queued", errorCode: null, billId: null }] });
 const complete = (id = "batch-1"): AdminZipStatus => ({ ...pending(id), batch: { id, originalFilename: "bills.zip", state: "completed" }, counts: { total: 1, queued: 0, processing: 0, complete: 1, notInvoice: 0, rejected: 0, failed: 0 }, items: [{ entryPath: "invoice.pdf", state: "complete", errorCode: null, billId: "bill-1" }] });

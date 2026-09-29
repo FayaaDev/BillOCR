@@ -3,14 +3,14 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AdminZipContentConflictError, AdminZipIngestionService } from "../src/admin-zip-ingestion";
-import { BillDatabase } from "../src/database";
-import type { Logger } from "../src/logger";
-import { createExtractJobHandler } from "../src/extraction";
-import type { AzureInvoiceProvider } from "../src/azure-invoice";
-import { createExtractionValidationCallback } from "../src/validation";
-import { JobWorker, PermanentJobError } from "../src/worker";
-import { createDriveArchiveHandler, createSheetsProjectionHandler, type DriveAdapter, type SheetsAdapter } from "../src/google-projections";
+import { AdminZipContentConflictError, AdminZipIngestionService } from "../src/backend/admin-zip-ingestion";
+import { BillDatabase } from "../src/db/database";
+import type { Logger } from "../src/backend/logger";
+import { createExtractJobHandler } from "../src/backend/extraction";
+import type { AzureInvoiceProvider } from "../src/backend/azure-invoice";
+import { createExtractionValidationCallback } from "../src/backend/validation";
+import { JobWorker, PermanentJobError } from "../src/backend/worker";
+import { createDriveArchiveHandler, createSheetsProjectionHandler, type DriveAdapter, type SheetsAdapter } from "../src/backend/google-projections";
 
 const silentLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 let directory: string;
@@ -66,7 +66,7 @@ describe("admin ZIP ingestion", () => {
   });
 
   test("terminally rejects a ZIP entry whose bytes duplicate an existing bill", async () => {
-    const durable = new (await import("../src/durable-attachment-ingestion")).DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["tg"], originalsDir: join(directory, "originals"), database, logger: silentLogger });
+    const durable = new (await import("../src/backend/durable-attachment-ingestion")).DurableAttachmentIngestionService({ source: "telegram", allowedChatIds: ["tg"], originalsDir: join(directory, "originals"), database, logger: silentLogger });
     const existing = (await durable.ingest({ id: "tg-existing", chatId: "tg", senderId: "sender", timestamp: "2026-09-01T00:00:00.000Z", attachments: [{ kind: "document", mimeType: "application/pdf", filename: "Receipt.pdf", download: async () => pdf("first") }] })).bills[0]!;
     const result = await service.ingest({ sourceId: "duplicate-name", originalFilename: "duplicates.zip", bytes: zip([{ name: "nested/Other.pdf", bytes: pdf("first") }]) });
     expect(result.counts).toEqual({ accepted: 0, rejected: 1, ignored: 0 });

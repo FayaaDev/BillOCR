@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { paginateReviewBills, prepareReviewBills, REVIEW_PAGE_SIZE, sumReviewBillTotals, type ReviewBill } from "../src/review-ticket-list";
+import { paginateReviewBills, prepareReviewBills, REVIEW_PAGE_SIZE, sumReviewBillTotals, type ReviewBill } from "../src/frontend/review-ticket-list";
 
 function bill(index: number, overrides: Partial<ReviewBill> = {}): ReviewBill {
   return {

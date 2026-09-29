@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { pruneReviewFormData, reviewFormValidationMessage } from "../src/review-form";
+import { pruneReviewFormData, reviewFormValidationMessage } from "../src/frontend/review-form";
 
 test("review form validation accepts boundaries and explains oversized values", () => {
   expect(reviewFormValidationMessage([["description", "x".repeat(2_000)]])).toBeNull();

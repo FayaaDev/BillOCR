@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { formatDate, matchesBillStatus, summarizeBills } from "../src/dashboard-data";
-import { matchesReceivedDate } from "../src/review-ticket-list";
-import type { ReviewBill } from "../src/review-ticket-list";
+import { formatDate, matchesBillStatus, summarizeBills } from "../src/frontend/dashboard-data";
+import { matchesReceivedDate } from "../src/frontend/review-ticket-list";
+import type { ReviewBill } from "../src/frontend/review-ticket-list";
 
 function bill(overrides: Partial<ReviewBill> = {}): ReviewBill {
   return {

@@ -6,7 +6,7 @@ import { finished } from "node:stream/promises";
 import yauzl, { type Entry, type ZipFile } from "yauzl";
 import { canonicalAttachmentExtension, sniffSupportedDocumentMimeType } from "./attachment-mime";
 import type { AdminUploadBatch, Bill } from "./contracts";
-import type { BillDatabase } from "./database";
+import type { BillDatabase } from "../db/database";
 import type { Logger } from "./logger";
 import { AttachmentContentConflictError, persistOriginal, removeVerifiedUnreferencedOriginal, safeAttachmentFilename, sourceBasename } from "./durable-attachment-ingestion";
 

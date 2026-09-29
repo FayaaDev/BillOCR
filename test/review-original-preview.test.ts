@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { installOriginalPreview } from "../src/review-original-preview";
+import { installOriginalPreview } from "../src/frontend/review-original-preview";
 
 type Listener = (event: { preventDefault(): void; target?: unknown }) => void;
 

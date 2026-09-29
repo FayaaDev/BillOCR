@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { BaileysTransport, normalize, silentBaileysLogger, type BaileysDependencies } from "../src/baileys-transport";
-import { PairingQrTokenStore, pairingQrPath, renderStoredPairingQr } from "../src/whatsapp-pairing";
+import { BaileysTransport, normalize, silentBaileysLogger, type BaileysDependencies } from "../src/backend/baileys-transport";
+import { PairingQrTokenStore, pairingQrPath, renderStoredPairingQr } from "../src/backend/whatsapp-pairing";
 import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import type { Logger } from "../src/logger";
+import type { Logger } from "../src/backend/logger";
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 

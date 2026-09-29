@@ -3,7 +3,7 @@ import { link, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "no
 import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isSourceBasename, transportSourceIdentity, type Bill, type BillSource, type CreateBillInput } from "./contracts";
-import type { BillDatabase } from "./database";
+import type { BillDatabase } from "../db/database";
 import type { Logger } from "./logger";
 import { canonicalOriginalsDir } from "./config";
 import { canonicalAttachmentExtension, isSupportedDocumentMimeType, isSupportedImageMimeType } from "./attachment-mime";

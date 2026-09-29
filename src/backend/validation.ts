@@ -1,5 +1,5 @@
 import type { ExtractedBill, ExtractionFallbackStatus, ValidationIssue } from "./contracts";
-import type { BillDatabase } from "./database";
+import type { BillDatabase } from "../db/database";
 import { currencyMinorUnits, knownIso4217Codes, toleranceForCurrency } from "./currency";
 
 export interface ValidationConfig {

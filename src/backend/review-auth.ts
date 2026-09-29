@@ -106,13 +106,13 @@ export async function handleLoginRequest(request: Request, config: AppConfig, au
   if ((request.method === "GET" && (returnTo !== "/admin" && returnTo !== "/review")) || url.searchParams.size > 1) return new Response("طلب غير صالح", { status: 400, headers });
   if (request.method === "GET") {
     if (auth.user(request)) return new Response(null, { status: 303, headers: { ...headers, location: returnTo } });
-    const { renderLoginPage } = await import("./login-ui");
+    const { renderLoginPage } = await import("../frontend/login-ui");
     return new Response(renderLoginPage(returnTo), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
   }
   if (request.method !== "POST") return new Response("الطريقة غير مسموح بها", { status: 405, headers: { ...headers, allow: "GET, POST" } });
   try {
     const form = await loginForm(request); const id = auth.login(form.username, form.password, request);
-    if (!id) { const { renderLoginPage } = await import("./login-ui"); return new Response(renderLoginPage(form.returnTo, true), { status: 401, headers: { ...headers, "content-type": "text/html; charset=utf-8" } }); }
+    if (!id) { const { renderLoginPage } = await import("../frontend/login-ui"); return new Response(renderLoginPage(form.returnTo, true), { status: 401, headers: { ...headers, "content-type": "text/html; charset=utf-8" } }); }
     return new Response(null, { status: 303, headers: { ...headers, location: form.returnTo, "set-cookie": auth.cookie(id, request) } });
   } catch { return new Response("تعذر تسجيل الدخول. تحقق من البيانات وحاول مرة أخرى.", { status: 400, headers }); }
 }

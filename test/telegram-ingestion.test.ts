@@ -2,9 +2,9 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { BillDatabase } from "../src/database";
-import type { Logger } from "../src/logger";
-import { TelegramBotApiIngestionService, type TelegramFetch } from "../src/telegram-ingestion";
+import { BillDatabase } from "../src/db/database";
+import type { Logger } from "../src/backend/logger";
+import { TelegramBotApiIngestionService, type TelegramFetch } from "../src/backend/telegram-ingestion";
 
 let directory: string;
 let database: BillDatabase;

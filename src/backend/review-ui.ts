@@ -4,10 +4,10 @@ import { join } from "node:path";
 import * as XLSX from "xlsx";
 import type { AppConfig } from "./config";
 import type { ExtractedBill } from "./contracts";
-import type { BillDatabase, CompletedInvoiceExportRecord, ReviewQueueFilters } from "./database";
+import type { BillDatabase, CompletedInvoiceExportRecord, ReviewQueueFilters } from "../db/database";
 import { readVerifiedOriginal, removeVerifiedOriginal } from "./originals";
 import { isSupportedImageMimeType } from "./attachment-mime";
-import { isReviewFormField, reviewFieldLimits, reviewFormMaxBytes } from "./review-form";
+import { isReviewFormField, reviewFieldLimits, reviewFormMaxBytes } from "../frontend/review-form";
 import { reviewAuth, type ReviewAuth } from "./review-auth";
 
 const editable = ["invoiceDate", "total", "vat", "subtotal", "description", "truckNumber", "vendorTaxNumber", "vendorName", "invoiceNumber"] as const;
@@ -70,7 +70,7 @@ async function parseForm(request: Request): Promise<URLSearchParams> {
   return form;
 }
 
-export async function handleReviewRequest(request: Request, database: BillDatabase, config: AppConfig, assetDir = join(import.meta.dir, "..", "dist", "review"), auth: ReviewAuth = reviewAuth(config)): Promise<Response> {
+export async function handleReviewRequest(request: Request, database: BillDatabase, config: AppConfig, assetDir = join(import.meta.dir, import.meta.path.endsWith(".ts") ? "../../dist/review" : "review"), auth: ReviewAuth = reviewAuth(config)): Promise<Response> {
   const url = new URL(request.url); const parts = url.pathname.split("/").filter(Boolean);
   const font = /^\/review\/assets\/files\/(noto-sans-arabic-arabic-(?:400|700)-normal\.woff2)$/.exec(url.pathname)?.[1];
   if (!auth.user(request) && request.method === "GET" && (url.pathname === "/review/assets/theme.js" || url.pathname === "/review/assets/client.css" || font)) {

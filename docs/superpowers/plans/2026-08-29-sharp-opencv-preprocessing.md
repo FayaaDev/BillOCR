@@ -29,13 +29,13 @@ export const IMAGE_PREPROCESSING_VERSION = "sharp-opencv-v1";
 | `package.json`, `bun.lock` | Pin preprocessing dependencies and bundle the worker entrypoint. |
 | `Dockerfile` | Prove installed production dependencies can import from the slim image. |
 | `docker-compose.yml` | Enforce a production container memory ceiling for the image Worker and service. |
-| `src/config.ts` | Add only the enabled flag and worker timeout setting. |
-| `src/image-preprocessing.ts` | Public interface, constants, source/dist-safe Worker client, MIME bypass/fallback policy, and safe metadata. |
-| `src/image-preprocessing-worker.ts` | Isolated Sharp/OpenCV decode, page detection/rectification, enhancement, and PNG encoding. |
-| `src/extraction.ts` | Inject preprocessing after verified-original read, select request bytes, hash them into provider idempotency, and call Mistral. |
-| `src/whatsapp-ingestion.ts` | Persist the selected input policy in newly created extraction job idempotency keys. |
-| `src/server.ts` | Compose the enabled production preprocessor and permit injected test preprocessor. |
-| `src/evaluate-approved-examples.ts` | Authorized-only three-variant, two-fixture evaluator. |
+| `src/backend/config.ts` | Add only the enabled flag and worker timeout setting. |
+| `src/backend/image-preprocessing.ts` | Public interface, constants, source/dist-safe Worker client, MIME bypass/fallback policy, and safe metadata. |
+| `src/backend/image-preprocessing-worker.ts` | Isolated Sharp/OpenCV decode, page detection/rectification, enhancement, and PNG encoding. |
+| `src/backend/extraction.ts` | Inject preprocessing after verified-original read, select request bytes, hash them into provider idempotency, and call Mistral. |
+| `src/backend/whatsapp-ingestion.ts` | Persist the selected input policy in newly created extraction job idempotency keys. |
+| `src/backend/server.ts` | Compose the enabled production preprocessor and permit injected test preprocessor. |
+| `src/backend/evaluate-approved-examples.ts` | Authorized-only three-variant, two-fixture evaluator. |
 | `test/image-preprocessing.test.ts` | Offline synthetic-image and Worker failure/bounds tests. |
 | `test/extraction.test.ts`, `test/config-logger.test.ts`, `test/server.test.ts`, `test/whatsapp-ingestion.test.ts`, `test/evaluate-approved-examples.test.ts`, `test/deployment.test.ts` | Injection, lease/idempotency, config, durable input policy, evaluator output, and static deployment coverage. |
 | `.env.example`, `README.md` | Disabled-by-default settings, operational contract, version, constraints, and release gate. |
@@ -58,7 +58,7 @@ Update `package.json` so dependencies contain exact strings and the build has th
   "sharp": "0.35.4"
 },
 "scripts": {
-  "build": "bun build src/server.ts src/ops.ts src/image-preprocessing.ts src/image-preprocessing-worker.ts --target bun --outdir dist --external sharp --external @techstark/opencv-js && rm -rf dist/review && bun build src/review-client.tsx --target browser --outdir dist/review && mv dist/review/review-client.js dist/review/client.js && mv dist/review/review-client.css dist/review/client.css",
+  "build": "bun build src/backend/server.ts src/backend/ops.ts src/backend/image-preprocessing.ts src/backend/image-preprocessing-worker.ts --root src/backend --target bun --outdir dist --external sharp --external @techstark/opencv-js && rm -rf dist/review && bun build src/frontend/review-client.tsx --root src/frontend --target browser --outdir dist/review && mv dist/review/review-client.js dist/review/client.js && mv dist/review/review-client.css dist/review/client.css",
   "verify-build": "bun run build && test -f dist/server.js && test -f dist/ops.js && test -f dist/image-preprocessing.js && test -f dist/image-preprocessing-worker.js && test -f dist/review/client.js && test -f dist/review/client.css"
 }
 ```
@@ -144,8 +144,8 @@ Expected: `verify-build` creates `dist/server.js`, `dist/ops.js`, `dist/image-pr
 ### Task 2: Define the bounded preprocessing contract and configuration
 
 **Files:**
-- Create: `src/image-preprocessing.ts`
-- Modify: `src/config.ts`
+- Create: `src/backend/image-preprocessing.ts`
+- Modify: `src/backend/config.ts`
 - Modify: `.env.example`
 - Modify: `test/config-logger.test.ts`
 
@@ -170,7 +170,7 @@ Expected: FAIL because `imagePreprocessing` does not exist on `AppConfig`.
 
 - [ ] **Step 3: Add the exact public types, fixed bounds, and config shape.**
 
-Add to `src/image-preprocessing.ts`:
+Add to `src/backend/image-preprocessing.ts`:
 
 ```ts
 export const IMAGE_PREPROCESSING_VERSION = "sharp-opencv-v1";
@@ -206,7 +206,7 @@ IMAGE_PREPROCESSING_TIMEOUT_MS=8000
 
 - [ ] **Step 4: Implement the Worker client’s fallback boundary.**
 
-In `src/image-preprocessing.ts`, implement `WorkerImagePreprocessor`. It must return `null` for non-JPEG/PNG/WebP inputs, create exactly one Worker per image, post a transferable copy of the input, and terminate the Worker in `finally`. Resolve the source and bundled entry explicitly:
+In `src/backend/image-preprocessing.ts`, implement `WorkerImagePreprocessor`. It must return `null` for non-JPEG/PNG/WebP inputs, create exactly one Worker per image, post a transferable copy of the input, and terminate the Worker in `finally`. Resolve the source and bundled entry explicitly:
 
 ```ts
 const workerName = import.meta.path.endsWith(".ts") ? "image-preprocessing-worker.ts" : "image-preprocessing-worker.js";
@@ -233,7 +233,7 @@ Expected: PASS, including the new defaults and invalid-value rejection.
 ### Task 3: Implement isolated, bounded Sharp/OpenCV transformation
 
 **Files:**
-- Create: `src/image-preprocessing-worker.ts`
+- Create: `src/backend/image-preprocessing-worker.ts`
 - Create: `test/image-preprocessing.test.ts`
 
 - [ ] **Step 1: Write offline synthetic fixtures and failing contract tests.**
@@ -243,7 +243,7 @@ In `test/image-preprocessing.test.ts`, generate all images in memory using Sharp
 ```ts
 import { expect, test } from "bun:test";
 import sharp from "sharp";
-import { WorkerImagePreprocessor } from "../src/image-preprocessing";
+import { WorkerImagePreprocessor } from "../src/backend/image-preprocessing";
 
 const photo = async () => sharp({ create: { width: 900, height: 600, channels: 3, background: "#d8d8d8" } })
   .composite([{ input: Buffer.from('<svg width="900" height="600"><polygon points="180,90 760,130 700,510 145,455" fill="white" stroke="black" stroke-width="8"/><text x="260" y="260" font-size="42">TOTAL 70</text></svg>') }])
@@ -275,7 +275,7 @@ Expected: FAIL because the worker module and `WorkerImagePreprocessor` do not ye
 
 - [ ] **Step 3: Implement safe decode, scaling, and OpenCV resource cleanup in the Worker.**
 
-In `src/image-preprocessing-worker.ts`, dynamically import the two external dependencies once per Worker and implement `loadOpenCv` with the same 10-second timeout, Promise-export handling, callback registration, and post-registration `queueMicrotask` readiness recheck used by Task 1. Await it before installing/servicing `self.onmessage`; if initialization fails, reply `{ ok: false }` to any request without error details. Then decode only via:
+In `src/backend/image-preprocessing-worker.ts`, dynamically import the two external dependencies once per Worker and implement `loadOpenCv` with the same 10-second timeout, Promise-export handling, callback registration, and post-registration `queueMicrotask` readiness recheck used by Task 1. Await it before installing/servicing `self.onmessage`; if initialization fails, reply `{ ok: false }` to any request without error details. Then decode only via:
 
 ```ts
 const oriented = sharp(bytes, { limitInputPixels: 8_000_000, failOn: "warning" }).autoOrient();
@@ -326,9 +326,9 @@ Expected: PASS. The perspective test reports `mode: "opencv"`; blank/no-contour 
 ### Task 4: Wire preprocessing into extraction without changing durability semantics
 
 **Files:**
-- Modify: `src/extraction.ts`
-- Modify: `src/server.ts`
-- Modify: `src/whatsapp-ingestion.ts`
+- Modify: `src/backend/extraction.ts`
+- Modify: `src/backend/server.ts`
+- Modify: `src/backend/whatsapp-ingestion.ts`
 - Modify: `test/extraction.test.ts`
 - Modify: `test/server.test.ts`
 - Modify: `test/whatsapp-ingestion.test.ts`
@@ -356,7 +356,7 @@ Expected: FAIL because `createExtractJobHandler` has no preprocessor parameter a
 
 - [ ] **Step 3: Extend the handler with a default no-op preprocessor and exact call ordering.**
 
-Import `ImagePreprocessor` and `isPreprocessableMimeType` in `src/extraction.ts`; add this no-op value:
+Import `ImagePreprocessor` and `isPreprocessableMimeType` in `src/backend/extraction.ts`; add this no-op value:
 
 ```ts
 const noImagePreprocessor: ImagePreprocessor = { preprocess: async () => null };
@@ -383,9 +383,9 @@ This derivation preserves provider idempotency for identical request bytes and p
 
 - [ ] **Step 4: Compose only when the feature is enabled and retain service injection.**
 
-In `src/server.ts`, construct `new WorkerImagePreprocessor({ timeoutMs: config.imagePreprocessing.timeoutMs })` regardless of the new-job feature flag, because durable jobs already tagged `:sharp-opencv-v1` must retain their policy after rollback. No Worker starts until such a job calls it. Extend the existing `startService` dependency input with optional `imagePreprocessor?: ImagePreprocessor` and prefer it over the config-created implementation so tests remain offline. Pass that selected instance into `createExtractJobHandler`; use `config.imagePreprocessing.enabled` only to pass `IMAGE_PREPROCESSING_VERSION` versus `"original"` into `WhatsAppIngestionService` for newly created jobs.
+In `src/backend/server.ts`, construct `new WorkerImagePreprocessor({ timeoutMs: config.imagePreprocessing.timeoutMs })` regardless of the new-job feature flag, because durable jobs already tagged `:sharp-opencv-v1` must retain their policy after rollback. No Worker starts until such a job calls it. Extend the existing `startService` dependency input with optional `imagePreprocessor?: ImagePreprocessor` and prefer it over the config-created implementation so tests remain offline. Pass that selected instance into `createExtractJobHandler`; use `config.imagePreprocessing.enabled` only to pass `IMAGE_PREPROCESSING_VERSION` versus `"original"` into `WhatsAppIngestionService` for newly created jobs.
 
-In `src/whatsapp-ingestion.ts`, add an `extractionInputVersion: "original" | typeof IMAGE_PREPROCESSING_VERSION` constructor option and create new extraction jobs with:
+In `src/backend/whatsapp-ingestion.ts`, add an `extractionInputVersion: "original" | typeof IMAGE_PREPROCESSING_VERSION` constructor option and create new extraction jobs with:
 
 ```ts
 { type: "extract", idempotencyKey: `extract:${manifest.id}:${this.extractionInputVersion}` }
@@ -408,7 +408,7 @@ No input selection is persisted before the external call in this phase. If Mistr
 ### Task 5: Make the approved-example evaluator a safe, deterministic A/B gate
 
 **Files:**
-- Modify: `src/evaluate-approved-examples.ts`
+- Modify: `src/backend/evaluate-approved-examples.ts`
 - Modify: `test/evaluate-approved-examples.test.ts`
 - Modify: `README.md`
 
@@ -434,7 +434,7 @@ Expected: FAIL because the evaluator currently emits one record per fixture and 
 
 - [ ] **Step 3: Implement exactly three variants and sanitized, unique provider keys.**
 
-In `src/evaluate-approved-examples.ts`, process `const variants = ["original", "sharp", "opencv"] as const` for each existing fixture. Use the original fixture bytes unchanged for `original`; call `WorkerImagePreprocessor` in forced `sharp` and `opencv` modes for the other two. If a transform returns `null`, emit a local `needs_review` result with an issue `{ code: "evaluator_preprocessing_failure", field: null }` and do not call Mistral for that variant, preserving the no-leak output schema.
+In `src/backend/evaluate-approved-examples.ts`, process `const variants = ["original", "sharp", "opencv"] as const` for each existing fixture. Use the original fixture bytes unchanged for `original`; call `WorkerImagePreprocessor` in forced `sharp` and `opencv` modes for the other two. If a transform returns `null`, emit a local `needs_review` result with an issue `{ code: "evaluator_preprocessing_failure", field: null }` and do not call Mistral for that variant, preserving the no-leak output schema.
 
 For each provider call construct only this sanitized key:
 

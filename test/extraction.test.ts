@@ -3,14 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BillDatabase, type RetryPolicy } from "../src/database";
-import { attachMistralNativeConfidence, createExtractJobHandler, extractedBillJsonSchema, extractionPrompt, MalformedStructuredOutputError, MistralHttpOcrProvider, type MistralOcrProvider, parseAzureExtractedBill, parseExtractedBill, parseMistralNativeConfidence, parseProviderExtractedBill, RetryableExtractionError } from "../src/extraction";
-import { createLogger } from "../src/logger";
-import { JobWorker } from "../src/worker";
-import { PermanentJobError } from "../src/worker";
-import { IMAGE_PREPROCESSING_VERSION, type ImagePreprocessor } from "../src/image-preprocessing";
-import { parseAzureInvoiceAnalysis, type AzureInvoiceProvider } from "../src/azure-invoice";
-import { createExtractionValidationCallback } from "../src/validation";
+import { BillDatabase, type RetryPolicy } from "../src/db/database";
+import { attachMistralNativeConfidence, createExtractJobHandler, extractedBillJsonSchema, extractionPrompt, MalformedStructuredOutputError, MistralHttpOcrProvider, type MistralOcrProvider, parseAzureExtractedBill, parseExtractedBill, parseMistralNativeConfidence, parseProviderExtractedBill, RetryableExtractionError } from "../src/backend/extraction";
+import { createLogger } from "../src/backend/logger";
+import { JobWorker } from "../src/backend/worker";
+import { PermanentJobError } from "../src/backend/worker";
+import { IMAGE_PREPROCESSING_VERSION, type ImagePreprocessor } from "../src/backend/image-preprocessing";
+import { parseAzureInvoiceAnalysis, type AzureInvoiceProvider } from "../src/backend/azure-invoice";
+import { createExtractionValidationCallback } from "../src/backend/validation";
 
 const policy: RetryPolicy = { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 2, leaseMs: 60_000 };
 let directory: string;

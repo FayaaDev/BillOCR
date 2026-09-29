@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BillDatabase } from "../src/database";
-import type { Logger } from "../src/logger";
-import { WhatsAppIngestionService, type IncomingAttachment, type IncomingWhatsAppMessage } from "../src/whatsapp-ingestion";
-import { IMAGE_PREPROCESSING_VERSION } from "../src/image-preprocessing";
+import { BillDatabase } from "../src/db/database";
+import type { Logger } from "../src/backend/logger";
+import { WhatsAppIngestionService, type IncomingAttachment, type IncomingWhatsAppMessage } from "../src/backend/whatsapp-ingestion";
+import { IMAGE_PREPROCESSING_VERSION } from "../src/backend/image-preprocessing";
 
 const silentLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 let directory: string;

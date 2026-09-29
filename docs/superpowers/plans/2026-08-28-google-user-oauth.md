@@ -13,7 +13,7 @@
 ### Task 1: OAuth credential support
 
 **Files:**
-- Modify: `src/google-projections.ts`
+- Modify: `src/backend/google-projections.ts`
 - Test: `test/google-projections.test.ts`
 
 - [ ] Write a failing test proving an `authorized_user` JSON document exchanges its refresh token at `https://oauth2.googleapis.com/token` using `grant_type=refresh_token`, `client_id`, and `client_secret`, then sends only the returned bearer access token to Drive.
@@ -24,8 +24,8 @@
 ### Task 2: Configuration and composition
 
 **Files:**
-- Modify: `src/config.ts`
-- Modify: `src/server.ts`
+- Modify: `src/backend/config.ts`
+- Modify: `src/backend/server.ts`
 - Modify: `test/config-logger.test.ts`
 - Modify: affected typed `AppConfig` fixtures under `test/`
 
@@ -37,7 +37,7 @@
 ### Task 3: One-time loopback authorization CLI
 
 **Files:**
-- Create: `src/google-oauth.ts`
+- Create: `src/backend/google-oauth.ts`
 - Modify: `package.json`
 - Test: `test/google-oauth.test.ts`
 

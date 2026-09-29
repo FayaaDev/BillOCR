@@ -3,9 +3,9 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AppConfig } from "../src/config";
-import { BillDatabase, type RetryPolicy } from "../src/database";
-import { runOps, type OpsDependencies } from "../src/ops";
+import type { AppConfig } from "../src/backend/config";
+import { BillDatabase, type RetryPolicy } from "../src/db/database";
+import { runOps, type OpsDependencies } from "../src/backend/ops";
 
 const policy: RetryPolicy = { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 };
 let directory: string; let database: BillDatabase; let config: AppConfig;

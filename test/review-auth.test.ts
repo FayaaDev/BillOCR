@@ -2,10 +2,10 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AppConfig } from "../src/config";
-import { BillDatabase } from "../src/database";
-import { handleRequest } from "../src/http";
-import { createReviewAuth, handleLoginRequest } from "../src/review-auth";
+import type { AppConfig } from "../src/backend/config";
+import { BillDatabase } from "../src/db/database";
+import { handleRequest } from "../src/backend/http";
+import { createReviewAuth, handleLoginRequest } from "../src/backend/review-auth";
 
 let dir: string; let database: BillDatabase; let config: AppConfig;
 beforeEach(() => {

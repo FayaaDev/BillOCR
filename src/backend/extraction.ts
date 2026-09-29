@@ -1,7 +1,7 @@
 import type { ClaimedJob, ExtractedBill, FieldEvidence, JobHandler, JobHandlerContext } from "./contracts";
 import { createHash } from "node:crypto";
 import { isSupportedDocumentMimeType, isSupportedImageMimeType } from "./attachment-mime";
-import type { BillDatabase } from "./database";
+import type { BillDatabase } from "../db/database";
 import { IMAGE_PREPROCESSING_VERSION, isPreprocessableMimeType, type ImagePreprocessor } from "./image-preprocessing";
 import { OriginalVerificationError, readVerifiedOriginal } from "./originals";
 import { PermanentJobError } from "./worker";

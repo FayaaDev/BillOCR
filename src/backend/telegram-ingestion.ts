@@ -1,5 +1,5 @@
 import { isSupportedDocumentMimeType } from "./attachment-mime";
-import type { BillDatabase } from "./database";
+import type { BillDatabase } from "../db/database";
 import type { Bill } from "./contracts";
 import { DurableAttachmentIngestionService, type IncomingAttachment, type IncomingSourceMessage } from "./durable-attachment-ingestion";
 import type { Logger } from "./logger";

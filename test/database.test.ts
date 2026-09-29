@@ -3,9 +3,9 @@ import { Database as SqliteDatabase } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BillDatabase, type RetryPolicy } from "../src/database";
-import { transportSourceIdentity } from "../src/contracts";
-import { applyMigrations } from "../src/migrations";
+import { BillDatabase, type RetryPolicy } from "../src/db/database";
+import { transportSourceIdentity } from "../src/backend/contracts";
+import { applyMigrations } from "../src/db/migrations";
 
 const policy: RetryPolicy = { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 };
 let directory: string;
@@ -30,7 +30,7 @@ describe("migrations", () => {
 
   test("independent connections safely apply migrations to the same fresh database", async () => {
     database.close();
-    const source = `import { BillDatabase } from ${JSON.stringify(new URL("../src/database.ts", import.meta.url).pathname)}; new BillDatabase(Bun.argv[1]).close();`;
+    const source = `import { BillDatabase } from ${JSON.stringify(new URL("../src/db/database.ts", import.meta.url).pathname)}; new BillDatabase(Bun.argv[1]).close();`;
     const first = Bun.spawn(["bun", "-e", source, path], { cwd: process.cwd(), stdout: "ignore", stderr: "pipe" });
     const second = Bun.spawn(["bun", "-e", source, path], { cwd: process.cwd(), stdout: "ignore", stderr: "pipe" });
     expect(await first.exited).toBe(0);

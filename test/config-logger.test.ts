@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { loadConfig, loadValidationConfig } from "../src/config";
-import { createLogger } from "../src/logger";
-import { readServiceAccountCredential } from "../src/google-projections";
+import { loadConfig, loadValidationConfig } from "../src/backend/config";
+import { createLogger } from "../src/backend/logger";
+import { readServiceAccountCredential } from "../src/backend/google-projections";
 
 const validEnvironment = () => ({
   APP_DATA_DIR: "./data", WHATSAPP_GROUP_ID: "group", WHATSAPP_AUTH_PATH: "./auth",

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { AzureDocumentIntelligenceInvoiceProvider, AzureMalformedInvoiceOutputError, parseAzureInvoiceAnalysis } from "../src/azure-invoice";
-import { PermanentJobError } from "../src/worker";
-import { RetryableExtractionError } from "../src/extraction";
+import { AzureDocumentIntelligenceInvoiceProvider, AzureMalformedInvoiceOutputError, parseAzureInvoiceAnalysis } from "../src/backend/azure-invoice";
+import { PermanentJobError } from "../src/backend/worker";
+import { RetryableExtractionError } from "../src/backend/extraction";
 
 const endpoint = "https://example.cognitiveservices.azure.com";
 const completed = (fields: Record<string, unknown> = {}) => ({

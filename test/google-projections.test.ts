@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BillDatabase, type RetryPolicy } from "../src/database";
-import { createDriveArchiveHandler, createGoogleAdapters, createSheetsProjectionHandler, ledgerHeaders, ledgerValues, readGoogleCredential, type DriveAdapter, type DriveFile, type SheetsAdapter } from "../src/google-projections";
-import { JobWorker } from "../src/worker";
-import { createLogger } from "../src/logger";
+import { BillDatabase, type RetryPolicy } from "../src/db/database";
+import { createDriveArchiveHandler, createGoogleAdapters, createSheetsProjectionHandler, ledgerHeaders, ledgerValues, readGoogleCredential, type DriveAdapter, type DriveFile, type SheetsAdapter } from "../src/backend/google-projections";
+import { JobWorker } from "../src/backend/worker";
+import { createLogger } from "../src/backend/logger";
 
 const policy: RetryPolicy = { maxAttempts: 3, retryBaseMs: 1, retryMaxMs: 10, leaseMs: 60_000 };
 let directory: string;

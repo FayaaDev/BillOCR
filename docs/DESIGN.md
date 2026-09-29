@@ -5,7 +5,7 @@
 - The generated `dashboard-01` block was installed through the real shadcn CLI (implementation handoff provenance); the shipped interface adapts it to the invoice workflow.
 - Arabic and RTL remain primary. Numbers, identifiers, and chart plotting use LTR isolation where implemented.
 - Dark is the default; the header light/dark toggle persists `review-theme`. Only a saved `light` value overrides dark, including on login and review pages.
-- Source of truth: `src/admin-client.tsx`, `src/review-client.css`, `src/components/app-sidebar.tsx`, `src/review-ui.ts`, `src/login-ui.tsx`; calculations live in `src/dashboard-data.ts`.
+- Source of truth: `src/frontend/admin-client.tsx`, `src/frontend/review-client.css`, `src/frontend/components/app-sidebar.tsx`, `src/backend/review-ui.ts`, `src/frontend/login-ui.tsx`; calculations live in `src/frontend/dashboard-data.ts`.
 - Production chart and table consume actual local ledger data, never generated block demo data or invented trends.
 
 ## Routes and navigation

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { handleRequest } from "../src/http";
+import { handleRequest } from "../src/backend/http";
 
 test("health endpoint reports service readiness", async () => {
   const response = await handleRequest(new Request("http://localhost/health"));

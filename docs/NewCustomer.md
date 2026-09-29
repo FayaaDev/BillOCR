@@ -12,7 +12,7 @@ Run these commands from the repository root. Replace `acme2` and port `3001` wit
 
    In `customers/acme2/.env`, set `CUSTOMER_ID=acme2`, `APP_PORT=3001`, `REVIEW_ORIGIN=https://acme2.bills.example.com` (replace with your own distinct hostname, no port or trailing slash), a unique random `MONITOR_TOKEN` of at least 32 characters, `REVIEW_USERNAME`, `REVIEW_PASSWORD`, and this customer's Azure and intake settings. Set `GOOGLE_ENABLED` and `GOOGLE_AUTH_MODE` explicitly; if Google is enabled, put only this customer's credentials in `customers/acme2/secrets/` and configure its own Drive folder and Sheet. Do not reuse another customer's delivery tokens, WhatsApp account, or Google destinations. Both `customers/` and `monitor/` are Git-ignored.
 
-   Point this hostname at your TLS-terminating proxy. Route it to `127.0.0.1:3001`, preserve the public `Host` header, redirect public HTTP to HTTPS, and reject unknown virtual hosts. Apply your proxy authentication policy. Use a separate hostname for every customer and for the central monitor. Different localhost ports do not isolate browser cookies; direct port login is rejected once `REVIEW_ORIGIN` is configured. See the proxy example in `README.md`.
+   Point this hostname at your TLS-terminating proxy. Route it to `127.0.0.1:3001`, preserve the public `Host` header, redirect public HTTP to HTTPS, and reject unknown virtual hosts. Apply your proxy authentication policy. Use a separate hostname for every customer and for the central monitor. Different localhost ports do not isolate browser cookies; direct port login is rejected once `REVIEW_ORIGIN` is configured. See the proxy example in [`README.md`](../README.md).
 
 2. Start the isolated Compose project:
 

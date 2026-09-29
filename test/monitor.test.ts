@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BillDatabase } from "../src/database";
-import { handleRequest } from "../src/http";
-import { createMonitorHandler, parseCustomers } from "../src/monitor";
-import type { AppConfig } from "../src/config";
-import type { DashboardMetrics } from "../src/contracts";
+import { BillDatabase } from "../src/db/database";
+import { handleRequest } from "../src/backend/http";
+import { createMonitorHandler, parseCustomers } from "../src/backend/monitor";
+import type { AppConfig } from "../src/backend/config";
+import type { DashboardMetrics } from "../src/backend/contracts";
 
 const token = "a".repeat(40);
 const customers = parseCustomers({ customers: [{ id: "one", name: '<img src=x>', url: "http://one:3000/monitor/status", token }, { id: "two", name: "Two", url: "http://two:3000/monitor/status", token: "b".repeat(40) }] });

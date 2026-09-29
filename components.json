@@ -5,7 +5,7 @@
   "tsx": true,
   "tailwind": {
     "config": "",
-    "css": "src/review-client.css",
+    "css": "src/frontend/review-client.css",
     "baseColor": "neutral",
     "cssVariables": true,
     "prefix": ""

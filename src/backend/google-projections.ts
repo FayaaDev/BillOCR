@@ -1,6 +1,6 @@
 import { basename, dirname } from "node:path";
 import type { Bill, ClaimedJob, ExtractedBill, JobHandler, JobHandlerContext } from "./contracts";
-import type { BillDatabase } from "./database";
+import type { BillDatabase } from "../db/database";
 import { PermanentJobError } from "./worker";
 import { readVerifiedOriginal } from "./originals";
 

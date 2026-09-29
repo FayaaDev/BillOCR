@@ -1,5 +1,5 @@
 import { jobTypes, type JobHandlerContext, type JobHandlers } from "./contracts";
-import type { BillDatabase, RetryPolicy } from "./database";
+import type { BillDatabase, RetryPolicy } from "../db/database";
 import type { Logger } from "./logger";
 
 export class PermanentJobError extends Error { readonly retryable = false; }

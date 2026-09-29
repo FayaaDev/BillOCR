@@ -2,10 +2,10 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { JobHandlers } from "../src/contracts";
-import { BillDatabase, type RetryPolicy } from "../src/database";
-import { createLogger } from "../src/logger";
-import { BackgroundWorkerLoop, JobWorker } from "../src/worker";
+import type { JobHandlers } from "../src/backend/contracts";
+import { BillDatabase, type RetryPolicy } from "../src/db/database";
+import { createLogger } from "../src/backend/logger";
+import { BackgroundWorkerLoop, JobWorker } from "../src/backend/worker";
 
 const policy: RetryPolicy = { maxAttempts: 3, retryBaseMs: 100, retryMaxMs: 1_000, leaseMs: 60_000 };
 let directory: string;

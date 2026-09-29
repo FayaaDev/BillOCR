@@ -2,12 +2,12 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BillDatabase, type RetryPolicy } from "../src/database";
-import type { ExtractedBill } from "../src/contracts";
-import { createExtractionValidationCallback } from "../src/validation";
-import { createDriveArchiveHandler, type DriveAdapter } from "../src/google-projections";
-import { JobWorker } from "../src/worker";
-import { createLogger } from "../src/logger";
+import { BillDatabase, type RetryPolicy } from "../src/db/database";
+import type { ExtractedBill } from "../src/backend/contracts";
+import { createExtractionValidationCallback } from "../src/backend/validation";
+import { createDriveArchiveHandler, type DriveAdapter } from "../src/backend/google-projections";
+import { JobWorker } from "../src/backend/worker";
+import { createLogger } from "../src/backend/logger";
 
 const policy: RetryPolicy = { maxAttempts: 2, retryBaseMs: 1, retryMaxMs: 1, leaseMs: 60_000 };
 const now = "2026-09-01T00:00:00.000Z";

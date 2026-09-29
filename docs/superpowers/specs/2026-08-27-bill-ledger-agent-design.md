@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide one project-local OpenCode subagent for every role in `plan1.md` so work can be delegated with clear ownership and minimal overlap.
+Provide one project-local OpenCode subagent for every role in `docs/plan1.md` so work can be delegated with clear ownership and minimal overlap.
 
 ## Location and model
 
@@ -23,7 +23,7 @@ Agent definitions will live in `.opencode/agents/`. Every definition will use `m
 
 ## Common behavior
 
-Each agent is confined to its stated ownership, preserves the SQLite database as canonical, writes tests for behavior it introduces, and reports changed files, verification commands/results, and blockers. Prompts reinforce the data contracts and handoff rules in `plan1.md` where relevant.
+Each agent is confined to its stated ownership, preserves the SQLite database as canonical, writes tests for behavior it introduces, and reports changed files, verification commands/results, and blockers. Prompts reinforce the data contracts and handoff rules in `docs/plan1.md` where relevant.
 
 ## Verification
 

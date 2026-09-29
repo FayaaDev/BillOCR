@@ -3,8 +3,8 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
-import { WorkerImagePreprocessor } from "../src/image-preprocessing";
-import { preprocessImage } from "../src/image-preprocessing-worker";
+import { WorkerImagePreprocessor } from "../src/backend/image-preprocessing";
+import { preprocessImage } from "../src/backend/image-preprocessing-worker";
 
 const preprocessor = new WorkerImagePreprocessor({ timeoutMs: 10_000 });
 jest.setTimeout(60_000);
@@ -179,7 +179,7 @@ describe("WorkerImagePreprocessor", () => {
   });
 
   test("bounds checkerboard preprocessing time in a memory-limited subprocess", async () => {
-    const script = `import sharp from "sharp"; import { WorkerImagePreprocessor } from "./src/image-preprocessing.ts"; const svg = '<svg width="600" height="600" xmlns="http://www.w3.org/2000/svg"><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse"><rect width="1" height="1" fill="black"/><rect x="1" y="1" width="1" height="1" fill="black"/></pattern><rect width="600" height="600" fill="white"/><rect width="600" height="600" fill="url(#p)"/></svg>'; const result = await new WorkerImagePreprocessor({ timeoutMs: 7000 }).preprocess({ bytes: new Uint8Array(await sharp(Buffer.from(svg)).png().toBuffer()), mimeType: "image/png" }); if (result && !Buffer.from(result.bytes.subarray(0, 8)).equals(Buffer.from([137,80,78,71,13,10,26,10]))) process.exit(1);`;
+    const script = `import sharp from "sharp"; import { WorkerImagePreprocessor } from "./src/backend/image-preprocessing.ts"; const svg = '<svg width="600" height="600" xmlns="http://www.w3.org/2000/svg"><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse"><rect width="1" height="1" fill="black"/><rect x="1" y="1" width="1" height="1" fill="black"/></pattern><rect width="600" height="600" fill="white"/><rect width="600" height="600" fill="url(#p)"/></svg>'; const result = await new WorkerImagePreprocessor({ timeoutMs: 7000 }).preprocess({ bytes: new Uint8Array(await sharp(Buffer.from(svg)).png().toBuffer()), mimeType: "image/png" }); if (result && !Buffer.from(result.bytes.subarray(0, 8)).equals(Buffer.from([137,80,78,71,13,10,26,10]))) process.exit(1);`;
     const started = performance.now();
     const result = await runMemoryLimited(768 * 1024, script);
     expect(performance.now() - started).toBeLessThan(8_000);

@@ -1,5 +1,5 @@
 import type { AppConfig } from "./config";
-import type { BillDatabase } from "./database";
+import type { BillDatabase } from "../db/database";
 import { handleAdminRequest, type AdminHttpCapabilities } from "./admin-ui";
 import { handleReviewRequest } from "./review-ui";
 import { handleLoginRequest, reviewAuth, type ReviewAuth } from "./review-auth";

@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DurableAttachmentIngestionService, type IncomingAttachment } from "../src/durable-attachment-ingestion";
-import { transportSourceIdentity } from "../src/contracts";
-import { BillDatabase } from "../src/database";
-import type { Logger } from "../src/logger";
+import { DurableAttachmentIngestionService, type IncomingAttachment } from "../src/backend/durable-attachment-ingestion";
+import { transportSourceIdentity } from "../src/backend/contracts";
+import { BillDatabase } from "../src/db/database";
+import type { Logger } from "../src/backend/logger";
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 let directory: string;

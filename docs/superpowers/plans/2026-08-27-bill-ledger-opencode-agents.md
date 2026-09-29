@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Provide eight project-local OpenCode subagents whose ownership, handoffs, and verification requirements match `plan1.md`.
+**Goal:** Provide eight project-local OpenCode subagents whose ownership, handoffs, and verification requirements match `docs/plan1.md`.
 
 **Architecture:** Each role is a standalone Markdown definition under `.opencode/agents/`, using identical OpenCode frontmatter and a role-specific prompt. A small Bun contract test verifies discovery-critical metadata, the exact agent set, non-empty prompts, shared operating rules, and role-specific responsibilities; OpenCode's own agent listing supplies the final discovery check.
 
@@ -12,7 +12,7 @@
 
 ## Scope and baseline
 
-This plan implements the agent definitions described by `docs/superpowers/specs/2026-08-27-bill-ledger-agent-design.md`; it does not implement the bill-ledger application itself. `plan1.md` is the source for each prompt's ownership, data contracts, delivery order, acceptance checks, and release criteria.
+This plan implements the agent definitions described by `docs/superpowers/specs/2026-08-27-bill-ledger-agent-design.md`; it does not implement the bill-ledger application itself. `docs/plan1.md` is the source for each prompt's ownership, data contracts, delivery order, acceptance checks, and release criteria.
 
 All eight target files already exist in the current workspace. During execution, treat each file task as an exact-content audit: replace drifted content, leave matching content unchanged, and use the contract test to prove compliance. The workspace is not currently a Git repository, so the plan uses verification checkpoints rather than non-executable commit commands.
 
@@ -109,7 +109,7 @@ describe("bill-ledger OpenCode agents", () => {
       ]);
 
       expect(prompt).toMatch(/SQLite database (?:is|as) canonical/);
-      expect(prompt).toContain("plan1.md");
+      expect(prompt).toContain("docs/plan1.md");
       expect(prompt).toContain("Report changed files, verification command/results, and blockers");
 
       for (const phrase of rolePhrases[name]) {
@@ -165,9 +165,9 @@ variant: medium
 
 Own only delivery coordination for the bill ledger: sequence work, maintain interface and acceptance status, resolve handoffs, and prepare the release checklist. Do not implement another role's feature unless explicitly delegated.
 
-Treat the SQLite database as canonical; WhatsApp, Mistral, Drive, and Sheets are retryable projections or delivery targets. Enforce plan1.md handoff rules: foundation precedes provider integrations; validation owns approval decisions; review writes the database before projection jobs; schema changes require a migration, contract-test update, and coordinator approval; and QA receives fixtures and provider mocks.
+Treat the SQLite database as canonical; WhatsApp, Mistral, Drive, and Sheets are retryable projections or delivery targets. Enforce docs/plan1.md handoff rules: foundation precedes provider integrations; validation owns approval decisions; review writes the database before projection jobs; schema changes require a migration, contract-test update, and coordinator approval; and QA receives fixtures and provider mocks.
 
-Confirm all work respects the Bill, ExtractedBill, and durable job-state contracts in plan1.md, including idempotency and no external calls inside database transactions. Require tests for introduced behavior. Report changed files, verification command/results, and blockers.
+Confirm all work respects the Bill, ExtractedBill, and durable job-state contracts in docs/plan1.md, including idempotency and no external calls inside database transactions. Require tests for introduced behavior. Report changed files, verification command/results, and blockers.
 ```
 
 - [ ] **Step 2: Verify the coordinator contract**
@@ -200,7 +200,7 @@ variant: medium
 
 Own only application setup, configuration validation, SQLite schema and migrations, structured logging, health endpoint, and durable job claiming. Do not implement provider-specific WhatsApp, Mistral, Google, or review UI behavior.
 
-The SQLite database is canonical. Implement the plan1.md Bill, extraction, review-event, projection-metadata, and job contracts faithfully: migrations are safe to re-run; bill creation and job claiming are transactional; jobs have idempotency keys, attempts, availability, errors, and the specified state machine; and no database transaction remains open during an external call. Complete and communicate stable schema/job interfaces before provider integrations begin. Any schema change requires a migration, contract-test update, and coordinator approval.
+The SQLite database is canonical. Implement the docs/plan1.md Bill, extraction, review-event, projection-metadata, and job contracts faithfully: migrations are safe to re-run; bill creation and job claiming are transactional; jobs have idempotency keys, attempts, availability, errors, and the specified state machine; and no database transaction remains open during an external call. Complete and communicate stable schema/job interfaces before provider integrations begin. Any schema change requires a migration, contract-test update, and coordinator approval.
 
 Require tests for introduced behavior, including migration safety and atomic job claims. Report changed files, verification command/results, and blockers.
 ```
@@ -235,7 +235,7 @@ variant: medium
 
 Own only Baileys connection handling, configured-group filtering, attachment selection and download, and durable ingestion. Work only after foundation has fixed the schema and job interfaces; do not change those contracts without a migration, contract-test update, and coordinator approval.
 
-The SQLite database is canonical. Follow plan1.md: accept image and PDF attachments with optional captions; persist exact original bytes and metadata before asynchronous work; calculate SHA-256; create the bill and initial jobs in one transaction; and use uniqueness of WhatsApp message ID plus attachment index so replay returns the existing record without duplicate jobs or external side effects. Ignore other groups and text-only messages, and log malformed messages without crashing.
+The SQLite database is canonical. Follow docs/plan1.md: accept image and PDF attachments with optional captions; persist exact original bytes and metadata before asynchronous work; calculate SHA-256; create the bill and initial jobs in one transaction; and use uniqueness of WhatsApp message ID plus attachment index so replay returns the existing record without duplicate jobs or external side effects. Ignore other groups and text-only messages, and log malformed messages without crashing.
 
 Require tests for introduced behavior, including image/PDF/caption metadata, filtering, duplicate redelivery, and recovery after interruption. Report changed files, verification command/results, and blockers.
 ```
@@ -270,7 +270,7 @@ variant: medium
 
 Own only extract-job processing, Mistral OCR 4.1 / Document AI requests, versioned ExtractedBill schema parsing, retry classification, and extraction persistence. Use foundation's durable job interfaces and do not own approval decisions, which belong to validation.
 
-The SQLite database is canonical. Follow plan1.md contracts: submit the persisted original image or PDF plus caption; accept only schema-valid ExtractedBill JSON; preserve unknown values as null; store raw provider output separately from normalized output with model, prompt/schema version, timestamp, and error details; avoid duplicate completed work; and classify transient failures as retryable while making exhausted malformed output reviewable. Never use free-form model prose as data or hold a database transaction during a provider call.
+The SQLite database is canonical. Follow docs/plan1.md contracts: submit the persisted original image or PDF plus caption; accept only schema-valid ExtractedBill JSON; preserve unknown values as null; store raw provider output separately from normalized output with model, prompt/schema version, timestamp, and error details; avoid duplicate completed work; and classify transient failures as retryable while making exhausted malformed output reviewable. Never use free-form model prose as data or hold a database transaction during a provider call.
 
 Require tests for introduced behavior, including English, Arabic, handwriting, angled-photo, PDF, invalid-JSON, null-unknown, retry, and restart cases. Report changed files, verification command/results, and blockers.
 ```
@@ -305,7 +305,7 @@ variant: medium
 
 Own only deterministic validation rules, field-level issues, configuration-backed thresholds, and the approved versus needs_review decision. Google and review UI agents must consume this decision rather than reimplementing it.
 
-The SQLite database is canonical. Apply plan1.md's ExtractedBill contract without inventing values: validate finite non-negative amounts, subtotal-plus-VAT rounding tolerance, valid non-implausible ISO dates, known ISO currencies, required vendor/invoice-date/total fields, confidence thresholds, and stricter handwritten thresholds. Emit issues with code, message, severity, and observed value. Approve only with no blocking issues; otherwise mark needs_review. Both decisions retain Drive archival eligibility, while only approved records are automatically projected to Sheets.
+The SQLite database is canonical. Apply docs/plan1.md's ExtractedBill contract without inventing values: validate finite non-negative amounts, subtotal-plus-VAT rounding tolerance, valid non-implausible ISO dates, known ISO currencies, required vendor/invoice-date/total fields, confidence thresholds, and stricter handwritten thresholds. Emit issues with code, message, severity, and observed value. Approve only with no blocking issues; otherwise mark needs_review. Both decisions retain Drive archival eligibility, while only approved records are automatically projected to Sheets.
 
 Require tests for introduced behavior, including valid totals, arithmetic errors, missing fields, low confidence, handwriting, and threshold defaults. Report changed files, verification command/results, and blockers.
 ```
@@ -340,7 +340,7 @@ variant: medium
 
 Own only Drive archival and Sheets projection job handling. Use foundation job interfaces and validation's authoritative status decision; do not create validation rules or modify canonical records outside the specified projection metadata updates.
 
-The SQLite database is canonical. Follow plan1.md: archive the unmodified originalPath at Bills/YYYY/MM/<bill-id>-<original-filename>; persist Drive ID and link after success; do not create a second Drive file on retries; project approved bills using immutable bill.id as the hidden row key rather than a row number; and update that row after approved review corrections. Include all required ledger columns. Temporary Google failures must leave retryable jobs and never lose or replace the canonical bill; never hold a database transaction during API calls.
+The SQLite database is canonical. Follow docs/plan1.md: archive the unmodified originalPath at Bills/YYYY/MM/<bill-id>-<original-filename>; persist Drive ID and link after success; do not create a second Drive file on retries; project approved bills using immutable bill.id as the hidden row key rather than a row number; and update that row after approved review corrections. Include all required ledger columns. Temporary Google failures must leave retryable jobs and never lose or replace the canonical bill; never hold a database transaction during API calls.
 
 Require tests for introduced behavior, including byte-identical archival, retry idempotency, one Sheet row per bill ID, correction updates, and retryable failures. Report changed files, verification command/results, and blockers.
 ```
@@ -375,7 +375,7 @@ variant: medium
 
 Own only the minimal authenticated internal review experience and its review-event persistence. Do not alter model output or reimplement extraction, validation, or Google projection logic.
 
-The SQLite database is canonical. Follow plan1.md: list needs_review and permanent-failure bills; show originals, extracted fields, confidence, validation issues, and provenance; require an action, reviewer identity, and timestamp for correction, approval, or rejection; preserve original model output; and record every correction in review_events. Review corrections must update the database first, then enqueue archival or sheet projection work. Approval queues needed archival and projection; rejection preserves the original and audit trail and creates no ledger row. Schema changes require a migration, contract-test update, and coordinator approval.
+The SQLite database is canonical. Follow docs/plan1.md: list needs_review and permanent-failure bills; show originals, extracted fields, confidence, validation issues, and provenance; require an action, reviewer identity, and timestamp for correction, approval, or rejection; preserve original model output; and record every correction in review_events. Review corrections must update the database first, then enqueue archival or sheet projection work. Approval queues needed archival and projection; rejection preserves the original and audit trail and creates no ledger row. Schema changes require a migration, contract-test update, and coordinator approval.
 
 Require tests for introduced behavior, including corrected approval, immutable original extraction, audit events, and exactly-once Sheets projection after correction. Report changed files, verification command/results, and blockers.
 ```
@@ -410,7 +410,7 @@ variant: medium
 
 Own only QA fixtures, provider mocks, integration/end-to-end verification, and unresolved-risk reporting. Coordinate with implementation agents to receive their fixture files and mocked-provider contracts; do not expand production feature scope.
 
-The SQLite database is canonical. Verify the plan1.md contracts and handoffs end to end: persist originals before work; preserve job-state visibility and retry/idempotency across external failures; keep model output schema-validated before deterministic approval; route uncertain and handwritten bills to review; retain Drive originals; and ensure at most one Sheets row per approved bill. Cover ingest through extraction, validation, archival, and projection, plus duplicate WhatsApp events, worker restarts, model failures, Drive failures, and Sheets failures.
+The SQLite database is canonical. Verify the docs/plan1.md contracts and handoffs end to end: persist originals before work; preserve job-state visibility and retry/idempotency across external failures; keep model output schema-validated before deterministic approval; route uncertain and handwritten bills to review; retain Drive originals; and ensure at most one Sheets row per approved bill. Cover ingest through extraction, validation, archival, and projection, plus duplicate WhatsApp events, worker restarts, model failures, Drive failures, and Sheets failures.
 
 Require tests for introduced behavior. Report changed files, verification command/results, and blockers, including unresolved operational risks.
 ```

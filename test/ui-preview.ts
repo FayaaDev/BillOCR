@@ -3,10 +3,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, realpathSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
-import type { AppConfig } from "../src/config";
-import type { WhatsAppAdminTransport } from "../src/baileys-transport";
-import { BillDatabase } from "../src/database";
-import { startService, type RunningService } from "../src/server";
+import type { AppConfig } from "../src/backend/config";
+import type { WhatsAppAdminTransport } from "../src/backend/baileys-transport";
+import { BillDatabase } from "../src/db/database";
+import { startService, type RunningService } from "../src/backend/server";
 
 const root = join(import.meta.dir, "..");
 const build = Bun.spawnSync({ cmd: ["bun", "run", "build"], cwd: root, stdout: "inherit", stderr: "inherit" });

@@ -2,10 +2,10 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtractedBill } from "../src/contracts";
-import { BillDatabase } from "../src/database";
-import { createExtractionValidationCallback, parseObservedValue, serializeObservedValue, validateExtractedBill, type ValidationConfig } from "../src/validation";
-import { ISO_4217_DATASET_VERSION, currencyMinorUnits, iso4217MinorUnits, knownIso4217Codes, minorUnitPolicy } from "../src/currency";
+import type { ExtractedBill } from "../src/backend/contracts";
+import { BillDatabase } from "../src/db/database";
+import { createExtractionValidationCallback, parseObservedValue, serializeObservedValue, validateExtractedBill, type ValidationConfig } from "../src/backend/validation";
+import { ISO_4217_DATASET_VERSION, currencyMinorUnits, iso4217MinorUnits, knownIso4217Codes, minorUnitPolicy } from "../src/backend/currency";
 
 const config: ValidationConfig = { currencyRoundingTolerance: 0.01, maxFutureInvoiceDays: 30 };
 const extracted = (overrides: Partial<ExtractedBill> = {}): ExtractedBill => ({

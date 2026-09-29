@@ -2,6 +2,18 @@
 
 SQLite is canonical. WhatsApp and Telegram supply immutable originals; Mistral, Azure Document Intelligence, Google Drive, and Google Sheets are retryable external systems.
 
+## Project layout
+
+- `src/frontend/`: browser clients, presentation helpers, CSS, components, hooks, and utilities.
+- `src/backend/`: server, intake, providers, workers, monitoring, and operations.
+- `src/db/`: SQLite database and migrations.
+- `assets/`: static source assets, including the favicon.
+- `test/`: offline tests and UI preview tooling.
+- `docs/`: [installation](docs/Install.md), [customer setup](docs/NewCustomer.md), design, product, plans, and architecture references.
+- `dist/`: generated bundles; backend entrypoints stay flat (`dist/server.js`, `dist/monitor.js`, and worker files).
+
+`customers/` is an ignored, operator-created directory for private per-customer environment files and credentials; see [customer setup](docs/NewCustomer.md). Runtime data and secrets are also ignored. Compose, Docker, and package configuration remain at root.
+
 ## Local setup
 
 Install Bun 1.2+, then run `bun install --frozen-lockfile`. Copy `.env.example` to `.env`, create `data/` and `secrets/`, and set strong unique `REVIEW_USERNAME`/`REVIEW_PASSWORD` values. Run migrations with `bun run migrate`, then start with `bun run start`. For local development, `bun run dev` uses `data/dev/` for its database, originals, and WhatsApp auth, separate from production Docker volumes; `.env.local` can override the dev Telegram settings. Both `data/` and `.env.local` are Git-ignored.

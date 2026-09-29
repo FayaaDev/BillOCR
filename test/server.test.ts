@@ -3,17 +3,17 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AppConfig } from "../src/config";
-import { startService, type RunningService } from "../src/server";
-import type { WhatsAppAdminTransport, WhatsAppTransport } from "../src/baileys-transport";
-import type { IncomingWhatsAppMessage } from "../src/whatsapp-ingestion";
-import type { MistralOcrProvider } from "../src/extraction";
-import type { AzureInvoiceProvider } from "../src/azure-invoice";
-import type { DriveAdapter, DriveFile, SheetsAdapter } from "../src/google-projections";
-import { BillDatabase } from "../src/database";
-import { IMAGE_PREPROCESSING_VERSION, type ImagePreprocessor } from "../src/image-preprocessing";
-import type { TelegramPollingService } from "../src/telegram-ingestion";
-import { DurableAttachmentIngestionService } from "../src/durable-attachment-ingestion";
+import type { AppConfig } from "../src/backend/config";
+import { startService, type RunningService } from "../src/backend/server";
+import type { WhatsAppAdminTransport, WhatsAppTransport } from "../src/backend/baileys-transport";
+import type { IncomingWhatsAppMessage } from "../src/backend/whatsapp-ingestion";
+import type { MistralOcrProvider } from "../src/backend/extraction";
+import type { AzureInvoiceProvider } from "../src/backend/azure-invoice";
+import type { DriveAdapter, DriveFile, SheetsAdapter } from "../src/backend/google-projections";
+import { BillDatabase } from "../src/db/database";
+import { IMAGE_PREPROCESSING_VERSION, type ImagePreprocessor } from "../src/backend/image-preprocessing";
+import type { TelegramPollingService } from "../src/backend/telegram-ingestion";
+import { DurableAttachmentIngestionService } from "../src/backend/durable-attachment-ingestion";
 
 let directory: string;
 let service: RunningService;

@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { filenameKeyFromSourceBasename, isSourceBasename, transportSourceIdentity, type AdminUploadBatch, type AdminUploadBatchItem, type AdminUploadBatchStatusCounts, type AzureExtractionOperation, type BeginExtractionInvocationResult, type Bill, type BillClassification, type BillSource, type ClaimedJob, type CreateBillInput, type DashboardMetrics, type EffectiveBillData, type ExtractedBill, type Extraction, type ExtractionFallbackStatus, type ExtractionInvocation, type ExtractionPolicy, type ExtractionProvider, type InitialJobInput, type Job, type JobState, type JobTransition, type JobType, type ProviderProjectionMetadata, type ReviewEvent, type ValidationIssue } from "./contracts";
+import { filenameKeyFromSourceBasename, isSourceBasename, transportSourceIdentity, type AdminUploadBatch, type AdminUploadBatchItem, type AdminUploadBatchStatusCounts, type AzureExtractionOperation, type BeginExtractionInvocationResult, type Bill, type BillClassification, type BillSource, type ClaimedJob, type CreateBillInput, type DashboardMetrics, type EffectiveBillData, type ExtractedBill, type Extraction, type ExtractionFallbackStatus, type ExtractionInvocation, type ExtractionPolicy, type ExtractionProvider, type InitialJobInput, type Job, type JobState, type JobTransition, type JobType, type ProviderProjectionMetadata, type ReviewEvent, type ValidationIssue } from "../backend/contracts";
 import { applyMigrations } from "./migrations";
-import { jobTypes } from "./contracts";
+import { jobTypes } from "../backend/contracts";
 
 type JobRow = {
   id: string; bill_id: string; type: JobType; state: JobState; idempotency_key: string; attempts: number; available_at: string;

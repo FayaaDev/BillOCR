@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAuthorizationRequest, exchangeAuthorizationCode, googleOAuthSetupError, parseDesktopClientJson, publishAuthorizedUserCredential, runGoogleOAuth, validateCallback } from "../src/google-oauth";
+import { createAuthorizationRequest, exchangeAuthorizationCode, googleOAuthSetupError, parseDesktopClientJson, publishAuthorizedUserCredential, runGoogleOAuth, validateCallback } from "../src/backend/google-oauth";
 
 const directories: string[] = [];
 afterEach(() => directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true })));

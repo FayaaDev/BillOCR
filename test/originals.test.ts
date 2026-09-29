@@ -4,7 +4,7 @@ import { mkdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
-import { OriginalVerificationError, readVerifiedOriginal } from "../src/originals";
+import { OriginalVerificationError, readVerifiedOriginal } from "../src/backend/originals";
 
 let dir: string; let root: string; let file: string; let bytes: Uint8Array;
 beforeEach(() => { dir = realpathSync(mkdtempSync(join(tmpdir(), "originals-"))); root = join(dir, "root"); mkdirSync(root); file = join(root, "bill.pdf"); bytes = new TextEncoder().encode("%PDF-1.7\nidentity"); writeFileSync(file, bytes); });

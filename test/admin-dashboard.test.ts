@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { adminZipTerminal, parseAdminOverview, parseAdminZipStatus, whatsappPairingView, type AdminOverview, type AdminZipStatus } from "../src/admin-dashboard";
+import { adminZipTerminal, parseAdminOverview, parseAdminZipStatus, whatsappPairingView, type AdminOverview, type AdminZipStatus } from "../src/frontend/admin-dashboard";
 
 const overview = { metrics: { received: 12, approved: 9, failed: 1, retryableJobs: 2, permanentFailureJobs: 3 }, whatsapp: { state: "awaiting_pairing", canPair: true, configuredGroupId: "1203630@g.us", groups: [{ id: "1203630@g.us", name: "الفواتير" }], csrf: "signed-token" }, telegram: { enabled: true, groupIds: ["-100123"] }, zip: { available: true, maxCompressedBytes: 1024, csrf: "zip-token" } } satisfies AdminOverview;
 
@@ -31,9 +31,9 @@ test("pairing view exposes QR and cancel only after it is ready, then offers a s
 });
 
 test("dashboard client uses the shared RTL dashboard, live bills, and real operational routes", () => {
-  const client = readFileSync(join(import.meta.dir, "..", "src", "admin-client.tsx"), "utf8");
-  const sidebar = readFileSync(join(import.meta.dir, "..", "src", "components", "app-sidebar.tsx"), "utf8");
-  const reviewClient = readFileSync(join(import.meta.dir, "..", "src", "review-client.tsx"), "utf8");
+  const client = readFileSync(join(import.meta.dir, "..", "src", "frontend", "admin-client.tsx"), "utf8");
+  const sidebar = readFileSync(join(import.meta.dir, "..", "src", "frontend", "components", "app-sidebar.tsx"), "utf8");
+  const reviewClient = readFileSync(join(import.meta.dir, "..", "src", "frontend", "review-client.tsx"), "utf8");
   expect(client).toContain('export function Dashboard');
   expect(client).toContain('fetch("/review/api/bills"');
   expect(client).toContain('setInterval(load, 15_000)');

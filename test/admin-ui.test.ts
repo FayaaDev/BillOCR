@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AppConfig } from "../src/config";
-import { BillDatabase } from "../src/database";
-import { handleAdminRequest, type AdminHttpCapabilities } from "../src/admin-ui";
-import { reviewAuth } from "../src/review-auth";
+import type { AppConfig } from "../src/backend/config";
+import { BillDatabase } from "../src/db/database";
+import { handleAdminRequest, type AdminHttpCapabilities } from "../src/backend/admin-ui";
+import { reviewAuth } from "../src/backend/review-auth";
 
 const config: AppConfig = {
   host: "127.0.0.1", port: 0, dataDir: "/tmp", databasePath: "/tmp/test.sqlite", logLevel: "error", originals: { dir: "/tmp/originals", maxAttachmentBytes: 1 }, telegram: { enabled: false, botToken: null, groupIds: [], pollTimeoutSeconds: 30, requestTimeoutMs: 35_000, maxResponseBytes: 1 },

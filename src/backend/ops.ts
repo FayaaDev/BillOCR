@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, join, resolve } from "node:path";
 import { canonicalOriginalsDir, loadConfig, type AppConfig } from "./config";
-import { BillDatabase } from "./database";
+import { BillDatabase } from "../db/database";
 import type { Bill } from "./contracts";
 import { readVerifiedOriginal } from "./originals";
 

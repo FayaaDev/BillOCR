@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { canonicalOriginalsDir, loadConfig, type AppConfig } from "./config";
-import { BillDatabase } from "./database";
+import { BillDatabase } from "../db/database";
 import { handleRequest } from "./http";
 import { createLogger } from "./logger";
 import type { JobHandlers } from "./contracts";
