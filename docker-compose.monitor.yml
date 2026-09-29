@@ -1,0 +1,21 @@
+services:
+  monitor:
+    build: .
+    command: ["bun", "dist/monitor.js"]
+    env_file: ${MONITOR_ENV_FILE:-./monitor/.env}
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 3000
+      MONITOR_CUSTOMERS_FILE: /run/monitor/customers.json
+    volumes:
+      - ${MONITOR_CUSTOMERS_FILE:-./monitor/customers.json}:/run/monitor/customers.json:ro
+    ports:
+      - "127.0.0.1:${MONITOR_PORT:-3100}:3000"
+    healthcheck:
+      disable: true
+    networks:
+      - monitoring
+networks:
+  monitoring:
+    external: true
+    name: bill-monitoring

@@ -1,0 +1,10 @@
+{
+  "customers": [
+    {
+      "id": "acme",
+      "name": "Acme",
+      "url": "http://acme:3000/monitor/status",
+      "token": "replace-with-the-unique-32-character-or-longer-customer-token"
+    }
+  ]
+}

@@ -2,16 +2,17 @@ services:
   bill-ledger:
     build: .
     mem_limit: 512m
-    env_file: .env
+    env_file: ${CUSTOMER_ENV_FILE:-.env}
     ports:
-      - "${APP_PORT:-3000}:3000"
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
     volumes:
       - bill-data:/data
       - bill-originals:/data/originals
       - bill-whatsapp-auth:/data/whatsapp-auth
-      - ./.secrets:/run/secrets:ro
+      - ${CUSTOMER_SECRETS_DIR:-./.secrets}:/run/secrets:ro
     environment:
       APP_HOST: 0.0.0.0
+      APP_PORT: 3000
       APP_DATA_DIR: /data
       APP_DATABASE_PATH: /data/bill-ledger.sqlite
       ORIGINALS_DIR: /data/originals

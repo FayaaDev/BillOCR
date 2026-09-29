@@ -22,3 +22,6 @@ whatsapp-auth/
 .DS_Store
 .DS_Store
 .beads/interactions.jsonl
+.opencode/ralph-loop.local.md
+customers/
+monitor/
