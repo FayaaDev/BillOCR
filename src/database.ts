@@ -1017,6 +1017,14 @@ export class BillDatabase {
     return this.sqlite.query<JobTransitionRow, [string]>("SELECT * FROM job_transition_history WHERE job_id = ? ORDER BY rowid").all(jobId).map(toJobTransition);
   }
 
+  getJobHealth(now = new Date(), supportedTypes: readonly JobType[] = jobTypes): { overdueJobs: number; oldestDueAt: string | null } {
+    return this.sqlite.query<{ overdueJobs: number; oldestDueAt: string | null }, string[]>(`SELECT COUNT(*) AS overdueJobs, MIN(CASE WHEN state = 'running' THEN lease_expires_at ELSE available_at END) AS oldestDueAt FROM jobs
+      WHERE ((state IN ('pending','retryable_failure') AND available_at <= ?) OR (state = 'running' AND lease_expires_at <= ?))
+      AND type IN (${supportedTypes.map(() => "?").join(",") || "NULL"})
+      AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = jobs.bill_id)
+      AND (type != 'archive_to_drive' OR EXISTS (SELECT 1 FROM bills b WHERE b.id = jobs.bill_id AND (b.invoice_dedup_required = 0 OR EXISTS (SELECT 1 FROM invoice_dedup_decisions d WHERE d.bill_id = b.id AND d.owner_id = b.id))))`).get(now.toISOString(), now.toISOString(), ...supportedTypes)!;
+  }
+
   /** Atomically transitions exactly one available job to running. No provider code is invoked here. */
   claimNextJob(workerId: string, policy: RetryPolicy, now = new Date(), supportedTypes: readonly JobType[] = jobTypes): ClaimedJob | null {
     if (supportedTypes.length === 0) return null;

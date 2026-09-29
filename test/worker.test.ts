@@ -33,6 +33,9 @@ test("an unsupported job remains pending for a later injected handler", async ()
   expect(await worker.runOnce()).toBe(false);
   const job = database.sqlite.query<{ state: string }, [string]>("SELECT state FROM jobs WHERE bill_id = ?").get(bill.bill.id);
   expect(job?.state).toBe("pending");
+  expect(database.getJobHealth(new Date(), worker.supportedTypes)).toEqual({ overdueJobs: 0, oldestDueAt: null });
+  const enabled = new JobWorker(database, { extract: async () => undefined }, policy, "enabled", createLogger("error"));
+  expect(database.getJobHealth(new Date(), enabled.supportedTypes).overdueJobs).toBe(1);
 });
 
 test("provider error content is sanitized from durable diagnostics and never logged", async () => {
@@ -54,6 +57,40 @@ test("background worker loop yields to the event loop and stops cleanly", async 
   expect(calls).toBe(1);
   await Bun.sleep(20);
   expect(calls).toBe(1);
+});
+
+test("worker health distinguishes idle, long active work, stalled work, and shutdown", async () => {
+  const pending = Promise.withResolvers<boolean>();
+  const loop = new BackgroundWorkerLoop({ runOnce: () => pending.promise }, createLogger("error"));
+  loop.start(); await Bun.sleep(5);
+  const activeSince = loop.health().activeSince!;
+  expect(loop.health(activeSince + 60_000).reasons).toEqual([]);
+  expect(loop.health(activeSince + 16 * 60_000).reasons).toContain("worker_stalled");
+  pending.resolve(false); await Bun.sleep(5);
+  expect(loop.health().activeSince).toBeNull(); expect(loop.health().reasons).toEqual([]);
+  expect(loop.health(loop.health().lastProgressAt + 31_000).reasons).toContain("worker_stalled");
+  await loop.stop(); expect(loop.health().reasons).toContain("worker_stopped");
+});
+
+test("worker health reports iteration failure and recovers on a successful idle poll", async () => {
+  let fail = true;
+  const loop = new BackgroundWorkerLoop({ runOnce: async () => { if (fail) throw new Error("secret"); return false; } }, createLogger("error"), 5);
+  loop.start(); await Bun.sleep(3);
+  expect(loop.health().reasons).toContain("worker_failed");
+  fail = false; await Bun.sleep(20);
+  expect(loop.health().reasons).toEqual([]); await loop.stop();
+});
+
+test("backlog health excludes future retries and valid leases, includes expired leases", () => {
+  enqueue();
+  const now = new Date();
+  expect(database.getJobHealth(now).overdueJobs).toBe(1);
+  database.sqlite.query("UPDATE jobs SET state = 'retryable_failure', available_at = ?").run(new Date(now.getTime() + 60_000).toISOString());
+  expect(database.getJobHealth(now).overdueJobs).toBe(0);
+  database.sqlite.query("UPDATE jobs SET state = 'running', lease_expires_at = ?").run(new Date(now.getTime() + 60_000).toISOString());
+  database.sqlite.query("UPDATE jobs SET available_at = ?").run(new Date(now.getTime() - 3_600_000).toISOString());
+  expect(database.getJobHealth(now)).toEqual({ overdueJobs: 0, oldestDueAt: null });
+  expect(database.getJobHealth(new Date(now.getTime() + 61_000))).toEqual({ overdueJobs: 1, oldestDueAt: new Date(now.getTime() + 60_000).toISOString() });
 });
 
 test("lease heartbeat prevents a second worker from duplicating a long provider call", async () => {

@@ -10,6 +10,22 @@ const validEnvironment = () => ({
   REVIEW_USERNAME: "reviewer", REVIEW_PASSWORD: "review-secret",
 });
 
+test("review origin is optional but configured customers require canonical HTTPS DNS origins", () => {
+  expect(loadConfig(validEnvironment()).review.origin).toBeUndefined();
+  for (const origin of ["https://customer-a.example.test", "https://customer-b.example.test", "https://xn--bcher-kva.example"]) {
+    expect(loadConfig({ ...validEnvironment(), REVIEW_ORIGIN: origin }).review.origin).toBe(origin);
+  }
+  for (const origin of [
+    "", " ", "not a URL", "http://customer.example.test", "http://localhost", "http://a.localhost",
+    "https://localhost", "https://a.localhost", "https://localhost.", "https://127.0.0.1", "https://127.1",
+    "https://[::1]", "https://2130706433", "https://customer", "https://customer.example.test:8443",
+    "https://customer.example.test:443", "https://customer.example.test/", "https://customer.example.test/path",
+    "https://customer.example.test?", "https://customer.example.test#", "https://user:secret@customer.example.test",
+    "HTTPS://customer.example.test", "https://Customer.example.test", " https://customer.example.test",
+    "https://customer.example.test.", "https://bad_name.example.test", "https://-bad.example.test",
+  ]) expect(() => loadConfig({ ...validEnvironment(), REVIEW_ORIGIN: origin })).toThrow("REVIEW_ORIGIN");
+});
+
 test("configuration allows WhatsApp to be disabled for test environments", () => {
   expect(loadConfig({ ...validEnvironment(), WHATSAPP_ENABLED: "false" }).whatsapp.enabled).toBe(false);
 });

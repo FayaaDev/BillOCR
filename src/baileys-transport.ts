@@ -6,7 +6,7 @@ import { isSupportedDocumentMimeType, isSupportedImageMimeType } from "./attachm
 import type { IncomingWhatsAppMessage } from "./whatsapp-ingestion";
 import { PairingQrTokenStore, renderStoredPairingQr } from "./whatsapp-pairing";
 
-export interface WhatsAppTransport { start(onMessage: (message: IncomingWhatsAppMessage) => Promise<void>): Promise<void>; stop(): Promise<void>; }
+export interface WhatsAppTransport { start(onMessage: (message: IncomingWhatsAppMessage) => Promise<void>): Promise<void>; stop(): Promise<void>; status?(): WhatsAppConnectionStatus; }
 export type WhatsAppConnectionState = "unavailable" | "connecting" | "awaiting_pairing" | "connected";
 export interface WhatsAppConnectionStatus { state: WhatsAppConnectionState; canPair: boolean; }
 export interface RenderedWhatsAppQr { body: Uint8Array; contentType: "image/svg+xml"; }
@@ -14,7 +14,7 @@ export interface WhatsAppGroup { id: string; subject: string; }
 export interface WhatsAppGroupDiscovery { available: boolean; groups: readonly WhatsAppGroup[]; }
 /** Narrow capability intended for an authenticated HTTP adapter; it never exposes the socket or a QR token. */
 export interface WhatsAppAdminOperations { status(): WhatsAppConnectionStatus; pairingQr(): Promise<RenderedWhatsAppQr | null>; groups(): Promise<WhatsAppGroupDiscovery>; startPairing(): Promise<void>; cancelPairing(): Promise<void>; }
-export interface WhatsAppAdminTransport extends WhatsAppTransport, WhatsAppAdminOperations {}
+export interface WhatsAppAdminTransport extends WhatsAppTransport, WhatsAppAdminOperations { status(): WhatsAppConnectionStatus; }
 type Socket = { ev: { on(event: string, listener: (...args: any[]) => void): void; off?(event: string, listener: (...args: any[]) => void): void }; end(error?: Error): void; groupFetchAllParticipating?(): Promise<Record<string, { id?: string; subject?: string }>> };
 type Auth = { state: unknown; saveCreds: () => Promise<void> };
 export interface SilentPinoLogger { level: string; child(bindings: Record<string, unknown>): SilentPinoLogger; trace(object: unknown, message?: string): void; debug(object: unknown, message?: string): void; info(object: unknown, message?: string): void; warn(object: unknown, message?: string): void; error(object: unknown, message?: string): void; fatal(object: unknown, message?: string): void; }

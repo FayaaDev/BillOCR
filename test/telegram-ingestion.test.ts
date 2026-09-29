@@ -22,6 +22,35 @@ function service(responses: Response[], overrides: Partial<ConstructorParameters
   return { requests, service: new TelegramBotApiIngestionService({ botToken: "bot-secret", groupIds: ["-100", "-200"], pollTimeoutSeconds: 1, requestTimeoutMs: 2_000, maxResponseBytes: 1_024, originalsDir: join(directory, "originals"), maxAttachmentBytes: 10, database, logger, fetch: fetcher, retryDelayMs: 1, ...overrides }) };
 }
 
+test("polling health stays starting until success, degrades on failure, and recovers", async () => {
+  const first = Promise.withResolvers<Response>(); const second = Promise.withResolvers<Response>(); const third = Promise.withResolvers<Response>();
+  const requests = [first.promise, second.promise, third.promise];
+  const { service: poller } = service([], { fetch: async (_url, init) => {
+    const next = requests.shift(); if (next) return next;
+    return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+  } });
+  poller.start(); expect(poller.status().state).toBe("starting");
+  first.resolve(json([])); await Bun.sleep(5); expect(poller.status().state).toBe("connected");
+  expect(poller.status(Date.now() + 16 * 60_000).state).toBe("failed");
+  expect(poller.status().state).toBe("connected");
+  second.reject(new Error("bot-secret")); await Bun.sleep(5); expect(poller.status().state).toBe("failed");
+  third.resolve(json([])); await Bun.sleep(5); expect(poller.status().state).toBe("connected");
+  await poller.stop(); expect(poller.status().state).toBe("stopped");
+});
+
+test("an unexpectedly exited Telegram loop cannot retain connected status", async () => {
+  const first = Promise.withResolvers<Response>(); const second = Promise.withResolvers<Response>();
+  const responses = [first.promise, second.promise];
+  const { service: poller } = service([], {
+    fetch: async () => responses.shift()!,
+    logger: { ...logger, warn() { throw new Error("logging unavailable"); } },
+  });
+  poller.start(); first.resolve(json([])); await Bun.sleep(5);
+  expect(poller.status().state).toBe("connected");
+  second.reject(new Error("poll failed")); await Bun.sleep(5);
+  expect(poller.status().state).toBe("stopped"); await poller.stop();
+});
+
 test("discards the startup snapshot, then normalizes ordered photos, documents, and anonymous senders", async () => {
   const { service: poller, requests } = service([
     json([update(4)]),

@@ -19,5 +19,5 @@ COPY --from=build --chown=bun:bun /app/dist ./dist
 USER bun
 ENV APP_HOST=0.0.0.0
 EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD bun -e 'fetch("http://127.0.0.1:3000/health").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD bun -e 'fetch("http://127.0.0.1:3000/ready").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'
 CMD ["bun", "run", "dist/server.js"]

@@ -57,6 +57,174 @@ test("health remains responsive while the empty injected worker lifecycle runs",
   expect(await response.json()).toEqual({ status: "ok" });
 });
 
+test("readiness waits for reconciliation and listener initialization, tracks disconnects and shutdown", async () => {
+  await service.shutdown();
+  const reconciled = Promise.withResolvers<[]>(); const initialized = Promise.withResolvers<void>(); const stopped = Promise.withResolvers<void>();
+  let state: "connected" | "failed" = "connected";
+  const config = { ...lifecycleConfig("readiness", { telegram: true }), monitorToken: "monitor-secret" };
+  service = startService(config, {}, { telegramTransport: {
+    reconcilePending: () => reconciled.promise, start: () => initialized.promise, stop: () => stopped.promise,
+    pollOnce: async () => undefined, status: () => ({ state }),
+  } });
+  const ready = () => fetch(new URL("ready", service.url));
+  expect((await ready()).status).toBe(503);
+  reconciled.resolve([]); await Bun.sleep(5);
+  expect((await ready()).status).toBe(503);
+  initialized.resolve(); await Bun.sleep(5);
+  expect((await ready()).status).toBe(200);
+  state = "failed";
+  const degraded = await ready(); expect(degraded.status).toBe(503);
+  expect(await degraded.json()).toMatchObject({ health: { status: "degraded", reasons: ["telegram_unavailable"] } });
+  expect((await fetch(new URL("monitor/status", service.url))).status).toBe(401);
+  const monitor = await fetch(new URL("monitor/status", service.url), { headers: { authorization: "Bearer monitor-secret" } });
+  expect(monitor.status).toBe(200); expect(await monitor.json()).toMatchObject({ metrics: expect.any(Object), health: { status: "degraded", reasons: ["telegram_unavailable"] } });
+  state = "connected"; expect((await ready()).status).toBe(200);
+  const shutdown = service.shutdown();
+  expect(await (await ready()).json()).toMatchObject({ health: { status: "degraded", reasons: ["shutting_down"] } });
+  expect((await fetch(new URL("health", service.url))).status).toBe(200);
+  stopped.resolve(); await shutdown;
+});
+
+test("readiness retains sanitized startup failures while liveness stays healthy", async () => {
+  for (const failure of ["start", "reconcile"] as const) {
+    await service.shutdown();
+    service = startService(lifecycleConfig(`failed-${failure}`, { telegram: true }), {}, { telegramTransport: {
+      reconcilePending: async () => { if (failure === "reconcile") throw new Error("secret-token"); return []; },
+      start: async () => { if (failure === "start") throw new Error("secret-token"); }, stop: async () => undefined, pollOnce: async () => undefined,
+    } });
+    await Bun.sleep(10);
+    const response = await fetch(new URL("ready", service.url)); expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.health.reasons).toContain(failure === "start" ? "telegram_listener_start_failed" : "telegram_reconciliation_failed");
+    expect(JSON.stringify(body)).not.toContain("secret-token");
+    expect((await fetch(new URL("health", service.url))).status).toBe(200);
+  }
+});
+
+test("readiness observes ongoing WhatsApp connection state without requiring admin methods", async () => {
+  await service.shutdown();
+  let state: "connected" | "connecting" | "unavailable" = "connected";
+  service = startService(lifecycleConfig("whatsapp-health", { whatsapp: true }), {}, { whatsappTransport: {
+    start: async () => undefined, stop: async () => undefined, status: () => ({ state, canPair: true }),
+  } });
+  await Bun.sleep(10);
+  expect((await fetch(new URL("ready", service.url))).status).toBe(200);
+  for (const disconnected of ["connecting", "unavailable"] as const) {
+    state = disconnected;
+    const response = await fetch(new URL("ready", service.url)); expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ health: { reasons: ["whatsapp_disconnected"] } });
+  }
+  state = "connected"; expect((await fetch(new URL("ready", service.url))).status).toBe(200);
+});
+
+test("startup retries only failed stages and clears reasons after recovery without restarting healthy intake", async () => {
+  await service.shutdown();
+  let reconciles = 0; let telegramStarts = 0; let whatsappStarts = 0;
+  let allowReconcile = false; let allowStart = false;
+  service = startService(lifecycleConfig("startup-recovery", { telegram: true, whatsapp: true }), {}, {
+    startupRetryMs: 10,
+    whatsappTransport: { start: async () => { whatsappStarts += 1; }, stop: async () => undefined },
+    telegramTransport: {
+      reconcilePending: async () => { reconciles += 1; if (!allowReconcile) throw new Error("private reconciliation error"); return []; },
+      start: async () => { telegramStarts += 1; if (!allowStart) throw new Error("private listener error"); },
+      stop: async () => undefined, pollOnce: async () => undefined,
+    },
+  });
+  await waitFor(() => reconciles >= 2);
+  const ready = () => fetch(new URL("ready", service.url));
+  const failed = await ready(); expect(failed.status).toBe(503);
+  expect((await failed.json()).health.reasons).toContain("telegram_reconciliation_failed");
+  expect(whatsappStarts).toBe(1); expect(telegramStarts).toBe(0);
+  allowReconcile = true;
+  await waitFor(() => telegramStarts >= 2);
+  const startFailure = (await (await ready()).json()).health.reasons;
+  expect(startFailure).toContain("telegram_listener_start_failed");
+  expect(startFailure).not.toContain("telegram_reconciliation_failed");
+  const successfulReconciles = reconciles;
+  allowStart = true;
+  await waitFor(() => telegramStarts >= 3); await Bun.sleep(5);
+  expect((await ready()).status).toBe(200);
+  const successfulStarts = telegramStarts;
+  await Bun.sleep(30);
+  expect(reconciles).toBe(successfulReconciles); expect(telegramStarts).toBe(successfulStarts); expect(whatsappStarts).toBe(1);
+});
+
+test("shutdown cancels scheduled startup retries", async () => {
+  await service.shutdown();
+  let starts = 0;
+  service = startService(lifecycleConfig("retry-cancel", { whatsapp: true }), {}, {
+    startupRetryMs: 20,
+    whatsappTransport: { start: async () => { starts += 1; throw new Error("offline"); }, stop: async () => undefined },
+  });
+  await waitFor(() => starts === 1);
+  await service.shutdown(); const attemptsAtShutdown = starts;
+  await Bun.sleep(40); expect(starts).toBe(attemptsAtShutdown);
+});
+
+test("shutdown prevents listener startup after an active reconciliation retry drains", async () => {
+  await service.shutdown();
+  const retry = Promise.withResolvers<[]>();
+  let reconciles = 0; let starts = 0;
+  service = startService(lifecycleConfig("retry-drain", { telegram: true }), {}, {
+    startupRetryMs: 5,
+    telegramTransport: {
+      reconcilePending: async () => { reconciles += 1; if (reconciles === 1) throw new Error("offline"); return retry.promise; },
+      start: async () => { starts += 1; }, stop: async () => undefined, pollOnce: async () => undefined,
+    },
+  });
+  await waitFor(() => reconciles === 2);
+  const shutdown = service.shutdown(); retry.resolve([]); await shutdown;
+  await Bun.sleep(15); expect(starts).toBe(0); expect(reconciles).toBe(2);
+});
+
+test("database failures return safe 503s and overdue backlog degrades readiness", async () => {
+  await service.shutdown();
+  let database!: BillDatabase;
+  const active = Promise.withResolvers<void>(); const release = Promise.withResolvers<void>();
+  service = startService({ ...lifecycleConfig("database-health"), monitorToken: "monitor-secret" }, {
+    extract: async () => { active.resolve(); await release.promise; }, project_to_sheet: async () => undefined,
+  }, { createDatabase: (path) => {
+    database = new BillDatabase(path);
+    database.createBillWithInitialJobs({ whatsappMessageId: "active", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: new Date().toISOString(), mimeType: "image/png", originalPath: "/unused", contentSha256: "b".repeat(64) }, [{ type: "extract", idempotencyKey: "active" }]);
+    return database;
+  } });
+  try {
+    await active.promise;
+    expect((await fetch(new URL("ready", service.url))).status).toBe(200);
+    database.createBillWithInitialJobs({ whatsappMessageId: "overdue", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: new Date().toISOString(), mimeType: "image/png", originalPath: "/unused", contentSha256: "a".repeat(64) }, [{ type: "project_to_sheet", idempotencyKey: "overdue" }]);
+    database.sqlite.query("UPDATE jobs SET available_at = ?").run(new Date(Date.now() - 3_600_000).toISOString());
+    const overdue = await fetch(new URL("ready", service.url)); expect(overdue.status).toBe(503);
+    expect(await overdue.json()).toEqual({ health: { status: "degraded", reasons: ["backlog_stalled"] } });
+    const metrics = await fetch(new URL("monitor/status", service.url), { headers: { authorization: "Bearer monitor-secret" } });
+    expect(await metrics.json()).toMatchObject({ health: { backlog: { overdueJobs: 1 } } });
+    database.getJobHealth = () => { throw new Error("database-secret"); };
+    const unavailable = await fetch(new URL("ready", service.url)); expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toMatchObject({ health: { reasons: ["database_unavailable"] } });
+    expect((await fetch(new URL("monitor/status", service.url), { headers: { authorization: "Bearer monitor-secret" } })).status).toBe(503);
+    database.getDashboardMetrics = () => { throw new Error("database-secret"); };
+    const response = await fetch(new URL("monitor/status", service.url), { headers: { authorization: "Bearer monitor-secret" } });
+    expect(response.status).toBe(503); expect(await response.json()).toEqual({ health: { status: "degraded", reasons: ["database_unavailable"] } });
+  } finally { release.resolve(); }
+});
+
+test("Google-disabled readiness ignores aged pending Google jobs", async () => {
+  await service.shutdown();
+  let database!: BillDatabase;
+  service = startService({ ...lifecycleConfig("disabled-google-health"), monitorToken: "monitor-secret" }, {}, { createDatabase: (path) => {
+    database = new BillDatabase(path);
+    database.createBillWithInitialJobs({ whatsappMessageId: "google-only", whatsappGroupId: "group", whatsappSenderId: "sender", attachmentIndex: 0, receivedAt: new Date().toISOString(), mimeType: "image/png", originalPath: "/unused", contentSha256: "a".repeat(64) }, [
+      { type: "archive_to_drive", idempotencyKey: "archive" }, { type: "project_to_sheet", idempotencyKey: "project" }, { type: "sync_review_correction", idempotencyKey: "sync" },
+    ]);
+    database.sqlite.query("UPDATE jobs SET available_at = ?").run(new Date(Date.now() - 3_600_000).toISOString());
+    return database;
+  } });
+  await Bun.sleep(10);
+  const ready = await fetch(new URL("ready", service.url)); expect(ready.status).toBe(200);
+  expect(await ready.json()).toEqual({ health: { status: "ready", reasons: [] } });
+  const monitor = await fetch(new URL("monitor/status", service.url), { headers: { authorization: "Bearer monitor-secret" } });
+  expect(await monitor.json()).toMatchObject({ health: { backlog: { overdueJobs: 0, oldestDueAt: null } } });
+});
+
 test("a symlinked ORIGINALS_DIR keeps WhatsApp ingestion and review previews on the canonical root", async () => {
   await service.shutdown();
   const canonical = join(directory, "canonical-originals"); const alias = join(directory, "originals-link"); mkdirSync(canonical); symlinkSync(canonical, alias);

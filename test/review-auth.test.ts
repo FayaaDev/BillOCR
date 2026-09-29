@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { AppConfig } from "../src/config";
 import { BillDatabase } from "../src/database";
 import { handleRequest } from "../src/http";
-import { createReviewAuth } from "../src/review-auth";
+import { createReviewAuth, handleLoginRequest } from "../src/review-auth";
 
 let dir: string; let database: BillDatabase; let config: AppConfig;
 beforeEach(() => {
@@ -65,4 +65,130 @@ test("cookies are insecure only for loopback HTTP", async () => {
   const auth = createReviewAuth(config); const login = (url: string) => handleRequest(new Request(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "username=reviewer&password=secret" }), database, config, undefined, auth);
   expect((await login("http://127.0.0.1/login"))?.headers.get("set-cookie")).not.toContain("Secure");
   expect((await login("http://internal.example/login"))?.headers.get("set-cookie")).toContain("Secure");
+});
+
+test("configured login rejects mismatched destinations and browser origins before issuing a cookie", async () => {
+  config.review.origin = "https://customer-a.example.test";
+  const auth = createReviewAuth(config);
+  for (const [url, extraHeaders] of [
+    ["https://customer-b.example.test/login", {}],
+    ["ftp://customer-a.example.test/login", {}],
+    ["https://customer-a.example.test:8443/login", {}],
+    ["http://customer-a.example.test:3000/login", {}],
+    ["http://localhost:3000/login", { "x-forwarded-host": "customer-a.example.test", "x-forwarded-proto": "https", forwarded: "host=customer-a.example.test;proto=https" }],
+    ["http://internal-service/login", { host: "customer-a.example.test", "x-forwarded-host": "customer-a.example.test", "x-forwarded-proto": "https" }],
+    ["http://customer-a.example.test/login", { host: "internal-service", "x-forwarded-host": "customer-a.example.test" }],
+    ["http://customer-a.example.test/login", { host: "customer-a.example.test:443" }],
+    ["http://customer-a.example.test/login", { origin: "http://customer-a.example.test" }],
+    ["http://customer-a.example.test/login", { origin: "https://customer-b.example.test" }],
+    ["https://customer-a.example.test/login", { origin: "https://customer-b.example.test" }],
+    ["https://customer-a.example.test/login", { origin: "null" }],
+    ["https://customer-a.example.test/login", { host: "customer-b.example.test" }],
+  ] as Array<[string, Record<string, string>]>) {
+    for (const method of ["GET", "POST"]) {
+      const request = new Request(url, { method, headers: { ...extraHeaders, "content-type": "application/x-www-form-urlencoded" }, ...(method === "POST" ? { body: "username=reviewer&password=secret" } : {}) });
+      const response = await handleLoginRequest(request, config, auth);
+      expect(response.status).toBe(403);
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(auth.login("reviewer", "secret", request)).toBeNull();
+      expect(() => auth.cookie("unused", request)).toThrow("origin mismatch");
+      expect(() => auth.expiredCookie(request)).toThrow("origin mismatch");
+    }
+  }
+  expect(auth.login("reviewer", "secret")).toBeNull();
+});
+
+test("configured sessions use host-only secure cookies and retain CSRF and logout behavior", async () => {
+  const origin = "https://customer-a.example.test"; config.review.origin = origin;
+  const auth = createReviewAuth(config);
+  const response = await handleLoginRequest(new Request(`${origin}/login`, { method: "POST", headers: { origin, "content-type": "application/x-www-form-urlencoded", "x-forwarded-host": "ignored.example.test" }, body: "username=reviewer&password=secret" }), config, auth);
+  expect(response.status).toBe(303);
+  const setCookie = response.headers.get("set-cookie")!;
+  expect(setCookie).toMatch(/^__Host-review_session=[A-Za-z0-9_-]{43}; Max-Age=28800; HttpOnly; SameSite=Lax; Path=\/; Secure$/);
+  expect(setCookie).not.toContain("Domain=");
+  const cookie = setCookie.split(";", 1)[0]!;
+  const request = new Request(`${origin}/admin`, { headers: { cookie } });
+  expect(auth.user(request)).toBe("reviewer");
+  expect((await handleRequest(request, database, config, undefined, auth)).status).toBe(200);
+  const token = auth.csrf(request, "logout")!;
+  expect(auth.csrfValid(request, "logout", token)).toBe(true);
+  expect(auth.csrfValid(request, "another-scope", token)).toBe(false);
+  expect(auth.user(new Request(`${origin}/admin`, { headers: { cookie: cookie.replace("__Host-", "") } }))).toBeNull();
+  expect(auth.user(new Request(`${origin}/admin`, { headers: { cookie: `${cookie}; ${cookie}` } }))).toBeNull();
+  for (const url of ["https://customer-b.example.test/admin", `${origin}:8443/admin`, "http://internal-service/admin"]) {
+    const wrong = new Request(url, { headers: { cookie } });
+    expect(auth.user(wrong)).toBeNull(); expect(auth.binding(wrong)).toBeNull();
+    expect(auth.csrf(wrong, "logout")).toBeNull(); expect(auth.csrfValid(wrong, "logout", token)).toBe(false);
+    auth.logout(wrong); expect(auth.user(request)).toBe("reviewer");
+  }
+  const wrongSource = new Request(`${origin}/admin`, { headers: { cookie, origin: "https://customer-b.example.test" } });
+  expect(auth.user(wrongSource)).toBeNull(); expect(auth.binding(wrongSource)).toBeNull();
+  const logout = await handleRequest(new Request(`${origin}/logout`, { method: "POST", headers: { cookie, origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ logoutCsrf: token }) }), database, config, undefined, auth);
+  expect(logout.status).toBe(303);
+  expect(logout.headers.get("set-cookie")).toBe("__Host-review_session=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/; Secure");
+  expect(auth.user(request)).toBeNull();
+});
+
+test("TLS ingress preserves customer Host over backend HTTP with secure sessions and logout", async () => {
+  const origin = "https://customer-a.example.test"; config.review.origin = origin;
+  const backend = "http://customer-a.example.test";
+  const auth = createReviewAuth(config);
+  const headers = { host: "customer-a.example.test", origin, "content-type": "application/x-www-form-urlencoded", "x-forwarded-host": "ignored.example.test", "x-forwarded-proto": "http" };
+  const response = await handleLoginRequest(new Request(`${backend}/login`, { method: "POST", headers, body: "username=reviewer&password=secret" }), config, auth);
+  expect(response.status).toBe(303);
+  const setCookie = response.headers.get("set-cookie")!;
+  expect(setCookie).toMatch(/^__Host-review_session=[A-Za-z0-9_-]{43}; Max-Age=28800; HttpOnly; SameSite=Lax; Path=\/; Secure$/);
+  expect(setCookie).not.toContain("Domain=");
+  const cookie = setCookie.split(";", 1)[0]!;
+  const request = new Request(`${backend}/admin`, { headers: { host: headers.host, cookie } });
+  expect(auth.user(request)).toBe("reviewer");
+  expect((await handleRequest(request, database, config, undefined, auth)).status).toBe(200);
+  expect(auth.user(new Request(`${origin}/admin`, { headers: { cookie } }))).toBe("reviewer");
+  const token = auth.csrf(request, "logout")!;
+  expect(auth.csrfValid(request, "logout", token)).toBe(true);
+  const wrong = new Request(`${backend}/logout`, { headers: { cookie, origin: "https://customer-b.example.test" } });
+  expect(auth.user(wrong)).toBeNull(); expect(auth.csrfValid(wrong, "logout", token)).toBe(false);
+  const logout = await handleRequest(new Request(`${backend}/logout`, { method: "POST", headers: { ...headers, cookie }, body: new URLSearchParams({ logoutCsrf: token }) }), database, config, undefined, auth);
+  expect(logout.status).toBe(303);
+  expect(logout.headers.get("set-cookie")).toBe("__Host-review_session=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/; Secure");
+  expect(auth.user(request)).toBeNull();
+});
+
+test("Bun accepts preserved public Host on loopback HTTP without rewriting Request", async () => {
+  config.review.origin = "https://customer-a.example.test";
+  const auth = createReviewAuth(config);
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => handleLoginRequest(request, config, auth) });
+  try {
+    for (const host of ["customer-a.example.test", "localhost", "internal-service", "customer-b.example.test", "customer-a.example.test:3000"]) {
+      const response = await fetch(new URL("/login", server.url), { method: "POST", redirect: "manual", headers: { host, origin: config.review.origin, "x-forwarded-host": "customer-a.example.test", "x-forwarded-proto": "https", "content-type": "application/x-www-form-urlencoded" }, body: "username=reviewer&password=secret" });
+      if (host === "customer-a.example.test") {
+        expect(response.status).toBe(303);
+        expect(response.headers.get("set-cookie")).toMatch(/^__Host-review_session=.*; Secure$/);
+      } else {
+        expect(response.status).toBe(403);
+        expect(response.headers.get("set-cookie")).toBeNull();
+      }
+      await response.arrayBuffer();
+    }
+  } finally { server.stop(true); }
+});
+
+test("sibling customer logins remain independent even with identical credentials", async () => {
+  const a = { ...config, review: { ...config.review, origin: "https://a.example.test" } };
+  const b = { ...config, review: { ...config.review, origin: "https://b.example.test" } };
+  const authA = createReviewAuth(a); const authB = createReviewAuth(b);
+  const login = async (customer: AppConfig, auth: ReturnType<typeof createReviewAuth>) => {
+    const response = await handleLoginRequest(new Request(`${customer.review.origin}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "username=reviewer&password=secret" }), customer, auth);
+    return response.headers.get("set-cookie")!.split(";", 1)[0]!;
+  };
+  const cookieA = await login(a, authA); const cookieB = await login(b, authB);
+  const requestA = new Request(`${a.review.origin}/admin`, { headers: { cookie: cookieA } });
+  const requestB = new Request(`${b.review.origin}/admin`, { headers: { cookie: cookieB } });
+  expect(cookieA).not.toBe(cookieB);
+  expect(authA.user(requestA)).toBe("reviewer"); expect(authB.user(requestB)).toBe("reviewer");
+  expect(authB.user(new Request(`${b.review.origin}/admin`, { headers: { cookie: cookieA } }))).toBeNull();
+  expect(authA.user(new Request(`${a.review.origin}/admin`, { headers: { cookie: cookieB } }))).toBeNull();
+  expect(authB.csrfValid(requestB, "logout", authA.csrf(requestA, "logout"))).toBe(false);
+  authB.logout(requestB);
+  expect(authA.user(requestA)).toBe("reviewer"); expect(authB.user(requestB)).toBeNull();
 });

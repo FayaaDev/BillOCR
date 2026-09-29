@@ -1,6 +1,8 @@
 services:
   bill-ledger:
     build: .
+    restart: unless-stopped
+    stop_grace_period: 2m
     mem_limit: 512m
     env_file: ${CUSTOMER_ENV_FILE:-.env}
     ports:
@@ -22,7 +24,7 @@ services:
       GOOGLE_SERVICE_ACCOUNT_JSON: /run/secrets/google-service-account.json
       GOOGLE_OAUTH_CREDENTIAL_JSON: /run/secrets/google-authorized-user.json
     healthcheck:
-      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3

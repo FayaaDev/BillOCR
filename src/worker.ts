@@ -8,9 +8,10 @@ export class PermanentJobError extends Error { readonly retryable = false; }
 export class JobWorker {
   constructor(private readonly database: BillDatabase, private readonly handlers: JobHandlers, private readonly policy: RetryPolicy, private readonly workerId: string, private readonly logger: Logger) {}
 
+  get supportedTypes() { return jobTypes.filter((type) => this.handlers[type] !== undefined); }
+
   async runOnce(): Promise<boolean> {
-    const supportedTypes = jobTypes.filter((type) => this.handlers[type] !== undefined);
-    const job = this.database.claimNextJob(this.workerId, this.policy, new Date(), supportedTypes);
+    const job = this.database.claimNextJob(this.workerId, this.policy, new Date(), this.supportedTypes);
     if (!job) return false;
     const handler = this.handlers[job.type];
     if (!handler) return false;
@@ -64,12 +65,16 @@ export class BackgroundWorkerLoop {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private active: Promise<void> | undefined;
   private acceptingWork = false;
+  private lastProgressAt = Date.now();
+  private activeSince: number | null = null;
+  private failed = false;
 
   constructor(private readonly worker: BackgroundWorker, private readonly logger: Logger, private readonly idleDelayMs = 1_000, private readonly activeDelayMs = 10) {}
 
   start(): void {
     if (this.acceptingWork) return;
     this.acceptingWork = true;
+    this.lastProgressAt = Date.now();
     this.schedule(0);
   }
 
@@ -79,19 +84,33 @@ export class BackgroundWorkerLoop {
     await this.active;
   }
 
+  health(now = Date.now(), maxJobMs = 15 * 60_000): { reasons: string[]; lastProgressAt: number; activeSince: number | null } {
+    const reasons: string[] = [];
+    if (!this.acceptingWork) reasons.push("worker_stopped");
+    if (this.failed) reasons.push("worker_failed");
+    if (this.activeSince !== null ? now - this.activeSince > maxJobMs : now - this.lastProgressAt > Math.max(30_000, this.idleDelayMs * 3)) reasons.push("worker_stalled");
+    return { reasons, lastProgressAt: this.lastProgressAt, activeSince: this.activeSince };
+  }
+
   private schedule(delayMs: number): void {
     if (!this.acceptingWork) return;
     this.timer = setTimeout(() => { void this.tick(); }, delayMs);
   }
 
   private async tick(): Promise<void> {
+    this.activeSince = Date.now();
     this.active = (async () => {
       try {
         const processed = await this.worker.runOnce();
+        this.failed = false;
+        this.lastProgressAt = Date.now();
         this.schedule(processed ? this.activeDelayMs : this.idleDelayMs);
       } catch {
+        this.failed = true;
         this.logger.error("background worker iteration failed");
         this.schedule(this.idleDelayMs);
+      } finally {
+        this.activeSince = null;
       }
     })();
     await this.active;
