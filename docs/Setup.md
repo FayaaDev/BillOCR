@@ -1,0 +1,168 @@
+# Setup — two customers on a 2 GB VPS
+
+Use minimal Linux, Docker Compose, and a lightweight HTTPS proxy. Azure handles OCR
+remotely. Each customer is capped at 512 MB; leave room for the OS and monitoring.
+Build elsewhere, stagger bulk uploads, and upgrade to 4 GB if memory pressure persists.
+
+## 1. Build once, outside the VPS
+
+On the build machine, from the repository root:
+
+```sh
+RELEASE=2026-09-30                  # Use a new tag for each release.
+docker buildx build --platform linux/amd64 --load -t bill-ledger:$RELEASE .
+docker save -o /tmp/bill-ledger.tar bill-ledger:$RELEASE
+```
+
+Match the VPS architecture. Securely transfer the archive, matching checkout, and
+private `customers/` and `monitor/` directories (excluded from Git/image). On the
+VPS, from `/opt/bill-ledger`; Bun is not required:
+
+```sh
+RELEASE=2026-09-30
+docker load -i /tmp/bill-ledger.tar
+docker tag bill-ledger:$RELEASE bill-testing-bill-ledger
+docker tag bill-ledger:$RELEASE bill-sultanlogistics-bill-ledger
+docker tag bill-ledger:$RELEASE bill-monitor-monitor
+docker network inspect bill-monitoring >/dev/null 2>&1 || docker network create bill-monitoring
+```
+
+Tags match Compose's default image names. Always start with `--no-build --pull never`.
+
+## 2. Configure each customer
+
+| Customer | Project | HTTPS hostname | Local backend |
+|---|---|---|---|
+| testing | `bill-testing` | `testing.billocr.manfath.link` | `127.0.0.1:3000` |
+| SultanLogistics | `bill-sultanlogistics` | `sultanlogistics.billocr.manfath.link` | `127.0.0.1:3001` |
+| Monitor | `bill-monitor` | `monitor.billocr.manfath.link` | `127.0.0.1:3100` |
+
+Both customers are staged. For another:
+
+```sh
+id=customer-2
+mkdir -p customers/$id/secrets
+cp .env.example customers/$id/.env
+chmod 700 customers/$id customers/$id/secrets
+chmod 600 customers/$id/.env
+```
+
+Set in each customer's `.env`:
+
+- Unique `CUSTOMER_ID`, unused `APP_PORT`, and `REVIEW_ORIGIN=https://<id>.billocr.manfath.link`
+  (no port, path, or trailing slash).
+- `REVIEW_USERNAME`, `REVIEW_PASSWORD`, and a unique random `MONITOR_TOKEN` of 32+ characters.
+- `MISTRAL_ENABLED=false`, `AZURE_ENABLED=true`, `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`,
+  and `AZURE_DOCUMENT_INTELLIGENCE_API_KEY`.
+- Explicit `WHATSAPP_ENABLED` and `TELEGRAM_ENABLED`; configure group restrictions
+  and the Telegram bot token for enabled intake channels.
+- Explicit `GOOGLE_ENABLED` and `GOOGLE_AUTH_MODE` (`user_oauth` or `service_account`).
+  When enabled, set the Drive folder, Sheet ID/name, and selected credential path
+  under `/run/secrets`; place its JSON in `customers/<id>/secrets/`.
+
+For OAuth, generate `google-authorized-user.json` with Bun on the build machine
+before transfer; see [Google setup](../README.md#local-setup). The selected account
+must access both Google destinations.
+
+**Current staging shares a Google folder and Sheet between testing and SultanLogistics.**
+Separate testing destinations or disable its Google integration before concurrent
+use. Changing destinations requires reviewing stored projection identities.
+
+## 3. Preserve or restore data before startup
+
+- **testing:** its `customers/testing/docker-compose.volumes.yml` adopts existing
+  `billsocr_bill-data`, `billsocr_bill-originals`, and `billsocr_bill-whatsapp-auth`.
+  On a new VPS, restore these first, or omit the override and restore into fresh
+  `bill-testing_*` volumes. Keep the old writer stopped.
+- **SultanLogistics:** restore `customers/sultanlogistics/restore/` into separate
+  `bill-sultanlogistics_*` volumes; retain the recovery copy. While the source stays
+  live, disable cloned intake/Google integrations. Obtain a final consistent
+  snapshot before production cutover.
+
+| Logical volume | Container path | Restored contents |
+|---|---|---|
+| `bill-data` | `/data` | `bill-ledger.sqlite`, `admin-zip-staging/` |
+| `bill-originals` | `/data/originals` | Contents of `originals/` |
+| `bill-whatsapp-auth` | `/data/whatsapp-auth` | Contents of `whatsapp-auth/` |
+
+Restore while stopped, preserve the manifest's originals path, and verify hashes
+and SQLite integrity. Writable data and mounted secrets must be accessible to `bun`:
+
+```sh
+uid=$(docker run --rm --entrypoint id bill-ledger:$RELEASE -u bun)
+sudo chown -R "$uid:$uid" customers/*/secrets
+```
+
+Secret directories: `0700`; files: `0600`. Environment files remain operator-owned.
+
+## 4. Start customers and monitor
+
+From the repository root, in **Bash**. Retain the testing override only when adopting
+restored `billsocr_*` volumes:
+
+```bash
+customer() {
+  local id=$1; shift
+  local files=(-f docker-compose.yml -f docker-compose.customer.yml)
+  if [[ $id == testing && -f customers/testing/docker-compose.volumes.yml ]]; then
+    files+=(-f customers/testing/docker-compose.volumes.yml)
+  fi
+  CUSTOMER_ENV_FILE=./customers/$id/.env CUSTOMER_SECRETS_DIR=./customers/$id/secrets \
+    docker compose --env-file ./customers/$id/.env -p bill-$id "${files[@]}" "$@"
+}
+monitor() { docker compose -p bill-monitor -f docker-compose.monitor.yml "$@"; }
+
+customer testing config --quiet
+customer sultanlogistics config --quiet
+customer testing up -d --no-build --pull never
+customer sultanlogistics up -d --no-build --pull never
+```
+
+Create `monitor/.env` from `monitor.env.example` with a separate operator login.
+Review/use `monitor/customers.staged.json` as `monitor/customers.json`, or start from
+`monitor.customers.example.json`. Entries need ID, name,
+`http://<id>:3000/monitor/status`, and matching `MONITOR_TOKEN`; preserve other entries.
+Both files use `0600`; the mounted list must be readable by `bun`:
+
+```sh
+sudo chown "$uid:$uid" monitor/customers.json
+monitor up -d --no-build --pull never
+```
+
+New customer: tag `bill-<id>-bill-ledger`, configure/start it, add its monitor entry,
+then `monitor restart monitor`.
+
+## 5. HTTPS and checks
+
+Point hostnames at the server/tunnel. Certificates: individual or
+`*.billocr.manfath.link`, not `*.manfath.link`. The proxy must preserve public `Host`,
+redirect HTTP to HTTPS, reject unknown hosts, and apply authentication. Expose only
+the proxy; backend ports stay on localhost. See the
+[proxy example](../README.md#browser-hostname-isolation).
+
+```sh
+curl --fail http://127.0.0.1:3000/ready
+curl --fail http://127.0.0.1:3001/ready
+curl --fail http://127.0.0.1:3100/health
+docker stats --no-stream
+```
+
+Sign in at each HTTPS `/admin` and the monitor. Customer `/ready` checks intake,
+workers, and SQLite; `/health` is liveness only. Unpaired WhatsApp is degraded.
+Monitor health checks polling freshness. Configure webhook/log alerts and
+independently monitor its health endpoint.
+
+## Updates and backups
+
+```sh
+customer testing logs --tail 100 bill-ledger
+customer testing exec bill-ledger bun dist/ops.js failed-jobs
+customer testing exec bill-ledger bun dist/ops.js backup /data/backups
+```
+
+Back up each customer and copy backups off-server; credentials/WhatsApp auth need
+separate backups. Updates: load a new image, retag, then recreate one service at a
+time with `up -d --no-build --pull never --force-recreate`. Startup applies migrations.
+Use the same helpers for operations. Never `down -v`. Recreate after environment
+changes; restart the monitor after list changes. Healthchecks do not restart unhealthy
+containers. Watch `docker stats` and disk usage.

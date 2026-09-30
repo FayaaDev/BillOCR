@@ -9,10 +9,10 @@ SQLite is canonical. WhatsApp and Telegram supply immutable originals; Mistral, 
 - `src/db/`: SQLite database and migrations.
 - `assets/`: static source assets, including the favicon.
 - `test/`: offline tests and UI preview tooling.
-- `docs/`: [installation](docs/Install.md), [customer setup](docs/NewCustomer.md), design, product, plans, and architecture references.
+- `docs/`: [setup and deployment](docs/Setup.md), design, product, plans, and architecture references.
 - `dist/`: generated bundles; backend entrypoints stay flat (`dist/server.js`, `dist/monitor.js`, and worker files).
 
-`customers/` is an ignored, operator-created directory for private per-customer environment files and credentials; see [customer setup](docs/NewCustomer.md). Runtime data and secrets are also ignored. Compose, Docker, and package configuration remain at root.
+`customers/` is an ignored, operator-created directory for private per-customer environment files and credentials; see [setup](docs/Setup.md). Runtime data and secrets are also ignored. Compose, Docker, and package configuration remain at root.
 
 ## Local setup
 
@@ -90,9 +90,7 @@ Enable production only when the `opencv`/auto candidate has zero false approvals
 
 Run one **Compose project per customer**, each with its own environment file, secrets directory, named volumes, review login, Azure OCR credentials, delivery tokens, and (if enabled) Google destinations. No customer data is copied to the central dashboard; it displays only per-customer bill/job counts and availability. Never reuse the same WhatsApp account, Telegram bot, Google Sheet, or credentials between customers.
 
-1. Create the shared private network once: `docker network create bill-monitoring`. Create `customers/acme/.env` from `.env.example` and `customers/acme/secrets/` for that customer's Google credential file(s). Set `CUSTOMER_ID=acme`, a unique `APP_PORT` (e.g. `3001`), `REVIEW_ORIGIN=https://acme.bills.example.com` using your own distinct customer hostname, `REVIEW_USERNAME`, `REVIEW_PASSWORD`, `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`, `AZURE_DOCUMENT_INTELLIGENCE_API_KEY`, channel configuration and `MONITOR_TOKEN` (a unique random value of at least 32 characters). Set `GOOGLE_ENABLED` and `GOOGLE_AUTH_MODE` as appropriate; Compose mounts that customer's secrets at `/run/secrets`. Keep each file private (mode `0600`). `customers/` is Git-ignored.
-2. Start with `CUSTOMER_ENV_FILE=./customers/acme/.env CUSTOMER_SECRETS_DIR=./customers/acme/secrets docker compose -f docker-compose.yml -f docker-compose.customer.yml --env-file ./customers/acme/.env -p bill-acme up -d --build`. Repeat with a different hostname, ID, port, env file, secrets directory and project name for each customer. Set `GOOGLE_ENABLED` and `GOOGLE_AUTH_MODE` explicitly in each customer env file. Each project's named volumes are independent. Run migrations/backup with the same environment variables, both `-f` files, `--env-file` and `-p` flags. Open `https://acme.bills.example.com/admin` or `/review` through your TLS-terminating authenticated proxy; the localhost app port is a backend, not a browser login address.
-3. Create `monitor/.env` from `monitor.env.example` with a distinct operator login. Create `monitor/customers.json` from `monitor.customers.example.json`; add each customer's ID, display name, `http://<CUSTOMER_ID>:3000/monitor/status` URL and matching `MONITOR_TOKEN`. The IDs must be unique DNS-safe lowercase labels. Keep `monitor/.env` operator-owned with mode `0600` (Compose reads it on the host). On Linux, make the mounted `monitor/customers.json` readable only by the container's `bun` user: `sudo chown "$(docker compose -f docker-compose.monitor.yml -p bill-monitor run --build --rm --no-deps --entrypoint id monitor -u bun)" monitor/customers.json && sudo chmod 600 monitor/customers.json`. Start with `docker compose -f docker-compose.monitor.yml -p bill-monitor up -d --build` and open `http://127.0.0.1:3100/`. Override `MONITOR_PORT` for another local port. `monitor/` is Git-ignored.
+Follow [Setup](docs/Setup.md) for customer configuration, restoration, HTTPS, monitoring, and operations. On a 2 GB VPS, build the image elsewhere and start with `--no-build --pull never`; the guide uses one image for both customers and the monitor.
 
 The monitor polls customers concurrently at startup and 30 seconds after each completed cycle, independently of browser visits; requests time out after three seconds. The dashboard displays cached **Ready**, **Degraded**, or **Unavailable** states. Missing readiness information is degraded, never healthy. Restart the monitor to reload its customer list; recreate affected containers with `up -d` after environment/token changes. Back up each customer's volumes separately; do not share or rename volumes between projects. The shared Docker network allows customers to reach each other; keep it on a trusted host and restrict Docker access to administrators. To remove a customer, stop that project's containers and remove its entry from the monitoring config; preserve its volumes for restore. Do not use `down -v` unless intentionally deleting that customer's data.
 
@@ -148,7 +146,7 @@ bun run typecheck && bun test && bun run verify-build
 bun -e 'import sharp from "sharp"; import { WorkerImagePreprocessor } from "./dist/image-preprocessing.js"; const bytes = new Uint8Array(await sharp({ create: { width: 64, height: 64, channels: 4, background: "white" } }).png().toBuffer()); const result = await new WorkerImagePreprocessor({ timeoutMs: 8000 }).preprocess({ bytes, mimeType: "image/png", mode: "sharp" }); if (!result || result.mode !== "sharp" || result.width !== 64 || result.height !== 64) process.exit(1);'
 ```
 
-Validate the Compose file separately with `docker compose config --quiet`. For the container smoke, use an empty test database with WhatsApp and Google disabled, while still providing the required non-provider configuration. This direct `docker run` does not load compose `.env` or mount `secrets/`; it must return `/health` 200 and create no jobs or provider calls:
+Run the following container smoke on the build machine, not the 2 GB VPS. Validate the Compose file separately with `docker compose config --quiet`. Use an empty test database with WhatsApp and Google disabled, while still providing the required non-provider configuration. This direct `docker run` does not load compose `.env` or mount `secrets/`; it must return `/health` 200 and create no jobs or provider calls:
 
 ```sh
 docker compose config --quiet
