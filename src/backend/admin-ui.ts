@@ -6,7 +6,7 @@ import type { AdminUploadBatch, AdminUploadBatchStatusCounts, DashboardMetrics }
 import { reviewAuth, type ReviewAuth } from "./review-auth";
 import { reviewClearCsrf } from "./review-ui";
 
-const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'" };
+const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "same-origin", "content-security-policy": "default-src 'none'; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'" };
 
 /** Intentionally narrow service boundary: admin routes never receive a transport or database. */
 export interface AdminHttpCapabilities {

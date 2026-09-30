@@ -12,7 +12,7 @@ import { reviewAuth, type ReviewAuth } from "./review-auth";
 
 const editable = ["invoiceDate", "total", "vat", "subtotal", "description", "truckNumber", "vendorTaxNumber", "vendorName", "invoiceNumber"] as const;
 type Editable = (typeof editable)[number];
-const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'" };
+const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "same-origin", "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'" };
 /** Columns in the completed-invoice XLSX download. */
 export const completedInvoiceHeaders = ["تاريخ الفاتورة", "مبلغ اجمالي بعد الضريبة", "قيمة الضريبة", "مبلغ قبل الضريبة", "وصف القطع وبيانها", "رقم الشاحنة ( المسؤليه )", "الرقم الضريبي للمورد", "اسم المورد", "رقم الفاتورة", "رقم مرسل الفاتورة", "تاريخ وتوقيت الارسال"] as const;
 const esc = (value: unknown): string => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");

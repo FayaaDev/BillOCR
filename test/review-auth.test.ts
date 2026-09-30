@@ -98,6 +98,22 @@ test("configured login rejects mismatched destinations and browser origins befor
   expect(auth.login("reviewer", "secret")).toBeNull();
 });
 
+test("configured-origin login and protected HTML use same-origin referrer policy", async () => {
+  const origin = "https://customer-a.example.test"; config.review.origin = origin;
+  const auth = createReviewAuth(config);
+  const loginPage = await handleRequest(new Request(`${origin}/login`), database, config, undefined, auth);
+  const failedLogin = await handleRequest(new Request(`${origin}/login`, { method: "POST", headers: { origin, "content-type": "application/x-www-form-urlencoded" }, body: "username=reviewer&password=wrong" }), database, config, undefined, auth);
+  expect(loginPage.status).toBe(200); expect(loginPage.headers.get("referrer-policy")).toBe("same-origin");
+  expect(failedLogin.status).toBe(401); expect(failedLogin.headers.get("referrer-policy")).toBe("same-origin");
+  const login = await handleRequest(new Request(`${origin}/login`, { method: "POST", headers: { origin, "content-type": "application/x-www-form-urlencoded" }, body: "username=reviewer&password=secret" }), database, config, undefined, auth);
+  const cookie = login.headers.get("set-cookie")!.split(";", 1)[0]!;
+  expect(login.status).toBe(303);
+  for (const path of ["/admin", "/review"]) {
+    const page = await handleRequest(new Request(`${origin}${path}`, { headers: { cookie } }), database, config, undefined, auth);
+    expect(page.status).toBe(200); expect(page.headers.get("content-type")).toContain("text/html"); expect(page.headers.get("referrer-policy")).toBe("same-origin");
+  }
+});
+
 test("configured sessions use host-only secure cookies and retain CSRF and logout behavior", async () => {
   const origin = "https://customer-a.example.test"; config.review.origin = origin;
   const auth = createReviewAuth(config);

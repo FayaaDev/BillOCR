@@ -2,6 +2,7 @@ node_modules/
 data/
 .env
 .env.local
+.ssh
 .git/
 .beads/
 **/.DS_Store

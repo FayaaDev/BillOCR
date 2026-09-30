@@ -3,6 +3,7 @@ node_modules/
 .worktrees/
 .env
 .env.local
+.ssh
 dist/
 coverage/
 data/

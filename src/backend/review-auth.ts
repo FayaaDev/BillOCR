@@ -3,7 +3,7 @@ import type { AppConfig } from "./config";
 
 const lifetimeMs = 8 * 60 * 60 * 1_000;
 const maximumSessions = 128;
-const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'" };
+const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "same-origin", "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'" };
 
 type Session = { user: string; expiresAt: number };
 export interface ReviewAuth {

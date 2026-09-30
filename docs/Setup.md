@@ -4,6 +4,34 @@ Use minimal Linux, Docker Compose, and a lightweight HTTPS proxy. Azure handles 
 remotely. Each customer is capped at 512 MB; leave room for the OS and monitoring.
 Build elsewhere, stagger bulk uploads, and upgrade to 4 GB if memory pressure persists.
 
+## Testing-only test server deployment — 2026-09-30
+
+- Only `testing` is deployed, with fresh `bill-testing_*` volumes. Omit
+  `customers/testing/docker-compose.volumes.yml`; it selects legacy volumes.
+- ZIP upload and Azure are enabled. Google, WhatsApp, Telegram, and Mistral are
+  disabled. SultanLogistics and the central monitor are deferred.
+- Compose directory: `/opt/bill-ledger`; files: `docker-compose.yml` and
+  `docker-compose.customer.yml`; image: `bill-ledger:2026-09-30-testing`.
+- Dedicated Cloudflare tunnel: `billOCR`. Its testing route targets
+  `http://127.0.0.1:8080`; Caddy proxies to `127.0.0.1:3000`, preserves the public
+  hostname and rejects unknown hosts. Authentication uses the dashboard's
+  built-in login; Caddy does not add a browser Basic authentication prompt.
+- Caddy sets upstream `Referrer-Policy` to `same-origin` so native login,
+  correction, and logout forms preserve their browser origin. The application
+  source has the same policy; the current image predates that source fix.
+- Public admin: `https://testing-billocr.manfath.link/admin`. Its proxied CNAME
+  points to the `billOCR` tunnel, and the existing Universal SSL certificate
+  covers this first-level hostname; no paid certificate add-on is needed.
+- Caddy configuration: `/etc/caddy/Caddyfile`; original saved as
+  `/etc/caddy/Caddyfile.before-billOCR`. Tunnel service: `cloudflared.service`;
+  its private token is `/etc/cloudflared/billOCR.token`.
+- Initial backup inside the testing container:
+  `/data/backups/initial-20260930/bill-ledger-2026-09-30T18-42-11-365Z`.
+- Verified pre-hostname-change backup:
+  `/data/backups/before-universal-ssl/bill-ledger-2026-09-30T19-34-55-067Z`.
+  Prior configuration is saved as `customers/testing/.env.before-universal-ssl`
+  and `/etc/caddy/Caddyfile.before-universal-ssl` on the server.
+
 ## 1. Build once, outside the VPS
 
 On the build machine, from the repository root:
@@ -33,9 +61,9 @@ Tags match Compose's default image names. Always start with `--no-build --pull n
 
 | Customer | Project | HTTPS hostname | Local backend |
 |---|---|---|---|
-| testing | `bill-testing` | `testing.billocr.manfath.link` | `127.0.0.1:3000` |
-| SultanLogistics | `bill-sultanlogistics` | `sultanlogistics.billocr.manfath.link` | `127.0.0.1:3001` |
-| Monitor | `bill-monitor` | `monitor.billocr.manfath.link` | `127.0.0.1:3100` |
+| testing | `bill-testing` | `testing-billocr.manfath.link` | `127.0.0.1:3000` |
+| SultanLogistics (planned) | `bill-sultanlogistics` | `sultanlogistics-billocr.manfath.link` | `127.0.0.1:3001` |
+| Monitor (planned) | `bill-monitor` | `monitor-billocr.manfath.link` | `127.0.0.1:3100` |
 
 Both customers are staged. For another:
 
@@ -49,7 +77,7 @@ chmod 600 customers/$id/.env
 
 Set in each customer's `.env`:
 
-- Unique `CUSTOMER_ID`, unused `APP_PORT`, and `REVIEW_ORIGIN=https://<id>.billocr.manfath.link`
+- Unique `CUSTOMER_ID`, unused `APP_PORT`, and `REVIEW_ORIGIN=https://<id>-billocr.manfath.link`
   (no port, path, or trailing slash).
 - `REVIEW_USERNAME`, `REVIEW_PASSWORD`, and a unique random `MONITOR_TOKEN` of 32+ characters.
 - `MISTRAL_ENABLED=false`, `AZURE_ENABLED=true`, `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`,
@@ -134,9 +162,11 @@ then `monitor restart monitor`.
 
 ## 5. HTTPS and checks
 
-Point hostnames at the server/tunnel. Certificates: individual or
-`*.billocr.manfath.link`, not `*.manfath.link`. The proxy must preserve public `Host`,
-redirect HTTP to HTTPS, reject unknown hosts, and apply authentication. Expose only
+Point hostnames at the server/tunnel. Use first-level names such as
+`testing-billocr.manfath.link` to stay within Universal SSL's `*.manfath.link`
+coverage. The proxy must preserve public `Host`,
+redirect HTTP to HTTPS and reject unknown hosts. The application requires its
+built-in login for dashboard and bill data. Expose only
 the proxy; backend ports stay on localhost. See the
 [proxy example](../README.md#browser-hostname-isolation).
 
