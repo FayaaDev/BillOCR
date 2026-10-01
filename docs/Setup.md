@@ -4,6 +4,35 @@ Use minimal Linux, Docker Compose, and a lightweight HTTPS proxy. Azure handles 
 remotely. Each customer is capped at 512 MB; leave room for the OS and monitoring.
 Build elsewhere, stagger bulk uploads, and upgrade to 4 GB if memory pressure persists.
 
+## Isolated SultanLogistics test deployment — 2026-10-01
+
+- SultanLogistics is deployed alongside `testing` on the configured test server.
+  The original `fayaalink/billocr` instance was not contacted or changed.
+- Public admin: `https://sultanlogistics-billocr.manfath.link/admin`; backend:
+  `127.0.0.1:3001`; Compose project: `bill-sultanlogistics`.
+- Restored the local September 30 snapshot: 132 bills, 132 hash-verified originals,
+  and 23 migrations. Database integrity, foreign keys, and offline compatibility
+  with `bill-ledger:2026-09-30-testing` passed.
+- ZIP upload and Azure are enabled. WhatsApp, Telegram, Google, and Mistral are
+  disabled in the **deployed** configuration. Historical failed jobs were not
+  reset; one copied ZIP batch remains in `processing`.
+- Server configuration and untouched recovery copy are under
+  `/opt/bill-ledger/customers/sultanlogistics/`; separate `bill-sultanlogistics_*`
+  volumes contain the working data. Mounted `secrets/` is empty. The local
+  staged `.env` remains source-derived; do not use it to recreate this isolated copy.
+- The existing `billOCR` tunnel routes the new hostname through Caddy on port
+  `8080`. Its testing route is preserved. The Caddy rollback copy is
+  `/etc/caddy/Caddyfile.before-sultan-isolated-20261001`.
+- Verified HTTPS login/logout, original-image preview and modal, frontend assets,
+  secure host-only session cookies, rejected wrong hosts/origins and cross-customer
+  sessions, and readiness of both test-server customers.
+- Verified post-restore backup:
+  `/data/backups/sultan-isolated-20261001/bill-ledger-2026-10-01T08-36-28-415Z`.
+- To roll back, stop only the Sultan Compose service, restore the saved Caddy
+  configuration and reload Caddy, then remove only the new Sultan tunnel/DNS route.
+  Retain volumes and recovery files; never use `down -v`. Run all test-server
+  commands through the bundled Paramiko helper, with approval for service changes.
+
 ## Testing-only test server deployment — 2026-09-30
 
 - Only `testing` is deployed, with fresh `bill-testing_*` volumes. Omit
@@ -62,7 +91,7 @@ Tags match Compose's default image names. Always start with `--no-build --pull n
 | Customer | Project | HTTPS hostname | Local backend |
 |---|---|---|---|
 | testing | `bill-testing` | `testing-billocr.manfath.link` | `127.0.0.1:3000` |
-| SultanLogistics (planned) | `bill-sultanlogistics` | `sultanlogistics-billocr.manfath.link` | `127.0.0.1:3001` |
+| SultanLogistics (isolated test copy) | `bill-sultanlogistics` | `sultanlogistics-billocr.manfath.link` | `127.0.0.1:3001` |
 | Monitor (planned) | `bill-monitor` | `monitor-billocr.manfath.link` | `127.0.0.1:3100` |
 
 Both customers are staged. For another:
