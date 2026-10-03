@@ -4,6 +4,16 @@ Use minimal Linux, Docker Compose, and a lightweight HTTPS proxy. Azure handles 
 remotely. Each customer is capped at 512 MB; leave room for the OS and monitoring.
 Build elsewhere, stagger bulk uploads, and upgrade to 4 GB if memory pressure persists.
 
+## Testing Google update — 2026-10-03
+
+- User reports the testing-only deployment works after manual configuration commands;
+  Google access was not independently verified.
+- Testing now uses a dedicated Drive folder and Sheet. SultanLogistics remains
+  deployed with Google disabled. Earlier dated deployment sections are historical.
+- Keep the uploaded `customers/testing/secrets/google-authorized-testing.json`,
+  mounted as `/run/secrets/google-authorized-testing.json`. Use the per-customer
+  Google override and testing-only recreate procedure below for future deployments.
+
 ## Isolated SultanLogistics test deployment — 2026-10-01
 
 - SultanLogistics is deployed alongside `testing` on the configured test server.
@@ -121,9 +131,26 @@ For OAuth, generate `google-authorized-user.json` with Bun on the build machine
 before transfer; see [Google setup](../README.md#local-setup). The selected account
 must access both Google destinations.
 
-**Current staging shares a Google folder and Sheet between testing and SultanLogistics.**
-Separate testing destinations or disable its Google integration before concurrent
-use. Changing destinations requires reviewing stored projection identities.
+Testing uses dedicated Drive/Sheet destinations; deployed SultanLogistics has
+`GOOGLE_ENABLED=false`. Changing destinations requires reviewing stored projection
+identities.
+
+Base Compose hardcodes `GOOGLE_OAUTH_CREDENTIAL_JSON`; setting it in `.env` alone
+does not override the service's `environment`. A host-relative `./secrets/...`
+path is not the mounted container path. For testing, set `GOOGLE_ENABLED=true`
+and `GOOGLE_AUTH_MODE=user_oauth` in its `.env`, with its dedicated destinations,
+and save this as `customers/testing/docker-compose.google.yml`:
+
+```yaml
+services:
+  bill-ledger:
+    environment:
+      GOOGLE_OAUTH_CREDENTIAL_JSON: /run/secrets/google-authorized-testing.json
+```
+
+Other customers can use their own `customers/<id>/docker-compose.google.yml` with
+an explicit `/run/secrets/<filename>` path. The helper below loads it after the
+base/customer files.
 
 ## 3. Preserve or restore data before startup
 
@@ -152,6 +179,14 @@ sudo chown -R "$uid:$uid" customers/*/secrets
 
 Secret directories: `0700`; files: `0600`. Environment files remain operator-owned.
 
+For the uploaded testing credential, the deployed image's `bun` UID/GID is `1000`:
+
+```sh
+sudo chown 1000:1000 customers/testing/secrets customers/testing/secrets/google-authorized-testing.json
+sudo chmod 700 customers/testing/secrets
+sudo chmod 600 customers/testing/secrets/google-authorized-testing.json
+```
+
 ## 4. Start customers and monitor
 
 From the repository root, in **Bash**. Retain the testing override only when adopting
@@ -163,6 +198,9 @@ customer() {
   local files=(-f docker-compose.yml -f docker-compose.customer.yml)
   if [[ $id == testing && -f customers/testing/docker-compose.volumes.yml ]]; then
     files+=(-f customers/testing/docker-compose.volumes.yml)
+  fi
+  if [[ -f customers/$id/docker-compose.google.yml ]]; then
+    files+=(-f customers/$id/docker-compose.google.yml)
   fi
   CUSTOMER_ENV_FILE=./customers/$id/.env CUSTOMER_SECRETS_DIR=./customers/$id/secrets \
     docker compose --env-file ./customers/$id/.env -p bill-$id "${files[@]}" "$@"
@@ -212,6 +250,19 @@ Monitor health checks polling freshness. Configure webhook/log alerts and
 independently monitor its health endpoint.
 
 ## Updates and backups
+
+After testing credential-path or `.env` changes, use the Bash helper above from
+`/opt/bill-ledger` to recreate testing only with the existing image:
+
+```bash
+customer testing config --quiet
+customer testing up -d --no-build --pull never --no-deps --force-recreate bill-ledger
+curl --fail http://127.0.0.1:3000/ready
+```
+
+Retry the readiness check after initialization if it returns `503`. Readiness
+does not independently verify Google access; confirm projections in testing's
+dedicated Drive folder and Sheet.
 
 ```sh
 customer testing logs --tail 100 bill-ledger
