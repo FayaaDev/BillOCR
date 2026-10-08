@@ -1,0 +1,140 @@
+import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { isIP } from "node:net";
+
+export type GoogleConfig =
+  | { enabled: false; authMode: "disabled"; credentialJson: null; driveFolderId: null; sheetId: null; sheetName: string; requestTimeoutMs: number; maxResponseBytes: number }
+  | { enabled: true; authMode: "service_account" | "user_oauth"; credentialJson: string; driveFolderId: string; sheetId: string; sheetName: string; requestTimeoutMs: number; maxResponseBytes: number };
+export type AzureConfig =
+  | { enabled: false; endpoint: null; apiKey: null; maxResponseBytes: number; requestTimeoutMs: number; pollIntervalMs: number; fallbackConfidenceThreshold: number }
+  | { enabled: true; endpoint: string; apiKey: string; maxResponseBytes: number; requestTimeoutMs: number; pollIntervalMs: number; fallbackConfidenceThreshold: number };
+export type TelegramConfig =
+  | { enabled: false; botToken: null; groupIds: string[]; pollTimeoutSeconds: number; requestTimeoutMs: number; maxResponseBytes: number }
+  | { enabled: true; botToken: string; groupIds: string[]; pollTimeoutSeconds: number; requestTimeoutMs: number; maxResponseBytes: number };
+export interface AppConfig {
+  host: string;
+  port: number;
+  dataDir: string;
+  databasePath: string;
+  logLevel: "debug" | "info" | "warn" | "error";
+  monitorToken?: string;
+  originals: { dir: string; maxAttachmentBytes: number };
+  whatsapp: { enabled: boolean; groupId: string | null; authPath: string; originalsDir: string; maxAttachmentBytes: number };
+  telegram: TelegramConfig;
+  mistral: { apiKey: string | null; model: string | null; maxResponseBytes: number; requestTimeoutMs: number };
+  azure: AzureConfig;
+  imagePreprocessing: { enabled: boolean; timeoutMs: number };
+  google: GoogleConfig;
+  review: { username: string; password: string; origin?: string };
+  validation: { currencyRoundingTolerance: number; maxFutureInvoiceDays: number };
+  jobs: { maxAttempts: number; retryBaseMs: number; retryMaxMs: number; leaseMs: number };
+}
+
+export type Env = Record<string, string | undefined>;
+const levels = new Set(["debug", "info", "warn", "error"]);
+
+function required(env: Env, key: string): string {
+  const value = env[key]?.trim();
+  if (!value) throw new Error(`Missing required configuration: ${key}`);
+  return value;
+}
+function integer(env: Env, key: string, fallback: number, minimum: number): number {
+  const value = Number(env[key] ?? fallback);
+  if (!Number.isInteger(value) || value < minimum) throw new Error(`${key} must be an integer >= ${minimum}`);
+  return value;
+}
+function number(env: Env, key: string, fallback: number, minimum: number, maximum: number): number {
+  const value = Number(env[key] ?? fallback);
+  if (!Number.isFinite(value) || value < minimum || value > maximum) throw new Error(`${key} must be between ${minimum} and ${maximum}`);
+  return value;
+}
+function boolean(env: Env, key: string, fallback: boolean): boolean {
+  const value = env[key];
+  if (value === undefined) return fallback;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${key} must be true or false`);
+}
+function csv(env: Env, key: string): string[] {
+  return [...new Set((env[key] ?? "").split(",").map((value) => value.trim()).filter(Boolean))];
+}
+
+function reviewOrigin(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const url = new URL(value);
+    const labels = url.hostname.split(".");
+    if (value === url.origin && url.protocol === "https:" && !url.port && !isIP(url.hostname) &&
+      labels.length >= 2 && url.hostname.length <= 253 && !url.hostname.endsWith(".localhost") &&
+      labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return url.origin;
+  } catch { /* Invalid URL uses the same configuration error. */ }
+  throw new Error("REVIEW_ORIGIN must be a canonical HTTPS origin with a qualified DNS hostname, no port, path, credentials, query or fragment; localhost and IP addresses are not allowed");
+}
+
+/** Resolve this controlled directory once after it has been created; readers never realpath request/DB paths. */
+export function canonicalOriginalsDir(path: string): string { return realpathSync(resolve(path)); }
+
+/** Validation settings shared by the service and bounded live evaluator. */
+export function loadValidationConfig(env: Env = Bun.env): AppConfig["validation"] {
+  return {
+    currencyRoundingTolerance: number(env, "CURRENCY_ROUNDING_TOLERANCE", 0.01, 0, Number.MAX_SAFE_INTEGER),
+    maxFutureInvoiceDays: integer(env, "MAX_FUTURE_INVOICE_DAYS", 30, 0),
+  };
+}
+
+/** Validates all configuration, including settings consumed by later provider phases. */
+export function loadConfig(env: Env = Bun.env): AppConfig {
+  const dataDir = resolve(required(env, "APP_DATA_DIR"));
+  const logLevel = env.APP_LOG_LEVEL ?? "info";
+  const monitorToken = env.MONITOR_TOKEN?.trim();
+  if (monitorToken !== undefined && monitorToken.length < 32) throw new Error("MONITOR_TOKEN must be at least 32 characters");
+  if (!levels.has(logLevel)) throw new Error("APP_LOG_LEVEL must be debug, info, warn, or error");
+  const retryBaseMs = integer(env, "JOB_RETRY_BASE_MS", 1_000, 1);
+  const retryMaxMs = integer(env, "JOB_RETRY_MAX_MS", 300_000, retryBaseMs);
+  const originals = { dir: resolve(env.ORIGINALS_DIR ?? env.WHATSAPP_ORIGINALS_DIR ?? `${dataDir}/originals`), maxAttachmentBytes: integer(env, "MAX_ATTACHMENT_BYTES", 20 * 1024 * 1024, 1) };
+  const config: AppConfig = {
+    host: env.APP_HOST ?? "127.0.0.1",
+    port: integer(env, "APP_PORT", 3_000, 1),
+    dataDir,
+    databasePath: resolve(env.APP_DATABASE_PATH ?? `${dataDir}/bill-ledger.sqlite`),
+    logLevel: logLevel as AppConfig["logLevel"],
+    monitorToken,
+    originals,
+    whatsapp: { enabled: boolean(env, "WHATSAPP_ENABLED", true), groupId: env.WHATSAPP_GROUP_ID?.trim() || null, authPath: resolve(required(env, "WHATSAPP_AUTH_PATH")), originalsDir: originals.dir, maxAttachmentBytes: originals.maxAttachmentBytes },
+    telegram: (() => {
+      const enabled = boolean(env, "TELEGRAM_ENABLED", false);
+      const pollTimeoutSeconds = integer(env, "TELEGRAM_POLL_TIMEOUT_SECONDS", 30, 1);
+      const requestTimeoutMs = integer(env, "TELEGRAM_REQUEST_TIMEOUT_MS", 35_000, 1);
+      if (requestTimeoutMs <= pollTimeoutSeconds * 1_000) throw new Error("TELEGRAM_REQUEST_TIMEOUT_MS must exceed TELEGRAM_POLL_TIMEOUT_SECONDS");
+      const config = { enabled, botToken: enabled ? required(env, "TELEGRAM_BOT_TOKEN") : null, groupIds: csv(env, "TELEGRAM_GROUP_IDS"), pollTimeoutSeconds, requestTimeoutMs, maxResponseBytes: integer(env, "TELEGRAM_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1) };
+      return config as TelegramConfig;
+    })(),
+    mistral: (() => {
+      const enabled = boolean(env, "MISTRAL_ENABLED", true);
+      return { apiKey: enabled ? required(env, "MISTRAL_API_KEY") : null, model: enabled ? required(env, "MISTRAL_MODEL") : null, maxResponseBytes: integer(env, "MISTRAL_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1), requestTimeoutMs: integer(env, "MISTRAL_REQUEST_TIMEOUT_MS", 60_000, 1) };
+    })(),
+    azure: (() => {
+      const enabled = boolean(env, "AZURE_ENABLED", true);
+      const maxResponseBytes = integer(env, "AZURE_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1);
+      const requestTimeoutMs = integer(env, "AZURE_REQUEST_TIMEOUT_MS", 60_000, 1);
+      const pollIntervalMs = integer(env, "AZURE_POLL_INTERVAL_MS", 500, 0);
+      const fallbackConfidenceThreshold = number(env, "OCR_FALLBACK_CONFIDENCE_THRESHOLD", 0.80, 0, 1);
+      if (!enabled) return { enabled: false, endpoint: null, apiKey: null, maxResponseBytes, requestTimeoutMs, pollIntervalMs, fallbackConfidenceThreshold };
+      return { enabled: true, endpoint: required(env, "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT"), apiKey: required(env, "AZURE_DOCUMENT_INTELLIGENCE_API_KEY"), maxResponseBytes, requestTimeoutMs, pollIntervalMs, fallbackConfidenceThreshold };
+    })(),
+    imagePreprocessing: { enabled: boolean(env, "IMAGE_PREPROCESSING_ENABLED", false), timeoutMs: integer(env, "IMAGE_PREPROCESSING_TIMEOUT_MS", 8_000, 1) },
+    google: (() => {
+      const enabled = boolean(env, "GOOGLE_ENABLED", false);
+      const requestTimeoutMs = integer(env, "GOOGLE_REQUEST_TIMEOUT_MS", 60_000, 1); const maxResponseBytes = integer(env, "GOOGLE_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1);
+       if (!enabled) return { enabled: false, authMode: "disabled" as const, credentialJson: null, driveFolderId: null, sheetId: null, sheetName: env.GOOGLE_SHEET_NAME ?? "Ledger", requestTimeoutMs, maxResponseBytes };
+       const authMode = env.GOOGLE_AUTH_MODE ?? "service_account";
+       if (authMode !== "service_account" && authMode !== "user_oauth") throw new Error("GOOGLE_AUTH_MODE must be service_account or user_oauth");
+       return { enabled: true, authMode, credentialJson: resolve(required(env, authMode === "service_account" ? "GOOGLE_SERVICE_ACCOUNT_JSON" : "GOOGLE_OAUTH_CREDENTIAL_JSON")), driveFolderId: required(env, "GOOGLE_DRIVE_FOLDER_ID"), sheetId: required(env, "GOOGLE_SHEET_ID"), sheetName: env.GOOGLE_SHEET_NAME ?? "Ledger", requestTimeoutMs, maxResponseBytes };
+    })(),
+    review: { username: required(env, "REVIEW_USERNAME"), password: required(env, "REVIEW_PASSWORD"), origin: reviewOrigin(env.REVIEW_ORIGIN) },
+    validation: loadValidationConfig(env),
+    jobs: { maxAttempts: integer(env, "JOB_MAX_ATTEMPTS", 5, 1), retryBaseMs, retryMaxMs, leaseMs: integer(env, "JOB_LEASE_MS", 60_000, 1) },
+  };
+  if (config.mistral.apiKey === null && !config.azure.enabled) throw new Error("At least one extraction provider must be enabled");
+  return config;
+}

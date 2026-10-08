@@ -1,0 +1,61 @@
+name: jabocr
+
+services:
+  bill-ledger:
+    image: jabocr:standalone
+    platform: linux/amd64
+    build: .
+    restart: unless-stopped
+    stop_grace_period: 2m
+    mem_limit: 512m
+    env_file: .env
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 3000
+      APP_DATA_DIR: /data
+      APP_DATABASE_PATH: /data/bill-ledger.sqlite
+      ORIGINALS_DIR: /data/originals
+      WHATSAPP_AUTH_PATH: /data/whatsapp-auth
+      REVIEW_ORIGIN: https://${APP_DOMAIN:?Set APP_DOMAIN in .env}
+      MISTRAL_ENABLED: "false"
+      AZURE_ENABLED: "true"
+    volumes:
+      - bill-data:/data
+      - bill-originals:/data/originals
+      - bill-whatsapp-auth:/data/whatsapp-auth
+      - type: bind
+        source: ./secrets
+        target: /run/secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN in .env}
+      CADDY_EMAIL: ${CADDY_EMAIL:?Set CADDY_EMAIL in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      bill-ledger:
+        condition: service_started
+
+volumes:
+  bill-data:
+  bill-originals:
+  bill-whatsapp-auth:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,11 @@
+# Build allowlist: customer configuration and state never enter image layers.
+**
+!Dockerfile
+!package.json
+!bun.lock
+!tsconfig.json
+!src/
+!src/**
+!assets/
+!assets/**
+**/.DS_Store

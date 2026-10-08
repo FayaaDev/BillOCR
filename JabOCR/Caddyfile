@@ -1,0 +1,9 @@
+{
+	email {$CADDY_EMAIL}
+}
+
+{$APP_DOMAIN} {
+	reverse_proxy bill-ledger:3000 {
+		header_up Host {host}
+	}
+}
