@@ -1,10 +1,10 @@
 # JabOCR standalone deployment
 
 Buildable application source for one Linux amd64 deployment. SQLite and original
-attachments are canonical; Google Drive and Sheets are optional projections.
+attachments are canonical; Google Drive/Sheets and Zoho WorkDrive/Sheet are optional projections.
 Azure Document Intelligence provides OCR. WhatsApp, Telegram, and dashboard ZIP
 upload are alternative intake methods. The sample disables WhatsApp, Telegram,
-and Google until configured; keep `AZURE_ENABLED=true` and `MISTRAL_ENABLED=false`.
+Google, and Zoho until configured; keep `AZURE_ENABLED=true` and `MISTRAL_ENABLED=false`.
 
 Run commands from this directory unless stated otherwise. Supply your own domain,
 credentials, and integration destinations; none are included.
@@ -216,6 +216,128 @@ The application also accepts `GOOGLE_AUTH_MODE=service_account` with
 a My Drive folder does not give a service account storage quota, and this snapshot
 lacks shared-drive API support. Use user OAuth with My Drive for this deployment.
 
+### Zoho WorkDrive and Sheet: Saudi Self Client OAuth
+
+Zoho is independent of Google and defaults disabled. Only Saudi-hosted accounts
+(`ZOHO_REGION=sa`) are supported. Running the helper prepares credentials;
+enable synchronization separately after checking dedicated test destinations.
+
+1. On the operator machine, use Bun and this source directory as in the Google
+   setup above. In the Saudi Zoho API Console, create/select a **Self Client**.
+   Keep its client ID and secret privately in environment variables named exactly
+   `Client_ID` and `Client_Secret` (for example, in your private local `.env.local`).
+2. Generate a short-lived grant code for the intended Saudi account with scopes:
+
+   ```text
+   WorkDrive.files.CREATE,WorkDrive.files.READ,ZohoFiles.files.READ,ZohoSheet.dataAPI.READ,ZohoSheet.dataAPI.UPDATE
+   ```
+
+   `ZohoFiles.files.READ` is required for original-byte download verification.
+   If you previously authorized the four-scope setup, move the old credential
+   aside privately and re-run `zoho:oauth` with a new grant covering all five
+   scopes. The helper refuses overwrites. Destination IDs are not needed by it.
+3. Run promptly in an interactive local terminal, explicitly overriding the
+   output path for the operator machine:
+
+   ```sh
+   ZOHO_OAUTH_CREDENTIAL_JSON="$PWD/secrets/zoho-authorized-user.json" bun run zoho:oauth
+   ```
+
+   Bun automatically loads `.env` and `.env.local`; the explicit override avoids
+   a container-only credential path. Paste the grant code at the hidden prompt,
+   then press Enter. Never pass the code as a command-line argument. Ctrl-C
+   cancels and restores the terminal. Input expires after five minutes.
+
+The helper posts only to `https://accounts.zoho.sa/oauth/v2/token`, rejects
+redirects, and accepts only `https://www.zohoapis.sa` as the returned API domain.
+It stores client ID, client secret, refresh token, token endpoint and API domain;
+it does not store the expiring access token. Default output is local
+`secrets/zoho-authorized-user.json`; existing output is refused before exchange.
+Publication is atomic and exclusive, with file mode `0600` and new directories
+`0700`. Existing directory permissions are left intact. Protect the credential
+and keep it out of version control; move an old output aside privately before
+reauthorizing.
+
+4. Select a private WorkDrive folder writable by this account and a writable
+   Zoho Sheet workbook. Precreate its worksheet `Ledger` (or your configured
+   name). Use an empty worksheet or one with exactly these headers in A:O:
+
+   ```text
+   Received date | Vendor | Invoice number | Invoice date | Subtotal | VAT | Total | Currency | Description | Sender | Confidence summary | Status | WorkDrive hyperlink | Bill ID | Revision
+   ```
+
+   Empty sheets receive headers automatically; existing mismatches fail without
+   overwriting customer data. Hide columns **N:O** in the Sheet UI and preserve
+   their values: Bill ID is immutable identity; Revision is numeric. The official
+   Data API definition exposes no column-hide method, so hiding is an operator
+   step. Do not manually duplicate Bill IDs or edit revisions. Text is emitted
+   as quote-escaped constant-string formulas (`="literal"`) to preserve leading
+   zeros and prevent OCR strings becoming executable formula syntax. Numeric
+   amounts and revisions remain numbers. Verify evaluated values, Arabic,
+   quotes/newlines, leading zeros, empty values, and links in your test worksheet.
+5. Transfer `zoho-authorized-user.json` privately into server `secrets/`, owned
+   by the verified container UID/GID, mode `0600` (directory `0700`). Set privately:
+
+   ```dotenv
+   GOOGLE_ENABLED=false
+   ZOHO_ENABLED=true
+   ZOHO_REGION=sa
+   ZOHO_OAUTH_CREDENTIAL_JSON=/run/secrets/zoho-authorized-user.json
+   ZOHO_WORKDRIVE_FOLDER_ID=your-private-folder-id
+   ZOHO_SHEET_RESOURCE_ID=your-workbook-resource-id
+   ZOHO_SHEET_NAME=Ledger
+   ```
+
+   Google configuration/code and existing projections remain available. Avoid
+   changing Zoho destinations after archival: persisted intent/projection
+   identities reject destination changes. Request timeout defaults to 60 seconds
+   (`ZOHO_REQUEST_TIMEOUT_MS`); JSON responses to 2 MiB
+   (`ZOHO_MAX_RESPONSE_BYTES`). Original downloads are separately bounded by the
+   verified original's byte length. API hosts are allowlisted, never configurable URLs.
+6. Recreate the app using the commands above. Ingest and approve a **new** test
+   bill, confirm archive bytes/private access and its row, then correct and reject
+   it. Approved corrections update the same row. Subsequent non-approved states
+   mark it `Rejected`; original files are retained. There is no historical
+   backfill: bills approved before migration or while Zoho was disabled are
+   excluded, including later corrections/reapprovals. Readiness checks supported
+   worker jobs, not provider credentials, scopes, access, or formula interpretation.
+
+#### Ambiguous Zoho mutations and recovery
+
+Run one application worker/replica per database. WorkDrive upload and Sheet
+append have **no documented idempotency key or remote uniqueness guarantee**.
+SQLite records a one-shot intent **before** sending either request. On a timeout,
+malformed success, lost response, or crash (even before send), replay performs
+read-only reconciliation; it never sends another upload or append for that bill.
+Even definitive upload/add errors retain the intent conservatively.
+
+WorkDrive reconciliation paginates direct children, verifies identity-bearing
+names (including timestamp-renamed candidates), checks metadata/parent/size,
+downloads bounded bytes and compares SHA-256. Private metadata permalinks must
+use `https://workdrive.zoho.sa`; no public share is created. Reviewers need folder
+permissions. Sheet reconciliation fetches every Bill ID match and refuses
+duplicates/higher revisions; updates include Bill ID and observed Revision,
+then re-fetch and compare all mapped values before fenced SQLite persistence.
+This is revision-aware convergence, **not a documented atomic remote CAS**.
+Stale mutations durably schedule repair for current canonical state, including
+rejections; API completion/visibility can still require operator reconciliation.
+
+After bounded retries, inspect `failed-jobs` and `inspect BILL_ID`; the latter
+includes separate Zoho projections and upload/append intents. An absent file/row
+does not prove the first request never committed. Resolve access/scope issues or
+duplicate/conflicting candidates privately, then use `retry --include-permanent
+JOB_ID` to re-run reconciliation. **Retry does not reset intents.** If no verified
+candidate becomes visible, leave the intent unresolved and raise an operator
+issue; no automatic resend/reset command is provided. Do not delete intents or
+insert another row/file blindly. Sheet error `2950` starts a five-minute workbook
+cooldown; jobs still have bounded retries and can require later operator replay.
+
+Offline checks and a dedicated Saudi test-destination smoke test passed, including
+OAuth refresh, verified archival, replay, Sheet insertion, correction, rejection,
+and text round trips. The operator also confirmed browser checks. Repeat these
+checks for each deployment's credentials, destinations, and reviewer permissions;
+the observed replay does not establish a provider-wide idempotency guarantee.
+
 ## 4. Operations and persistence
 
 ```sh
@@ -317,7 +439,7 @@ docker compose up -d --no-build
 ```
 
 Restore WhatsApp auth separately before startup or pair again. Repeat readiness,
-login, original-download, intake, and enabled Google projection checks. Never
+login, original-download, intake, and enabled Google/Zoho projection checks. Never
 copy only a live SQLite main file: committed data may still be in its WAL. The
 provided snapshot avoids that problem; stale destination WAL/SHM files must not
-be reused. Google files/rows are not a substitute for the canonical backup.
+be reused. Google/Zoho files and rows are not a substitute for the canonical backup.
