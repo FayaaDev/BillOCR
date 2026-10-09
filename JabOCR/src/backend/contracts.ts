@@ -1,4 +1,4 @@
-export const jobTypes = ["extract", "archive_to_drive", "project_to_sheet", "sync_review_correction"] as const;
+export const jobTypes = ["extract", "archive_to_drive", "project_to_sheet", "sync_review_correction", "archive_to_workdrive", "sync_to_zoho_sheet"] as const;
 export type JobType = (typeof jobTypes)[number];
 
 export const jobStates = ["pending", "running", "succeeded", "retryable_failure", "permanent_failure"] as const;

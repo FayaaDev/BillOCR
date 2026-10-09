@@ -17,7 +17,7 @@ export interface OpsDependencies {
 }
 function usage(): never { throw new Error("Usage: bun run ops <migrate|inspect|failed-jobs|retry|backup> [arguments]"); }
 function billView(database: BillDatabase, bill: Bill): object {
-  return { bill, extraction: database.getExtraction(bill.id), validationIssues: database.getValidationIssues(bill.id), jobs: database.listJobsForBill(bill.id), projections: { drive: database.getProjectionMetadata("drive", bill.id), sheets: database.getProjectionMetadata("sheets", bill.id) } };
+  return { bill, extraction: database.getExtraction(bill.id), validationIssues: database.getValidationIssues(bill.id), jobs: database.listJobsForBill(bill.id), projections: { drive: database.getProjectionMetadata("drive", bill.id), sheets: database.getProjectionMetadata("sheets", bill.id), workdrive: database.getProjectionMetadata("workdrive", bill.id), zohoSheet: database.getProjectionMetadata("zoho_sheet", bill.id) }, zohoIntents: { upload: database.getZohoIntent(bill.id, "upload"), append: database.getZohoIntent(bill.id, "append") } };
 }
 function safeBackupName(value: string): string { return basename(value).replace(/[^A-Za-z0-9._-]/g, "_") || "backup"; }
 function sha256(path: string): string { return createHash("sha256").update(readFileSync(path)).digest("hex"); }

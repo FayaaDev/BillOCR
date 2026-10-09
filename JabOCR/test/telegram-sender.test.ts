@@ -102,7 +102,7 @@ test("crash recovery retains metadata, accepts old manifests, rejects malformed 
 test("upgrade of pre-feature database preserves old IDs and sets nullable metadata", async () => {
   const { dir, database } = await fixture();
   const bill = database.createBillWithInitialJobs({ source: "telegram", sourceMessageId: "old", sourceChatId: "-100", sourceSenderId: "42", attachmentIndex: 0, receivedAt: new Date().toISOString(), mimeType: "application/pdf", originalPath: join(dir, "old.pdf"), contentSha256: "a".repeat(64) }, []).bill;
-  const version = database.sqlite.query<{ version: number }, []>("SELECT MAX(version) AS version FROM schema_migrations").get()!.version;
+  const version = database.sqlite.query<{ version: number }, []>("SELECT MAX(version) - 1 AS version FROM schema_migrations").get()!.version;
   database.sqlite.exec("ALTER TABLE bills DROP COLUMN source_sender_name; ALTER TABLE bills DROP COLUMN source_sender_username; ALTER TABLE bills DROP COLUMN source_sender_phone_number;");
   database.sqlite.query("DELETE FROM schema_migrations WHERE version = ?").run(version);
   database.close(); const upgraded = new BillDatabase(join(dir, "bills.sqlite")); fixtures[fixtures.length - 1]!.database = upgraded;

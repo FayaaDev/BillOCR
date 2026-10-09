@@ -71,6 +71,7 @@ function retryTransition(attempts: number, policy: RetryPolicy, now: Date): { st
   return { state: "retryable_failure", availableAt: new Date(now.getTime() + delay).toISOString() };
 }
 function safeJobError(error: string): string {
+  if (error === "Zoho mutation unresolved; reconcile only") return "zoho_mutation_unresolved";
   if (/timeout/i.test(error)) return "provider_timeout";
   if (/lease/i.test(error)) return "lease_lost";
   if (/malformed|invalid structured|schema/i.test(error)) return "malformed_provider_output";
@@ -82,6 +83,7 @@ function safeJobError(error: string): string {
 /** Canonical SQLite store. Every method completes its transaction before returning. */
 export class BillDatabase {
   readonly sqlite: Database;
+  zohoEnabled = false;
 
   constructor(path: string) {
     this.sqlite = new Database(path, { create: true, strict: true });
@@ -664,6 +666,7 @@ export class BillDatabase {
           this.completeAdminUploadBatchIfTerminal(bill.batch_item_id, now);
         }
       if (approved) {
+        this.enrollZohoApproval(input.billId, bill.status, now);
         this.ensureArchiveJob(input.billId, now);
         this.activateProjectJob(input.billId, nextContent, now);
       } else if (bill.sheet_row_key !== null || this.getProjectionMetadata("sheets", input.billId)) this.activateReviewSyncJob(input.billId, nextReview, now);
@@ -779,6 +782,7 @@ export class BillDatabase {
         this.completeAdminUploadBatchIfTerminal(current.batch_item_id, now);
       }
       if (!duplicate) this.ensureArchiveJob(input.billId, now);
+      if (!duplicate && decision === "approved") this.enrollZohoApproval(input.billId, current.status, now);
       if (!duplicate && decision === "approved") this.activateProjectJob(input.billId, input.expectedContentRevision, now);
       else this.invalidatePendingProjectJobs(input.billId, now);
       return true;
@@ -834,11 +838,13 @@ export class BillDatabase {
       }
       this.ensureArchiveJob(input.billId, now);
       this.activateProjectJob(input.billId, input.expectedContentRevision, now);
+      this.enrollZohoApproval(input.billId, current.status, now);
       return true;
     })();
   }
 
   private invalidatePendingProjectJobs(billId: string, now: string): void {
+    if (this.isZohoEnrolled(billId)) this.enqueueZohoSync(billId, now);
     const projects = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE bill_id = ? AND type = 'project_to_sheet' AND state IN ('pending', 'retryable_failure')").all(billId);
     for (const job of projects) {
       this.sqlite.query("UPDATE jobs SET state = 'permanent_failure', last_error = 'validation_invalidated', updated_at = ? WHERE id = ?").run(now, job.id);
@@ -967,6 +973,51 @@ export class BillDatabase {
   getJob(id: string): Job | null {
     const row = this.sqlite.query<JobRow, [string]>("SELECT * FROM jobs WHERE id = ?").get(id);
     return row ? toJob(row) : null;
+  }
+
+  isZohoEnrolled(billId: string): boolean { return Boolean(this.sqlite.query("SELECT 1 FROM zoho_enrollment WHERE bill_id = ?").get(billId)); }
+  private enrollZohoApproval(billId: string, previousStatus: Bill["status"], now: string): void {
+    if (!this.zohoEnabled && !this.isZohoEnrolled(billId)) this.sqlite.query("INSERT INTO zoho_historical_approvals VALUES (?) ON CONFLICT DO NOTHING").run(billId);
+    if (this.sqlite.query("SELECT 1 FROM zoho_historical_approvals WHERE bill_id = ?").get(billId)) return;
+    if (!this.zohoEnabled || (previousStatus === "approved" && !this.isZohoEnrolled(billId))) return;
+    this.sqlite.query("INSERT INTO zoho_enrollment VALUES (?, ?) ON CONFLICT DO NOTHING").run(billId, now);
+    this.createZohoJob(billId, "archive_to_workdrive", `workdrive:${billId}`, now);
+    this.enqueueZohoSync(billId, now);
+  }
+  private createZohoJob(billId: string, type: "archive_to_workdrive" | "sync_to_zoho_sheet", key: string, now: string): void {
+    const id = randomUUID();
+    const revision = this.getBill(billId)?.contentRevision ?? null;
+    if (this.sqlite.query("INSERT INTO jobs (id,bill_id,type,state,idempotency_key,attempts,available_at,expected_revision,created_at,updated_at) VALUES (?,?,?,'pending',?,0,?,?,?,?) ON CONFLICT(idempotency_key) DO NOTHING").run(id, billId, type, key, now, revision, now, now).changes) recordTransition(this.sqlite, id, null, "pending", "created", now);
+  }
+  private enqueueZohoSync(billId: string, now: string): void {
+    const bill = this.getBill(billId);
+    if (bill) this.createZohoJob(billId, "sync_to_zoho_sheet", `zoho:${billId}:${bill.contentRevision}:${bill.status}`, now);
+  }
+  enqueueZohoRepair(job: ClaimedJob): void {
+    const bill = this.getBill(job.billId);
+    if (!bill || !this.isZohoEnrolled(bill.id)) return;
+    this.sqlite.transaction(() => this.createZohoJob(bill.id, "sync_to_zoho_sheet", `zoho-repair:${job.id}:${job.leaseToken}:${bill.contentRevision}:${bill.status}`, new Date().toISOString()))();
+  }
+  getZohoIntent(billId: string, kind: "upload" | "append"): { identity_json: string; created_at: string } | null {
+    return this.sqlite.query<{ identity_json: string; created_at: string }, [string, string]>("SELECT identity_json,created_at FROM zoho_mutation_intents WHERE bill_id = ? AND kind = ?").get(billId, kind);
+  }
+  beginZohoMutation(job: ClaimedJob, kind: "upload" | "append", identity: object, revision: number, status: Bill["status"]): boolean {
+    return this.sqlite.transaction(() => {
+      const now = new Date().toISOString(); const bill = this.getBill(job.billId);
+      const claim = this.getJob(job.id);
+      if (!bill || claim?.billId !== bill.id || claim.type !== (kind === "upload" ? "archive_to_workdrive" : "sync_to_zoho_sheet") || bill.contentRevision !== revision || bill.status !== status || !this.isZohoEnrolled(bill.id) || !this.leaseOwned(job.id, job.leaseToken, now) || (kind === "append" && status !== "approved")) throw new Error("Zoho lease or revision lost");
+      return this.sqlite.query("INSERT INTO zoho_mutation_intents VALUES (?,?,?,?) ON CONFLICT DO NOTHING").run(bill.id, kind, JSON.stringify(identity), now).changes === 1;
+    })();
+  }
+  persistZohoProjection(job: ClaimedJob, provider: "workdrive" | "zoho_sheet", revision: number, status: Bill["status"], externalId: string, externalUrl: string | null, metadata: object): boolean {
+    return this.sqlite.transaction(() => {
+      const now = new Date().toISOString(); const bill = this.getBill(job.billId);
+      const claim = this.getJob(job.id);
+      if (!bill || claim?.billId !== bill.id || claim.type !== (provider === "workdrive" ? "archive_to_workdrive" : "sync_to_zoho_sheet") || !this.isZohoEnrolled(bill.id) || !this.leaseOwned(job.id, job.leaseToken, now) || (provider === "zoho_sheet" && (bill.contentRevision !== revision || bill.status !== status))) return false;
+      this.sqlite.query(`INSERT INTO provider_projection_metadata (id,bill_id,provider,projection_key,external_id,external_url,metadata_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(provider,projection_key) DO UPDATE SET external_id=excluded.external_id,external_url=excluded.external_url,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at`).run(randomUUID(), bill.id, provider, bill.id, externalId, externalUrl, JSON.stringify(metadata), now, now);
+      return true;
+    })();
   }
 
   /** Read-only operational view; SQLite remains the source for all status reporting. */

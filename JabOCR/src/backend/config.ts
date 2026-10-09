@@ -12,6 +12,7 @@ export type TelegramConfig =
   | { enabled: false; botToken: null; groupIds: string[]; pollTimeoutSeconds: number; requestTimeoutMs: number; maxResponseBytes: number }
   | { enabled: true; botToken: string; groupIds: string[]; pollTimeoutSeconds: number; requestTimeoutMs: number; maxResponseBytes: number };
 export interface AppConfig {
+  zoho: { enabled: boolean; region: "sa"; credentialJson: string | null; workdriveFolderId: string | null; sheetResourceId: string | null; sheetName: string; requestTimeoutMs: number; maxResponseBytes: number };
   host: string;
   port: number;
   dataDir: string;
@@ -130,6 +131,16 @@ export function loadConfig(env: Env = Bun.env): AppConfig {
        const authMode = env.GOOGLE_AUTH_MODE ?? "service_account";
        if (authMode !== "service_account" && authMode !== "user_oauth") throw new Error("GOOGLE_AUTH_MODE must be service_account or user_oauth");
        return { enabled: true, authMode, credentialJson: resolve(required(env, authMode === "service_account" ? "GOOGLE_SERVICE_ACCOUNT_JSON" : "GOOGLE_OAUTH_CREDENTIAL_JSON")), driveFolderId: required(env, "GOOGLE_DRIVE_FOLDER_ID"), sheetId: required(env, "GOOGLE_SHEET_ID"), sheetName: env.GOOGLE_SHEET_NAME ?? "Ledger", requestTimeoutMs, maxResponseBytes };
+    })(),
+    zoho: (() => {
+      const enabled = boolean(env, "ZOHO_ENABLED", false);
+      if ((env.ZOHO_REGION ?? "sa") !== "sa") throw new Error("ZOHO_REGION must be sa");
+      const id = (key: string): string | null => { if (!enabled) return null; const value = required(env, key); if (!/^[A-Za-z0-9_-]{1,256}$/.test(value)) throw new Error(`${key} must be a Zoho resource ID`); return value; };
+      const sheetName = env.ZOHO_SHEET_NAME ?? "Ledger";
+      if (!sheetName.trim() || sheetName.length > 128) throw new Error("ZOHO_SHEET_NAME must be a bounded worksheet name");
+      const credentialPath = env.ZOHO_OAUTH_CREDENTIAL_JSON ?? "/run/secrets/zoho-authorized-user.json";
+      if (enabled && !credentialPath.trim()) throw new Error("ZOHO_OAUTH_CREDENTIAL_JSON must not be empty");
+      return { enabled, region: "sa", credentialJson: enabled ? resolve(credentialPath) : null, workdriveFolderId: id("ZOHO_WORKDRIVE_FOLDER_ID"), sheetResourceId: id("ZOHO_SHEET_RESOURCE_ID"), sheetName, requestTimeoutMs: integer(env, "ZOHO_REQUEST_TIMEOUT_MS", 60_000, 1), maxResponseBytes: integer(env, "ZOHO_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 1) };
     })(),
     review: { username: required(env, "REVIEW_USERNAME"), password: required(env, "REVIEW_PASSWORD"), origin: reviewOrigin(env.REVIEW_ORIGIN) },
     validation: loadValidationConfig(env),

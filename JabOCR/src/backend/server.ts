@@ -17,6 +17,7 @@ import { AzureDocumentIntelligenceInvoiceProvider, type AzureInvoiceProvider } f
 import { AdminZipIngestionService } from "./admin-zip-ingestion";
 import { createReviewAuth } from "./review-auth";
 import type { ServiceHealth } from "./service-health";
+import { createZohoAdapters, createWorkDriveArchiveHandler, createZohoSheetHandler, type WorkDriveAdapter, type ZohoSheetAdapter } from "./zoho-projections";
 
 export interface RunningService { url: string; whatsappAdmin: WhatsAppAdminOperations; shutdown(): Promise<void>; }
 export interface ServiceDependencies {
@@ -33,6 +34,8 @@ export interface ServiceDependencies {
   onExtractionPersisted?: (billId: string) => Promise<void> | void;
   driveAdapter?: DriveAdapter;
   sheetsAdapter?: SheetsAdapter;
+  workdriveAdapter?: WorkDriveAdapter;
+  zohoSheetAdapter?: ZohoSheetAdapter;
 }
 
 function unavailableWhatsAppAdmin(): WhatsAppAdminOperations {
@@ -56,6 +59,7 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
   const originalsDir = canonicalOriginalsDir(config.originals.dir);
   config = { ...config, originals: { ...config.originals, dir: originalsDir }, whatsapp: { ...config.whatsapp, originalsDir, maxAttachmentBytes: config.originals.maxAttachmentBytes } };
   const database = (dependencies.createDatabase ?? ((path: string) => new BillDatabase(path)))(config.databasePath);
+  database.zohoEnabled = config.zoho?.enabled ?? false;
   const logger = createLogger(config.logLevel);
   const auth = createReviewAuth(config);
   const validatePersistedExtraction = createExtractionValidationCallback(database, config.validation);
@@ -76,7 +80,14 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
        sync_review_correction: createReviewCorrectionSyncHandler(database, adapters.sheets),
     };
   }
-  const worker = new JobWorker(database, { ...googleHandlers, ...jobHandlers, extract: extractHandler }, config.jobs, `service-${process.pid}`, logger);
+  let zohoHandlers: JobHandlers = {};
+  if (config.zoho?.enabled) {
+    if (Boolean(dependencies.workdriveAdapter) !== Boolean(dependencies.zohoSheetAdapter)) throw new Error("Inject both Zoho adapters when enabled");
+    const zohoConfig = { region: config.zoho.region, workdriveFolderId: config.zoho.workdriveFolderId!, sheetResourceId: config.zoho.sheetResourceId!, sheetName: config.zoho.sheetName, requestTimeoutMs: config.zoho.requestTimeoutMs, maxResponseBytes: config.zoho.maxResponseBytes };
+    const adapters = dependencies.workdriveAdapter && dependencies.zohoSheetAdapter ? { workdrive: dependencies.workdriveAdapter, sheet: dependencies.zohoSheetAdapter } : createZohoAdapters(readFileSync(config.zoho.credentialJson!, "utf8"), zohoConfig);
+    zohoHandlers = { archive_to_workdrive: createWorkDriveArchiveHandler(database, adapters.workdrive, { ...zohoConfig, originalsRoot: originalsDir, maxOriginalBytes: config.originals.maxAttachmentBytes }), sync_to_zoho_sheet: createZohoSheetHandler(database, adapters.sheet, zohoConfig) };
+  }
+  const worker = new JobWorker(database, { ...googleHandlers, ...zohoHandlers, ...jobHandlers, extract: extractHandler }, config.jobs, `service-${process.pid}`, logger);
   const workerLoop = new BackgroundWorkerLoop(worker, logger);
   const transport = dependencies.whatsappTransport ?? new BaileysTransport(config.whatsapp.authPath, logger);
   const ingestion = new WhatsAppIngestionService({ groupId: config.whatsapp.groupId, originalsDir: config.whatsapp.originalsDir, maxAttachmentBytes: config.whatsapp.maxAttachmentBytes, extractionInputVersion: config.imagePreprocessing.enabled ? IMAGE_PREPROCESSING_VERSION : "original", database, logger });
@@ -110,7 +121,7 @@ export function startService(config: AppConfig = loadConfig(), jobHandlers: JobH
   let stopping = false;
   const startupFailures = new Set<string>();
   // Allow multiple provider calls within a job, but never let lease renewal hide a hung handler.
-  const maxJobMs = Math.max(15 * 60_000, 4 * (config.azure.requestTimeoutMs + config.google.requestTimeoutMs + config.imagePreprocessing.timeoutMs + config.mistral.requestTimeoutMs));
+   const maxJobMs = Math.max(15 * 60_000, 4 * (config.azure.requestTimeoutMs + config.google.requestTimeoutMs + config.zoho.requestTimeoutMs + config.imagePreprocessing.timeoutMs + config.mistral.requestTimeoutMs));
   const health = (): ServiceHealth => {
     const reasons = [...startupFailures];
     if (!startupComplete) reasons.push("startup_pending");

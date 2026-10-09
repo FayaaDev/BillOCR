@@ -270,6 +270,26 @@ const migrations = [
   `ALTER TABLE bills ADD COLUMN source_sender_name TEXT;
    ALTER TABLE bills ADD COLUMN source_sender_username TEXT;
    ALTER TABLE bills ADD COLUMN source_sender_phone_number TEXT;`,
+  `CREATE TABLE jobs_zoho (
+     id TEXT PRIMARY KEY, bill_id TEXT NOT NULL REFERENCES bills(id), type TEXT NOT NULL CHECK (type IN ('extract','archive_to_drive','project_to_sheet','sync_review_correction','archive_to_workdrive','sync_to_zoho_sheet')),
+     state TEXT NOT NULL CHECK (state IN ('pending','running','succeeded','retryable_failure','permanent_failure')),
+     idempotency_key TEXT NOT NULL UNIQUE, attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0), available_at TEXT NOT NULL,
+     lease_token TEXT, lease_expires_at TEXT, claimed_by TEXT, claimed_at TEXT, last_error TEXT,
+     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expected_revision INTEGER
+   );
+   INSERT INTO jobs_zoho SELECT * FROM jobs;
+   DROP TABLE jobs;
+   ALTER TABLE jobs_zoho RENAME TO jobs;
+   CREATE INDEX jobs_claimable_idx ON jobs(state, available_at);
+   CREATE INDEX jobs_bill_idx ON jobs(bill_id);
+   CREATE INDEX jobs_project_revision_idx ON jobs(bill_id, type, expected_revision);
+   CREATE TABLE zoho_enrollment (bill_id TEXT PRIMARY KEY REFERENCES bills(id) ON DELETE CASCADE, created_at TEXT NOT NULL);
+   CREATE TABLE zoho_historical_approvals (bill_id TEXT PRIMARY KEY REFERENCES bills(id) ON DELETE CASCADE);
+   INSERT INTO zoho_historical_approvals SELECT id FROM bills WHERE status = 'approved';
+   CREATE TABLE zoho_mutation_intents (
+     bill_id TEXT NOT NULL REFERENCES bills(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('upload','append')),
+     identity_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(bill_id,kind)
+   );`,
 ];
 
 export function applyMigrations(db: Database): void {
