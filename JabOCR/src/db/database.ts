@@ -65,10 +65,13 @@ export interface ReviewQueueBill extends Bill { batchId: string | null; displayS
 export interface ReviewClassificationOverride { billId: string; reviewerId: string; action: "mark_not_invoice" | "reclassify_invoice"; expectedContentRevision: number; expectedReviewRevision: number; }
 export type PrepareBillDeletionResult = { prepared: true } | { busy: true } | { stale: true } | { missing: true };
 
-function retryTransition(attempts: number, policy: RetryPolicy, now: Date): { state: "retryable_failure" | "permanent_failure"; availableAt: string } {
+function retryTransition(attempts: number, policy: RetryPolicy, now: Date, retryAfterMs = 0, jitterMs = 0): { state: "retryable_failure" | "permanent_failure"; availableAt: string } {
   if (attempts >= policy.maxAttempts) return { state: "permanent_failure", availableAt: now.toISOString() };
   const delay = Math.min(policy.retryMaxMs, policy.retryBaseMs * 2 ** Math.max(0, attempts - 1));
-  return { state: "retryable_failure", availableAt: new Date(now.getTime() + delay).toISOString() };
+  const providerDelay = Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : 0;
+  const jitter = Number.isFinite(jitterMs) && jitterMs > 0 ? jitterMs : 0;
+  const availableAt = Math.min(253_402_300_799_999, now.getTime() + Math.max(delay, providerDelay) + jitter);
+  return { state: "retryable_failure", availableAt: new Date(availableAt).toISOString() };
 }
 function safeJobError(error: string): string {
   if (error === "Zoho mutation unresolved; reconcile only") return "zoho_mutation_unresolved";
@@ -1130,12 +1133,12 @@ export class BillDatabase {
     })();
   }
 
-  failJob(id: string, leaseToken: string, error: string, policy: RetryPolicy, now = new Date(), retryable = true): Job | null {
+  failJob(id: string, leaseToken: string, error: string, policy: RetryPolicy, now = new Date(), retryable = true, retryAfterMs?: number, jitterMs = 0): Job | null {
     return this.sqlite.transaction(() => {
       const current = this.getJob(id);
       if (!current || current.state !== "running" || current.leaseToken !== leaseToken) return null;
       const nowIso = now.toISOString();
-      const transition = retryable ? retryTransition(current.attempts, policy, now) : { state: "permanent_failure" as const, availableAt: now.toISOString() };
+      const transition = retryable ? retryTransition(current.attempts, policy, now, retryAfterMs, jitterMs) : { state: "permanent_failure" as const, availableAt: now.toISOString() };
       const result = this.sqlite.query<JobRow, [string, string, string, string, string, string]>(`UPDATE jobs SET state = ?, available_at = ?, last_error = ?, lease_token = NULL, lease_expires_at = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ? AND state = 'running' AND lease_token = ? RETURNING *`).get(transition.state, transition.availableAt, safeJobError(error), nowIso, id, leaseToken);
       if (!result) return null;
       recordTransition(this.sqlite, id, "running", transition.state, "handler_failed", nowIso);

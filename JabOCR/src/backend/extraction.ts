@@ -6,7 +6,7 @@ import { IMAGE_PREPROCESSING_VERSION, isPreprocessableMimeType, type ImagePrepro
 import { OriginalVerificationError, readVerifiedOriginal } from "./originals";
 import { PermanentJobError } from "./worker";
 import { RetryableExtractionError } from "./extraction-errors";
-import { AzureMalformedInvoiceOutputError, AzureSubmissionRejectedError, parseAzureInvoiceAnalysis, type AzureInvoiceProvider } from "./azure-invoice";
+import { AzureMalformedInvoiceOutputError, AzureSubmissionNotSentError, AzureSubmissionRejectedError, parseAzureInvoiceAnalysis, type AzureInvoiceProvider } from "./azure-invoice";
 
 export { RetryableExtractionError } from "./extraction-errors";
 
@@ -448,6 +448,9 @@ export function createExtractJobHandler(database: BillDatabase, provider: Mistra
         azureOperationPersisted = true;
         if (azureOperation.state === "submitting") throw new PermanentJobError("Azure submission outcome is unknown; operation URL was not persisted");
       } else {
+        // Wait before fencing submission: a stopped/stale worker has then made no ambiguous Azure request.
+        const submissionPermit = await azureProvider.prepareSubmission?.();
+        context.assertLease();
         const begun = database.beginExtractionInvocation({ billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, jobAttempt: job.attempts, provider: "azure", idempotencyKey: azureKey, jobIdempotencyKey: context.idempotencyKey, providerModel: "prebuilt-invoice", promptSchemaVersion: AZURE_INVOICE_PROMPT_VERSION, requestedAt: completedAt() });
         if (!begun) throw new RetryableExtractionError("Azure invocation lost job lease");
         invocationId = begun.invocation.id;
@@ -463,9 +466,9 @@ export function createExtractJobHandler(database: BillDatabase, provider: Mistra
         context.assertLease();
         let submitted: { operationLocation: string };
         try {
-          submitted = await azureProvider.submit({ bytes, mimeType });
+          submitted = await azureProvider.submit({ bytes, mimeType, submissionPermit });
         } catch (error) {
-          if (error instanceof AzureSubmissionRejectedError && !database.rejectAzureExtractionSubmission({ invocationId, jobId: job.id, leaseToken: job.leaseToken, completedAt: completedAt(), errorDetails: error.message })) throw new RetryableExtractionError("Azure submission rejection persistence lost job lease");
+          if ((error instanceof AzureSubmissionRejectedError || error instanceof AzureSubmissionNotSentError) && !database.rejectAzureExtractionSubmission({ invocationId, jobId: job.id, leaseToken: job.leaseToken, completedAt: completedAt(), errorDetails: error.message })) throw new RetryableExtractionError("Azure submission rejection persistence lost job lease");
           throw error;
         }
         if (!database.persistAzureExtractionOperation({ invocationId, billId: bill.id, jobId: job.id, leaseToken: job.leaseToken, operationLocation: submitted.operationLocation })) throw new RetryableExtractionError("Azure operation persistence lost job lease");

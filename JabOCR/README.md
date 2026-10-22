@@ -6,6 +6,15 @@ Azure Document Intelligence provides OCR. WhatsApp, Telegram, and dashboard ZIP
 upload are alternative intake methods. The sample disables WhatsApp, Telegram,
 Google, and Zoho until configured; keep `AZURE_ENABLED=true` and `MISTRAL_ENABLED=false`.
 
+Azure requests are paced independently: at most one analysis submission and one
+result poll per second per application process. A 429 applies a shared in-process
+cooldown; valid `Retry-After` (seconds/date) and Azure millisecond retry headers
+are honored. Azure job retries persist their delay with positive jitter in SQLite.
+Waits longer than 30 seconds are deferred to the durable job runner rather than
+blocking shutdown. Per-job delays survive restarts; the resource-wide cooldown
+does not. Keep one app replica per database and account for other applications
+sharing the same Azure resource when assessing its quota.
+
 Run commands from this directory unless stated otherwise. Supply your own domain,
 credentials, and integration destinations; none are included.
 

@@ -1,12 +1,13 @@
 import { jobTypes, type JobHandlerContext, type JobHandlers } from "./contracts";
 import type { BillDatabase, RetryPolicy } from "../db/database";
 import type { Logger } from "./logger";
+import { RetryableExtractionError } from "./extraction-errors";
 
 export class PermanentJobError extends Error { readonly retryable = false; }
 
 /** Executes one injected provider handler after its DB claim transaction has closed. */
 export class JobWorker {
-  constructor(private readonly database: BillDatabase, private readonly handlers: JobHandlers, private readonly policy: RetryPolicy, private readonly workerId: string, private readonly logger: Logger) {}
+  constructor(private readonly database: BillDatabase, private readonly handlers: JobHandlers, private readonly policy: RetryPolicy, private readonly workerId: string, private readonly logger: Logger, private readonly options: { now?: () => number; random?: () => number } = {}) {}
 
   get supportedTypes() { return jobTypes.filter((type) => this.handlers[type] !== undefined); }
 
@@ -49,7 +50,9 @@ export class JobWorker {
       if (leaseLost || !this.database.completeJob(job.id, job.leaseToken)) this.logger.warn("job completion lost lease", { jobId: job.id });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.database.failJob(job.id, job.leaseToken, message, this.policy, new Date(), !(error instanceof PermanentJobError));
+      const retry = error instanceof RetryableExtractionError ? error : null;
+      const jitterMs = retry?.addJitter ? 1 + Math.floor((this.options.random ?? Math.random)() * 1_000) : 0;
+      this.database.failJob(job.id, job.leaseToken, message, this.policy, new Date((this.options.now ?? Date.now)()), !(error instanceof PermanentJobError), retry?.retryAfterMs, jitterMs);
       this.logger.warn("job handler failed", { jobId: job.id, type: job.type });
     } finally {
       clearInterval(heartbeat);

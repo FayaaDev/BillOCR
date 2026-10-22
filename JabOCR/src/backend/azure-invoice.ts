@@ -8,7 +8,9 @@ const MODEL_ID = "prebuilt-invoice";
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
-const MAX_POLL_INTERVAL_MS = 5_000;
+const MAX_IN_PROCESS_WAIT_MS = 30_000;
+// SQLite stores ISO dates through JavaScript Date; larger provider delays cannot be persisted safely.
+const MAX_DATE_MS = 253_402_300_799_999;
 const MAX_VENDOR_LENGTH = 512;
 const MAX_INVOICE_LENGTH = 256;
 const MAX_DESCRIPTION_LENGTH = 2_000;
@@ -18,20 +20,27 @@ type InvoiceFieldName = (typeof invoiceFieldNames)[number];
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export class AzureMalformedInvoiceOutputError extends RetryableExtractionError {
-  constructor(message: string, readonly rawProviderResponse: string) { super(message); }
+  constructor(message: string, readonly rawProviderResponse: string) { super(message, undefined, true); }
 }
 
 /** Azure definitively rejected this submission before creating an operation. */
 export class AzureSubmissionRejectedError extends RetryableExtractionError {
-  constructor() { super("Azure Document Intelligence submission failed with HTTP 429"); }
+  constructor(retryAfterMs?: number) { super("Azure Document Intelligence submission failed with HTTP 429", retryAfterMs, true); }
 }
+
+export class AzureRetryableExtractionError extends RetryableExtractionError {
+  constructor(message: string, retryAfterMs?: number) { super(message, retryAfterMs, true); }
+}
+/** No POST was started, so the durable submitting marker can safely be released. */
+export class AzureSubmissionNotSentError extends AzureRetryableExtractionError {}
 
 export type AzureInvoiceAnalysis =
   | { classification: "invoice"; bill: ExtractedBill; rawResponse: string; model: string }
   | { classification: "not_invoice"; bill: ExtractedBill; rawResponse: string; model: string };
 
 export interface AzureInvoiceProvider {
-  submit(input: { bytes: Uint8Array; mimeType: string }): Promise<{ operationLocation: string }>;
+  prepareSubmission?(): Promise<unknown>;
+  submit(input: { bytes: Uint8Array; mimeType: string; submissionPermit?: unknown }): Promise<{ operationLocation: string }>;
   poll(input: { operationLocation: string }): Promise<AzureInvoiceAnalysis>;
 }
 
@@ -44,6 +53,7 @@ export interface AzureDocumentIntelligenceInvoiceProviderOptions {
   pollIntervalMs?: number;
   fetchImpl?: FetchLike;
   sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  now?: () => number;
 }
 
 /** Injectable REST-only boundary for Azure Document Intelligence prebuilt-invoice. */
@@ -55,6 +65,12 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
   private readonly pollIntervalMs: number;
   private readonly fetchImpl: FetchLike;
   private readonly sleep: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  private readonly now: () => number;
+  private nextPostStart = 0;
+  private nextGetStart = 0;
+  private nextPostReservation = 0;
+  private nextGetReservation = 0;
+  private cooldownUntil = 0;
 
   constructor(private readonly options: AzureDocumentIntelligenceInvoiceProviderOptions) {
     this.endpoint = parseAzureEndpoint(options.endpoint);
@@ -65,6 +81,7 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
     this.pollIntervalMs = nonNegativeInteger(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, "pollIntervalMs");
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.sleep = options.sleep ?? sleepWithAbort;
+    this.now = options.now ?? Date.now;
   }
 
   async extract(input: { bytes: Uint8Array; mimeType: string }): Promise<AzureInvoiceAnalysis> {
@@ -72,18 +89,24 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
     return this.poll({ operationLocation: submitted.operationLocation });
   }
 
-  async submit(input: { bytes: Uint8Array; mimeType: string }): Promise<{ operationLocation: string }> {
+  async prepareSubmission(): Promise<unknown> { return this.reserve("post", new AbortController().signal); }
+
+  async submit(input: { bytes: Uint8Array; mimeType: string; submissionPermit?: unknown }): Promise<{ operationLocation: string }> {
     const mimeType = input.mimeType.toLowerCase();
     if (!isSupportedDocumentMimeType(mimeType)) throw new PermanentJobError("Unsupported persisted original MIME type");
     const abort = new AbortController();
     const timeout = setTimeout(() => abort.abort(), this.timeoutMs);
     try {
+      const permit = input.submissionPermit instanceof AzureRequestPermit ? input.submissionPermit : await this.reserve("post", abort.signal);
+      if (permit.provider !== this || permit.used) throw new AzureRetryableExtractionError("Azure Document Intelligence submission permit is invalid");
+      permit.used = true;
       const operationUrl = await this.submitRequest(input.bytes, mimeType, abort.signal);
       return { operationLocation: operationUrl.toString() };
     } catch (error) {
-      if (error instanceof RetryableExtractionError || error instanceof PermanentJobError) throw error;
-      if (abort.signal.aborted) throw new RetryableExtractionError("Azure Document Intelligence request timeout");
-      throw new RetryableExtractionError("Azure Document Intelligence network failure");
+      if (error instanceof PermanentJobError || (error instanceof RetryableExtractionError && error.addJitter)) throw error;
+      if (error instanceof RetryableExtractionError) throw new AzureRetryableExtractionError(error.message, error.retryAfterMs);
+      if (abort.signal.aborted) throw new AzureRetryableExtractionError("Azure Document Intelligence request timeout");
+      throw new AzureRetryableExtractionError("Azure Document Intelligence network failure");
     } finally {
       clearTimeout(timeout);
     }
@@ -95,9 +118,10 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
     try {
       return await this.pollRequest(sameOriginOperationUrl(input.operationLocation, this.endpoint), abort.signal);
     } catch (error) {
-      if (error instanceof RetryableExtractionError || error instanceof PermanentJobError) throw error;
-      if (abort.signal.aborted) throw new RetryableExtractionError("Azure Document Intelligence request timeout");
-      throw new RetryableExtractionError("Azure Document Intelligence network failure");
+      if (error instanceof PermanentJobError || (error instanceof RetryableExtractionError && error.addJitter)) throw error;
+      if (error instanceof RetryableExtractionError) throw new AzureRetryableExtractionError(error.message, error.retryAfterMs);
+      if (abort.signal.aborted) throw new AzureRetryableExtractionError("Azure Document Intelligence request timeout");
+      throw new AzureRetryableExtractionError("Azure Document Intelligence network failure");
     } finally {
       clearTimeout(timeout);
     }
@@ -109,10 +133,15 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
     const response = await this.request(url, { method: "POST", headers: this.headers(mimeType), body: new Uint8Array(bytes), signal, redirect: "error" });
     if (response.status === 429) {
       void response.body?.cancel().catch(() => undefined);
-      throw new AzureSubmissionRejectedError();
+      const retryAfterMs = retryAfter(response.headers, this.now());
+      this.applyCooldown(retryAfterMs ?? 1_000);
+      throw new AzureSubmissionRejectedError(retryAfterMs);
+    }
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => undefined);
+      throw classifiedHttpError(response.status, retryAfter(response.headers, this.now()));
     }
     const rawResponse = await readLimitedResponse(response, this.maxResponseBytes, signal);
-    if (!response.ok) throw classifiedHttpError(response.status);
     if (response.status !== 202) throw new AzureMalformedInvoiceOutputError("Azure Document Intelligence returned an unexpected submission response", rawResponse);
     const location = response.headers.get("operation-location");
     if (!location) throw new AzureMalformedInvoiceOutputError("Azure Document Intelligence response is missing operation location", rawResponse);
@@ -122,17 +151,23 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
   private async pollRequest(operationUrl: URL, signal: AbortSignal): Promise<AzureInvoiceAnalysis> {
     while (true) {
       if (signal.aborted) throw new RetryableExtractionError("Azure Document Intelligence request timeout");
+      await this.reserve("get", signal);
       const response = await this.request(operationUrl, { method: "GET", headers: this.headers(), signal, redirect: "error" });
+      if (!response.ok && response.status !== 202) {
+        const retryAfterMs = retryAfter(response.headers, this.now());
+        if (response.status === 429) this.applyCooldown(retryAfterMs ?? 1_000);
+        void response.body?.cancel().catch(() => undefined);
+        throw classifiedHttpError(response.status, retryAfterMs);
+      }
       const rawResponse = await readLimitedResponse(response, this.maxResponseBytes, signal);
-      if (!response.ok && response.status !== 202) throw classifiedHttpError(response.status);
       if (response.status === 202) {
-        await this.sleep(this.pollDelay(response), signal);
+        await this.waitForPoll(response, signal);
         continue;
       }
       const payload = parseJson(rawResponse);
       const status = string(payload.status);
       if (status === "notStarted" || status === "running") {
-        await this.sleep(this.pollDelay(response), signal);
+        await this.waitForPoll(response, signal);
         continue;
       }
       if (status === "failed" || status === "cancelled") throw new PermanentJobError("Azure Document Intelligence invoice analysis failed");
@@ -151,6 +186,11 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
   private async request(url: URL, init: RequestInit): Promise<Response> {
     const signal = init.signal;
     if (signal?.aborted) throw new RetryableExtractionError("Azure Document Intelligence request timeout");
+    const kind = init.method === "POST" ? "post" : "get";
+    try { await this.start(kind, signal); } catch (error) {
+      if (kind === "post" && error instanceof RetryableExtractionError) throw new AzureSubmissionNotSentError(error.message, error.retryAfterMs);
+      throw error;
+    }
     let abort: (() => void) | undefined;
     const aborted = signal ? new Promise<never>((_resolve, reject) => {
       abort = () => reject(new RetryableExtractionError("Azure Document Intelligence request timeout"));
@@ -165,10 +205,46 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
   }
 
   private pollDelay(response: Response): number {
-    const retryAfter = Number(response.headers.get("retry-after"));
-    return Number.isFinite(retryAfter) && retryAfter >= 0 ? Math.min(MAX_POLL_INTERVAL_MS, retryAfter * 1_000) : this.pollIntervalMs;
+    return retryAfter(response.headers, this.now()) ?? this.pollIntervalMs;
+  }
+
+  private async waitForPoll(response: Response, signal: AbortSignal): Promise<void> {
+    const delay = this.pollDelay(response);
+    if (delay > MAX_IN_PROCESS_WAIT_MS) throw new AzureRetryableExtractionError("Azure Document Intelligence polling deferred", delay);
+    await this.sleep(delay, signal);
+  }
+
+  private async reserve(kind: "post" | "get", signal: AbortSignal): Promise<AzureRequestPermit> {
+    if (signal.aborted) throw new AzureRetryableExtractionError("Azure Document Intelligence request timeout");
+    const now = this.now();
+    const next = kind === "post" ? this.nextPostReservation : this.nextGetReservation;
+    const start = Math.max(now, next, this.cooldownUntil);
+    if (start - now > MAX_IN_PROCESS_WAIT_MS) throw new AzureRetryableExtractionError("Azure Document Intelligence request deferred", start - now);
+    if (kind === "post") this.nextPostReservation = start + 1_000;
+    else this.nextGetReservation = start + 1_000;
+    if (start > now) await this.sleep(start - now, signal);
+    return new AzureRequestPermit(this);
+  }
+
+  private async start(kind: "post" | "get", signal: AbortSignal | null | undefined): Promise<void> {
+    if (signal?.aborted) throw new AzureRetryableExtractionError("Azure Document Intelligence request timeout");
+    const now = this.now();
+    const next = kind === "post" ? this.nextPostStart : this.nextGetStart;
+    const start = Math.max(now, next, this.cooldownUntil);
+    if (start - now > MAX_IN_PROCESS_WAIT_MS) throw new AzureRetryableExtractionError("Azure Document Intelligence request deferred", start - now);
+    if (kind === "post") this.nextPostStart = start + 1_000;
+    else this.nextGetStart = start + 1_000;
+    if (start > now) await this.sleep(start - now, signal ?? new AbortController().signal);
+    const actual = this.now();
+    if (kind === "post") this.nextPostStart = Math.max(this.nextPostStart, actual + 1_000);
+    else this.nextGetStart = Math.max(this.nextGetStart, actual + 1_000);
+  }
+
+  private applyCooldown(retryAfterMs: number | undefined): void {
+    if (retryAfterMs !== undefined) this.cooldownUntil = Math.max(this.cooldownUntil, this.now() + retryAfterMs);
   }
 }
+class AzureRequestPermit { used = false; constructor(readonly provider: AzureDocumentIntelligenceInvoiceProvider) {} }
 export function parseAzureInvoiceAnalysis(rawResponse: string): AzureInvoiceAnalysis {
   const payload = parseJson(rawResponse);
   if (string(payload.status) !== "succeeded") throw new AzureMalformedInvoiceOutputError("Azure Document Intelligence returned an invalid operation status", rawResponse);
@@ -198,9 +274,28 @@ function nonNegativeInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`);
   return value;
 }
-function classifiedHttpError(status: number): Error {
+function classifiedHttpError(status: number, retryAfterMs?: number): Error {
   const message = `Azure Document Intelligence request failed with HTTP ${status}`;
-  return status === 408 || status === 409 || status === 429 || status >= 500 ? new RetryableExtractionError(message) : new PermanentJobError(message);
+  return status === 408 || status === 409 || status === 429 || status >= 500 ? new AzureRetryableExtractionError(message, retryAfterMs) : new PermanentJobError(message);
+}
+function retryAfter(headers: Headers, now: number): number | undefined {
+  const milliseconds = headerValue(headers, "x-ms-retry-after-ms");
+  if (milliseconds !== null) {
+    const value = Number(milliseconds);
+    if (Number.isFinite(value) && value >= 0 && value <= MAX_DATE_MS - now) return value;
+  }
+  for (const value of [headers.get("retry-after"), headers.get("x-ms-retry-after")]) {
+    if (!value?.trim()) continue;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0 && seconds <= (MAX_DATE_MS - now) / 1_000) return seconds * 1_000;
+    const date = Date.parse(value);
+    if (Number.isFinite(date) && date <= MAX_DATE_MS) return Math.max(0, date - now);
+  }
+  return undefined;
+}
+function headerValue(headers: Headers, name: string): string | null {
+  const value = headers.get(name);
+  return value !== null && value.trim() ? value : null;
 }
 async function readLimitedResponse(response: Response, maxBytes: number, signal: AbortSignal): Promise<string> {
   const declared = Number(response.headers.get("content-length"));
