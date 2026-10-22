@@ -21,6 +21,11 @@ export class AzureMalformedInvoiceOutputError extends RetryableExtractionError {
   constructor(message: string, readonly rawProviderResponse: string) { super(message); }
 }
 
+/** Azure definitively rejected this submission before creating an operation. */
+export class AzureSubmissionRejectedError extends RetryableExtractionError {
+  constructor() { super("Azure Document Intelligence submission failed with HTTP 429"); }
+}
+
 export type AzureInvoiceAnalysis =
   | { classification: "invoice"; bill: ExtractedBill; rawResponse: string; model: string }
   | { classification: "not_invoice"; bill: ExtractedBill; rawResponse: string; model: string };
@@ -102,6 +107,10 @@ export class AzureDocumentIntelligenceInvoiceProvider implements AzureInvoicePro
     const url = new URL("/documentintelligence/documentModels/prebuilt-invoice:analyze", this.endpoint);
     url.searchParams.set("api-version", this.apiVersion);
     const response = await this.request(url, { method: "POST", headers: this.headers(mimeType), body: new Uint8Array(bytes), signal, redirect: "error" });
+    if (response.status === 429) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new AzureSubmissionRejectedError();
+    }
     const rawResponse = await readLimitedResponse(response, this.maxResponseBytes, signal);
     if (!response.ok) throw classifiedHttpError(response.status);
     if (response.status !== 202) throw new AzureMalformedInvoiceOutputError("Azure Document Intelligence returned an unexpected submission response", rawResponse);

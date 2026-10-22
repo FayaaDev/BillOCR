@@ -566,6 +566,20 @@ export class BillDatabase {
     })();
   }
 
+  /** Atomically closes a submission Azure rejected before it supplied an operation URL. */
+  rejectAzureExtractionSubmission(input: { invocationId: string; jobId: string; leaseToken: string; completedAt: string; errorDetails: string }): boolean {
+    const now = new Date().toISOString();
+    return this.sqlite.transaction(() => {
+      if (!this.leaseOwned(input.jobId, input.leaseToken, now)) return false;
+      const operation = this.sqlite.query<{ value: number }, [string, string]>("SELECT 1 AS value FROM azure_extraction_operations WHERE invocation_id = ? AND job_id = ? AND state = 'submitting' AND operation_location IS NULL").get(input.invocationId, input.jobId);
+      const invocation = this.sqlite.query<{ value: number }, [string, string]>("SELECT 1 AS value FROM extraction_invocations WHERE id = ? AND job_id = ? AND provider = 'azure' AND outcome = 'requested'").get(input.invocationId, input.jobId);
+      if (!operation || !invocation) return false;
+      this.sqlite.query("UPDATE azure_extraction_operations SET state = 'failed', completed_at = ?, last_error = ?, updated_at = ? WHERE invocation_id = ? AND job_id = ?").run(input.completedAt, input.errorDetails, now, input.invocationId, input.jobId);
+      this.sqlite.query("UPDATE extraction_invocations SET outcome = 'failed', completed_at = ?, raw_provider_response = NULL, error_details = ?, updated_at = ? WHERE id = ? AND job_id = ?").run(input.completedAt, input.errorDetails, now, input.invocationId, input.jobId);
+      return true;
+    })();
+  }
+
   getValidationIssues(billId: string): ValidationIssue[] {
     return this.sqlite.query<ValidationIssueRow, [string]>("SELECT * FROM validation_issues WHERE bill_id = ? ORDER BY rowid").all(billId).map(toValidationIssue);
   }
