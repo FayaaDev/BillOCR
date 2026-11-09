@@ -993,6 +993,29 @@ export class BillDatabase {
   }
 
   isZohoEnrolled(billId: string): boolean { return Boolean(this.sqlite.query("SELECT 1 FROM zoho_enrollment WHERE bill_id = ?").get(billId)); }
+  backfillZohoApprovals(): { enrolled: number } {
+    if (!this.zohoEnabled) throw new Error("Zoho must be enabled for backfill");
+    return this.sqlite.transaction(() => {
+      const now = new Date().toISOString(); let enrolled = 0;
+      const candidates = this.sqlite.query<{ id: string }, []>(`SELECT b.id FROM bills b
+        WHERE b.status = 'approved' AND b.classification = 'invoice'
+          AND NOT EXISTS (SELECT 1 FROM bill_deletion_requests WHERE bill_id = b.id)
+          AND NOT EXISTS (SELECT 1 FROM zoho_enrollment WHERE bill_id = b.id)
+          AND NOT EXISTS (SELECT 1 FROM invoice_dedup_decisions WHERE bill_id = b.id AND owner_id != b.id)
+        ORDER BY b.created_at, b.id`).all();
+      for (const { id } of candidates) {
+        if (!this.isDriveArchiveAllowed(id)) continue;
+        const data = this.getEffectiveExtraction(id);
+        if (!data) continue;
+        const number = data.invoiceNumber?.trim(); const date = data.invoiceDate?.trim();
+        if (number && date && this.findInvoiceOwner(number, date) !== id) continue;
+        this.sqlite.query("DELETE FROM zoho_historical_approvals WHERE bill_id = ?").run(id);
+        this.enrollZohoApproval(id, "needs_review", now);
+        enrolled++;
+      }
+      return { enrolled };
+    })();
+  }
   private enrollZohoApproval(billId: string, previousStatus: Bill["status"], now: string): void {
     if (!this.zohoEnabled && !this.isZohoEnrolled(billId)) this.sqlite.query("INSERT INTO zoho_historical_approvals VALUES (?) ON CONFLICT DO NOTHING").run(billId);
     if (this.sqlite.query("SELECT 1 FROM zoho_historical_approvals WHERE bill_id = ?").get(billId)) return;
@@ -1129,6 +1152,18 @@ export class BillDatabase {
     return this.sqlite.transaction(() => {
       const result = this.sqlite.query("UPDATE jobs SET state = 'succeeded', lease_token = NULL, lease_expires_at = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ? AND state = 'running' AND lease_token = ?").run(now, id, leaseToken);
       if (result.changes === 1) recordTransition(this.sqlite, id, "running", "succeeded", "completed", now);
+      return result.changes === 1;
+    })();
+  }
+
+  deferJob(id: string, leaseToken: string, retryAfterMs: number, now = new Date()): boolean {
+    const nowIso = now.toISOString();
+    const delay = Number.isFinite(retryAfterMs) ? Math.min(3_600_000, Math.max(1000, retryAfterMs)) : 60_000;
+    const availableAt = new Date(now.getTime() + delay).toISOString();
+    return this.sqlite.transaction(() => {
+      const result = this.sqlite.query(`UPDATE jobs SET state = 'pending', attempts = attempts - 1, available_at = ?, lease_token = NULL, lease_expires_at = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+        WHERE id = ? AND state = 'running' AND lease_token = ? AND lease_expires_at > ? AND attempts > 0`).run(availableAt, nowIso, id, leaseToken, nowIso);
+      if (result.changes === 1) recordTransition(this.sqlite, id, "running", "pending", "provider_cooldown", nowIso);
       return result.changes === 1;
     })();
   }

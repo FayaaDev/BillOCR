@@ -1,7 +1,7 @@
 import { jobTypes, type JobHandlerContext, type JobHandlers } from "./contracts";
 import type { BillDatabase, RetryPolicy } from "../db/database";
 import type { Logger } from "./logger";
-import { RetryableExtractionError } from "./extraction-errors";
+import { ProviderCooldownError, RetryableExtractionError } from "./extraction-errors";
 
 export class PermanentJobError extends Error { readonly retryable = false; }
 
@@ -49,6 +49,10 @@ export class JobWorker {
       if (job.type === "project_to_sheet") context.assertCurrentApprovalRevision();
       if (leaseLost || !this.database.completeJob(job.id, job.leaseToken)) this.logger.warn("job completion lost lease", { jobId: job.id });
     } catch (error) {
+      if (error instanceof ProviderCooldownError) {
+        if (!this.database.deferJob(job.id, job.leaseToken, error.retryAfterMs, new Date((this.options.now ?? Date.now)()))) this.logger.warn("job deferral lost lease", { jobId: job.id });
+        return true;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const retry = error instanceof RetryableExtractionError ? error : null;
       const jitterMs = retry?.addJitter ? 1 + Math.floor((this.options.random ?? Math.random)() * 1_000) : 0;

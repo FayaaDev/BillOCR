@@ -40,6 +40,28 @@ test("Saudi authorization_code exchange sends a form and saves only durable cred
   expect(output.join("\n")).not.toContain("SECRET");
 });
 
+test("US setup uses only .com OAuth and requires the matching API domain", async () => {
+  const destination = join(fixture(), "credential.json"); let calls = 0;
+  await runZohoOAuth({ ...env(destination), ZOHO_REGION: "us" }, () => {}, async (input, init) => {
+    calls++; expect(String(input)).toBe("https://accounts.zoho.com/oauth/v2/token");
+    expect(init?.redirect).toBe("error"); expect((init!.body as URLSearchParams).get("code")).toBe(grant);
+    return Response.json({ ...token, api_domain: "https://www.zohoapis.com" });
+  }, async () => grant);
+  expect(calls).toBe(1);
+  expect(JSON.parse(readFileSync(destination, "utf8"))).toEqual({ ...credential, token_uri: "https://accounts.zoho.com/oauth/v2/token", api_domain: "https://www.zohoapis.com" });
+  expect(lstatSync(destination).mode & 0o777).toBe(0o600);
+  for (const api_domain of [token.api_domain, "https://www.zohoapis.com.evil.test", "https://www.zohoapis.com/path"]) {
+    expect(await failure(() => exchangeZohoAuthorizationCode(client, grant, async () => Response.json({ ...token, api_domain }), { region: "us" }))).toContain("not a US API endpoint");
+  }
+});
+
+test("invalid OAuth regions fail before input, exchange or file creation", async () => {
+  const destination = join(fixture(), "credential.json"); let calls = 0;
+  expect(await failure(() => runZohoOAuth({ ...env(destination), ZOHO_REGION: "com" }, () => {}, async () => { calls++; return Response.json(token); }, async () => { calls++; return grant; }))).toBe("ZOHO_REGION must be sa or us");
+  expect(await failure(() => exchangeZohoAuthorizationCode(client, grant, async () => { calls++; return Response.json(token); }, { region: "eu" as "sa" }))).toBe("ZOHO_REGION must be sa or us");
+  expect(calls).toBe(0); expect(existsSync(destination)).toBe(false);
+});
+
 test("atomic publication preserves existing directory permissions and refuses existing files and dangling symlinks before input or exchange", async () => {
   const dir = fixture(); chmodSync(dir, 0o755);
   const destination = join(dir, "credential.json"); publishZohoCredential(destination, credential);
@@ -69,6 +91,24 @@ test("malformed responses and provider/network errors never expose secrets", asy
   }
   expect(await failure(() => exchangeZohoAuthorizationCode(client, grant, async () => { throw new Error(client.clientSecret); }))).toBe("Zoho OAuth token exchange failed");
   expect(zohoOAuthSetupError(new Error(grant))).toBe("Zoho OAuth setup failed");
+});
+
+test("token rejection diagnostics identify known errors without printing provider values", async () => {
+  for (const [error, reason] of [
+    ["invalid_code", "grant code is invalid, expired, or already used"],
+    ["invalid_client", "client ID or client region does not match"],
+    ["invalid_client_secret", "client secret does not match"],
+    ["invalid_grant", "authorization grant was rejected"],
+    ["invalid_scope", "requested scopes were rejected"],
+  ]) {
+    const message = await failure(() => exchangeZohoAuthorizationCode(client, grant, async () => Response.json({ error, error_description: grant, access_token: token.access_token })));
+    expect(message).toBe(`Zoho OAuth token exchange failed: ${reason}`);
+  }
+  expect(await failure(() => exchangeZohoAuthorizationCode(client, grant, async () => Response.json({ error: grant, error_description: client.clientSecret })))).toBe("Zoho OAuth token response was invalid: provider rejected authorization");
+  for (const field of ["refresh_token", "access_token", "token_type", "expires_in"]) {
+    const response: Record<string, unknown> = { ...token }; delete response[field];
+    expect(await failure(() => exchangeZohoAuthorizationCode(client, grant, async () => Response.json(response)))).toBe(`Zoho OAuth token response was invalid: missing or invalid ${field}`);
+  }
 });
 
 test("only the exact Saudi HTTPS API endpoint is accepted", async () => {

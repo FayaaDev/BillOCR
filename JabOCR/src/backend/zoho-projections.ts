@@ -6,6 +6,8 @@ import type { ZohoCredential } from "./zoho-oauth";
 import { ledgerHeaders, ledgerValues } from "./google-projections";
 import { readVerifiedOriginal } from "./originals";
 import { PermanentJobError } from "./worker";
+import { readZohoRegion, zohoRegions, type ZohoRegion } from "./zoho-region";
+import { ProviderCooldownError, RetryableExtractionError } from "./extraction-errors";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type ObjectValue = Record<string, unknown>;
@@ -23,33 +25,35 @@ export interface ZohoSheetAdapter {
   addOnce(record: ZohoRecord): Promise<void>;
   update(billId: string, observedRevision: number, record: ZohoRecord): Promise<number>;
 }
-export interface ZohoProjectionConfig { region: "sa"; workdriveFolderId: string; sheetResourceId: string; sheetName: string; requestTimeoutMs?: number; maxResponseBytes?: number; }
+export interface ZohoProjectionConfig { region: ZohoRegion; workdriveFolderId: string; sheetResourceId: string; sheetName: string; requestTimeoutMs?: number; maxResponseBytes?: number; }
 export const zohoLedgerHeaders = ledgerHeaders.map((header) => header === "Drive hyperlink" ? "WorkDrive hyperlink" : header);
 function object(value: unknown): ObjectValue { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Zoho malformed provider output"); return value as ObjectValue; }
 function jsonObject(bytes: Uint8Array): ObjectValue { try { return object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))); } catch { throw new Error("Zoho malformed provider output"); } }
 function string(value: unknown): string { if (typeof value !== "string" || !value || value.length > 8192) throw new Error("Zoho malformed provider output"); return value; }
 function resourceId(value: unknown): string { const id = string(value); if (!/^[A-Za-z0-9_-]{1,256}$/.test(id)) throw new Error("Zoho malformed resource ID"); return id; }
 function integer(value: unknown): number { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("Zoho malformed provider output"); return value; }
-function permalink(value: unknown): string {
+function permalink(value: unknown, region: ZohoRegion = "sa"): string {
   const text = string(value); let url: URL;
   try { url = new URL(text); } catch { throw new Error("Zoho malformed permalink"); }
-  if (url.protocol !== "https:" || url.hostname !== "workdrive.zoho.sa" || url.port || url.username || url.password || url.pathname === "/") throw new PermanentJobError("Zoho unexpected private permalink");
+  if (url.protocol !== "https:" || url.hostname !== zohoRegions[region].workdriveHost || url.port || url.username || url.password || url.pathname === "/") throw new PermanentJobError("Zoho unexpected private permalink");
   return text;
 }
-export function readZohoCredential(json: string): ZohoCredential {
+export function readZohoCredential(json: string, region: ZohoRegion = "sa"): ZohoCredential {
+  const profile = zohoRegions[readZohoRegion(region)];
   try {
     const value = object(JSON.parse(json));
-    if (value.token_uri !== "https://accounts.zoho.sa/oauth/v2/token" || value.api_domain !== "https://www.zohoapis.sa") throw new Error();
+    if (value.token_uri !== profile.tokenUri || value.api_domain !== profile.apiDomain) throw new Error();
     const credentials = [value.client_id, value.client_secret, value.refresh_token].map(string);
     if (credentials.some((item) => /\s/.test(item))) throw new Error();
-    return { client_id: credentials[0]!, client_secret: credentials[1]!, refresh_token: credentials[2]!, token_uri: value.token_uri, api_domain: value.api_domain };
-  } catch { throw new PermanentJobError("Zoho invalid Saudi OAuth credential"); }
+    return { client_id: credentials[0]!, client_secret: credentials[1]!, refresh_token: credentials[2]!, token_uri: profile.tokenUri, api_domain: profile.apiDomain };
+  } catch { throw new PermanentJobError(`Zoho invalid ${profile.label} OAuth credential`); }
 }
 class ZohoHttpError extends Error {
   constructor(readonly status: number, readonly code: number = 0) { super(`Zoho HTTP ${status} code ${code}`); }
 }
 class ZohoUnresolvedMutationError extends Error { constructor() { super("Zoho mutation unresolved; reconcile only"); } }
 function failure(error: unknown): Error {
+  if (error instanceof RetryableExtractionError) return error;
   if (error instanceof PermanentJobError) return error;
   if (error instanceof ZohoUnresolvedMutationError) return error;
   if (error instanceof ZohoHttpError) {
@@ -61,14 +65,34 @@ function failure(error: unknown): Error {
 class ZohoClient {
   private token: { value: string; expiresAt: number } | null = null;
   private sheetCooldownUntil = 0;
-  constructor(private readonly credential: ZohoCredential, private readonly fetcher: Fetcher, private readonly timeoutMs: number, private readonly maxResponseBytes: number) {}
+  private workdriveCooldownUntil = 0;
+  constructor(private readonly credential: ZohoCredential, private readonly fetcher: Fetcher, private readonly timeoutMs: number, private readonly maxResponseBytes: number, private readonly region: ZohoRegion) {}
+  private async waitForCooldown(url: string): Promise<void> {
+    const until = url.startsWith(`${zohoRegions[this.region].sheetApi}/`) ? this.sheetCooldownUntil : this.workdriveCooldownUntil;
+    const delay = until - Date.now();
+    if (delay > 0) throw new ProviderCooldownError(delay);
+  }
   private async request(url: string, init: RequestInit, maxBytes: number): Promise<{ bytes: Uint8Array; status: number }> {
+    await this.waitForCooldown(url);
     const controller = new AbortController(); let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let abort!: () => void;
     const timeout = new Promise<never>((_, reject) => { abort = () => { controller.abort(); reject(new Error("Zoho timeout")); }; });
     const timer = setTimeout(abort, this.timeoutMs);
     try {
       const response = await Promise.race([this.fetcher(url, { ...init, redirect: "error", signal: controller.signal }), timeout]);
+      if (response.status === 429) {
+        const sheet = url.startsWith(`${zohoRegions[this.region].sheetApi}/`);
+        const header = response.headers.get("retry-after")?.trim() ?? "";
+        let requested = NaN;
+        if (/^\d+(?:\.\d+)?$/.test(header)) requested = Number(header) * 1000;
+        else if (/^[A-Za-z]{3},/.test(header)) requested = Date.parse(header) - Date.now();
+        const fallback = sheet ? 300_000 : 60_000;
+        const delay = Number.isFinite(requested) && requested > 0 ? Math.min(3_600_000, Math.max(1000, requested)) : fallback;
+        if (sheet) this.sheetCooldownUntil = Math.max(this.sheetCooldownUntil, Date.now() + delay);
+        else this.workdriveCooldownUntil = Math.max(this.workdriveCooldownUntil, Date.now() + delay);
+        void response.body?.cancel().catch(() => {});
+        throw new ProviderCooldownError(delay);
+      }
       if (Number(response.headers.get("content-length")) > maxBytes) { void response.body?.cancel(); throw new Error("Zoho response too large"); }
       reader = response.body?.getReader(); const chunks: Uint8Array[] = []; let size = 0;
       if (reader) for (;;) {
@@ -76,7 +100,7 @@ class ZohoClient {
         size += next.value.byteLength; if (size > maxBytes) throw new Error("Zoho response too large"); chunks.push(next.value);
       }
       return { bytes: Buffer.concat(chunks), status: response.status };
-    } catch { throw new Error("Zoho bounded request failed"); }
+    } catch (error) { if (error instanceof RetryableExtractionError) throw error; throw new Error("Zoho bounded request failed"); }
     finally { clearTimeout(timer); controller.abort(); if (reader) { void reader.cancel().catch(() => {}); reader.releaseLock(); } }
   }
   private async accessToken(force = false): Promise<string> {
@@ -92,6 +116,7 @@ class ZohoClient {
   }
   async bytes(url: string, init: RequestInit = {}, read = true, maxBytes = this.maxResponseBytes): Promise<Uint8Array> {
     for (let attempt = 0; ; attempt++) {
+      await this.waitForCooldown(url);
       const token = await this.accessToken();
       const result = await this.request(url, { ...init, headers: { ...init.headers, Authorization: `Zoho-oauthtoken ${token}` } }, maxBytes);
       if (result.status === 401) { this.token = null; if (read && attempt === 0) { await this.accessToken(true); continue; } }
@@ -103,36 +128,37 @@ class ZohoClient {
     const bytes = await this.bytes(url, init, read); return bytes.length ? jsonObject(bytes) : {};
   }
   async sheet(resource: string, worksheet: string, method: string, params: Record<string, string> = {}, read = false): Promise<ObjectValue> {
-    if (Date.now() < this.sheetCooldownUntil) throw new ZohoHttpError(429, 2950);
+    await this.waitForCooldown(`${zohoRegions[this.region].sheetApi}/${resource}`);
     for (let attempt = 0; ; attempt++) {
       let result: ObjectValue;
       try {
-        result = await this.json(`https://sheet.zoho.sa/api/v2/${resourceId(resource)}`, { method: "POST", body: new URLSearchParams({ method, worksheet_name: worksheet, ...params }) }, false);
+        result = await this.json(`${zohoRegions[this.region].sheetApi}/${resourceId(resource)}`, { method: "POST", body: new URLSearchParams({ method, worksheet_name: worksheet, ...params }) }, false);
       } catch (error) {
-        if (error instanceof ZohoHttpError && error.status === 429) this.sheetCooldownUntil = Date.now() + 300_000;
         if (error instanceof ZohoHttpError && error.status === 401 && read && attempt === 0) { await this.accessToken(true); continue; }
         throw error;
       }
       if (result.status === "success" && result.method === method) return result;
       const code = Number(result.error_code);
       if (!Number.isSafeInteger(code)) throw new Error("Zoho malformed Sheet result");
-      if (code === 2950) this.sheetCooldownUntil = Date.now() + 300_000;
+      if (code === 2950) { this.sheetCooldownUntil = Date.now() + 300_000; throw new ProviderCooldownError(300_000); }
       if (code === 2401) { this.token = null; if (read && attempt === 0) { await this.accessToken(true); continue; } }
       throw new ZohoHttpError(200, code);
     }
   }
 }
-function normalizeFile(value: unknown): WorkDriveFile {
+function normalizeFile(value: unknown, region: ZohoRegion): WorkDriveFile {
   const data = object(value); const attributes = object(data.attributes); const storage = object(attributes.storage_info);
   if (attributes.is_folder !== false) throw new Error("Zoho candidate is not a file");
-  return { id: resourceId(data.id), name: string(attributes.name), parentId: resourceId(attributes.parent_id), size: integer(storage.size_in_bytes), permalink: permalink(attributes.permalink) };
+  return { id: resourceId(data.id), name: string(attributes.name), parentId: resourceId(attributes.parent_id), size: integer(storage.size_in_bytes), permalink: permalink(attributes.permalink, region) };
 }
 /** Only regional allowlisted URLs are constructed; provider download URLs are never followed. */
 export function createZohoAdapters(credentialJson: string, config: ZohoProjectionConfig, fetcher: Fetcher = fetch): { workdrive: WorkDriveAdapter; sheet: ZohoSheetAdapter } {
-  if (config.region !== "sa") throw new PermanentJobError("Zoho unsupported region");
-  const client = new ZohoClient(readZohoCredential(credentialJson), fetcher, config.requestTimeoutMs ?? 60_000, config.maxResponseBytes ?? 2 * 1024 * 1024);
+  let region: ZohoRegion;
+  try { region = readZohoRegion(config.region); } catch { throw new PermanentJobError("Zoho unsupported region"); }
+  const profile = zohoRegions[region];
+  const client = new ZohoClient(readZohoCredential(credentialJson, region), fetcher, config.requestTimeoutMs ?? 60_000, config.maxResponseBytes ?? 2 * 1024 * 1024, region);
   resourceId(config.workdriveFolderId); resourceId(config.sheetResourceId);
-  const api = "https://www.zohoapis.sa/workdrive/api/v1";
+  const api = `${profile.apiDomain}/workdrive/api/v1`;
   const workdrive: WorkDriveAdapter = {
     async list(folderId, offset) {
       const query = new URLSearchParams({ "filter[type]": "allfiles", "page[offset]": String(offset), "page[limit]": "50", sort: "name" });
@@ -141,8 +167,8 @@ export function createZohoAdapters(credentialJson: string, config: ZohoProjectio
       if (!Array.isArray(result.data) || result.data.length > 50) throw new Error("Zoho malformed folder page");
       return result.data.map((entry: unknown) => { const data = object(entry); const attributes = object(data.attributes); return { id: resourceId(data.id), name: string(attributes.name) }; });
     },
-    async metadata(id) { return normalizeFile((await client.json(`${api}/files/${resourceId(id)}`)).data); },
-    async download(id, maxBytes) { return client.bytes(`https://files.zoho.sa/v1/workdrive/download/${resourceId(id)}`, {}, true, maxBytes); },
+    async metadata(id) { return normalizeFile((await client.json(`${api}/files/${resourceId(id)}`)).data, region); },
+    async download(id, maxBytes) { return client.bytes(`${profile.downloadApi}/${resourceId(id)}`, {}, true, maxBytes); },
     async uploadOnce(input) {
       const form = new FormData(); form.set("parent_id", resourceId(input.folderId)); form.set("filename", encodeURIComponent(input.name)); form.set("override-name-exist", "false");
       form.set("content", new Blob([new Uint8Array(input.bytes).buffer], { type: input.mimeType }), input.name);
@@ -201,20 +227,20 @@ export function createZohoAdapters(credentialJson: string, config: ZohoProjectio
       }
       throw new Error("Zoho record pagination bound exceeded");
     },
-    async addOnce(record) { await call("worksheet.records.add", { header_row: "1", json_data: JSON.stringify([encodeRecord(record)]) }); },
+    async addOnce(record) { await call("worksheet.records.add", { header_row: "1", json_data: JSON.stringify([encodeRecord(record, region)]) }); },
     async update(billId, revision, record) {
-      const result = await call("worksheet.records.update", { header_row: "1", criteria: `${criteria(billId)} and "Revision"=${integer(revision)}`, is_case_sensitive: "true", first_match_only: "false", data: JSON.stringify(encodeRecord(record)) });
+      const result = await call("worksheet.records.update", { header_row: "1", criteria: `${criteria(billId)} and "Revision"=${integer(revision)}`, is_case_sensitive: "true", first_match_only: "false", data: JSON.stringify(encodeRecord(record, region)) });
       return integer(result.no_of_affected_rows);
     },
   };
   return { workdrive, sheet };
 }
 /** Generated constant-string formulas quote all text; OCR text never becomes executable formula syntax. */
-export function encodeRecord(record: ZohoRecord): ZohoRecord {
+export function encodeRecord(record: ZohoRecord, region: ZohoRegion = "sa"): ZohoRecord {
   return Object.fromEntries(Object.entries(record).map(([key, value]) => {
     if (typeof value !== "string") return [key, value];
     const literal = value.replace(/"/g, '""');
-    if (key === "WorkDrive hyperlink" && value) { permalink(value); return [key, `=HYPERLINK("${literal}","${literal}")`]; }
+    if (key === "WorkDrive hyperlink" && value) { permalink(value, region); return [key, `=HYPERLINK("${literal}","${literal}")`]; }
     return [key, `="${literal}"`];
   }));
 }
@@ -230,6 +256,7 @@ export function createWorkDriveArchiveHandler(database: BillDatabase, adapter: W
       context.assertLease();
       const persisted = database.getProjectionMetadata("workdrive", bill.id);
       if (persisted?.externalUrl) {
+        permalink(persisted.externalUrl, config.region);
         if (!persisted.metadata || object(JSON.parse(persisted.metadata)).folderId !== config.workdriveFolderId) throw new PermanentJobError("Zoho archive destination changed");
         return;
       }
@@ -242,7 +269,7 @@ export function createWorkDriveArchiveHandler(database: BillDatabase, adapter: W
       const verify = async (id: string): Promise<WorkDriveFile> => {
         const file = await adapter.metadata(id); context.assertLease();
         if (file.id !== id || file.parentId !== identity.folderId || !file.name.includes(`${bill.id}-${bill.contentSha256}`) || file.size !== bytes.byteLength) throw new PermanentJobError("Zoho archive identity conflict");
-        permalink(file.permalink);
+        permalink(file.permalink, config.region);
         const remote = await adapter.download(id, bytes.byteLength); context.assertLease();
         if (remote.byteLength !== bytes.byteLength || hash(remote) !== bill.contentSha256) throw new PermanentJobError("Zoho archive checksum conflict");
         return file;
@@ -284,8 +311,9 @@ export function createZohoSheetHandler(database: BillDatabase, adapter: ZohoShee
       context.assertLease();
       const assertCurrent = () => { context.assertLease(); if (!current(database, bill)) throw new Error("Zoho canonical revision changed"); };
       const extraction = database.getEffectiveExtraction(bill.id); const archive = database.getProjectionMetadata("workdrive", bill.id);
-      if (!extraction || !archive?.externalUrl) throw new Error("Zoho verified archive pending");
-      const values = ledgerValues(bill, extraction, permalink(archive.externalUrl)).map((value) => value ?? "");
+      if (!extraction) throw new Error("Zoho extraction missing");
+      if (!archive?.externalUrl) throw new ProviderCooldownError(60_000);
+      const values = ledgerValues(bill, extraction, permalink(archive.externalUrl, config.region)).map((value) => value ?? "");
       values[11] = bill.status === "approved" ? "Approved" : "Rejected";
       const record = Object.fromEntries(zohoLedgerHeaders.map((key, index) => [key, values[index]!])) as ZohoRecord;
       const destination = { resourceId: config.sheetResourceId, worksheet: config.sheetName };

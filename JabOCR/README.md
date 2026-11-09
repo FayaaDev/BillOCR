@@ -225,17 +225,19 @@ The application also accepts `GOOGLE_AUTH_MODE=service_account` with
 a My Drive folder does not give a service account storage quota, and this snapshot
 lacks shared-drive API support. Use user OAuth with My Drive for this deployment.
 
-### Zoho WorkDrive and Sheet: Saudi Self Client OAuth
+### Zoho WorkDrive and Sheet: Saudi or US Self Client OAuth
 
-Zoho is independent of Google and defaults disabled. Only Saudi-hosted accounts
-(`ZOHO_REGION=sa`) are supported. Running the helper prepares credentials;
+Zoho is independent of Google and defaults disabled. Saudi (`ZOHO_REGION=sa`,
+the compatibility default) and US (`ZOHO_REGION=us`, `.com`) accounts are supported.
+Choose the account's data center, not the operator's location; OAuth credentials,
+WorkDrive folder and Sheet workbook must all belong to that region. Running the helper prepares credentials;
 enable synchronization separately after checking dedicated test destinations.
 
 1. On the operator machine, use Bun and this source directory as in the Google
-   setup above. In the Saudi Zoho API Console, create/select a **Self Client**.
+   setup above. In the selected region's Zoho API Console, create/select a **Self Client**.
    Keep its client ID and secret privately in environment variables named exactly
    `Client_ID` and `Client_Secret` (for example, in your private local `.env.local`).
-2. Generate a short-lived grant code for the intended Saudi account with scopes:
+2. Generate a short-lived grant code for the intended account in that region with scopes:
 
    ```text
    WorkDrive.files.CREATE,WorkDrive.files.READ,ZohoFiles.files.READ,ZohoSheet.dataAPI.READ,ZohoSheet.dataAPI.UPDATE
@@ -249,7 +251,13 @@ enable synchronization separately after checking dedicated test destinations.
    output path for the operator machine:
 
    ```sh
-   ZOHO_OAUTH_CREDENTIAL_JSON="$PWD/secrets/zoho-authorized-user.json" bun run zoho:oauth
+   ZOHO_REGION=sa ZOHO_OAUTH_CREDENTIAL_JSON="$PWD/secrets/zoho-authorized-user.json" bun run zoho:oauth
+   ```
+
+   For a US/`.com` account, use a separate output instead:
+
+   ```sh
+   ZOHO_REGION=us ZOHO_OAUTH_CREDENTIAL_JSON="$PWD/secrets/zoho-client-authorized-user.json" bun run zoho:oauth
    ```
 
    Bun automatically loads `.env` and `.env.local`; the explicit override avoids
@@ -257,8 +265,14 @@ enable synchronization separately after checking dedicated test destinations.
    then press Enter. Never pass the code as a command-line argument. Ctrl-C
    cancels and restores the terminal. Input expires after five minutes.
 
-The helper posts only to `https://accounts.zoho.sa/oauth/v2/token`, rejects
-redirects, and accepts only `https://www.zohoapis.sa` as the returned API domain.
+The helper rejects redirects and uses only the selected fixed profile:
+
+| Region | Token endpoint | Returned API domain | Sheet API | Private links | Original downloads |
+| --- | --- | --- | --- | --- | --- |
+| `sa` | `https://accounts.zoho.sa/oauth/v2/token` | `https://www.zohoapis.sa` | `https://sheet.zoho.sa/api/v2` | `https://workdrive.zoho.sa` | `https://files.zoho.sa/v1/workdrive/download` |
+| `us` | `https://accounts.zoho.com/oauth/v2/token` | `https://www.zohoapis.com` | `https://sheet.zoho.com/api/v2` | `https://workdrive.zoho.com` | `https://download.zoho.com/v1/workdrive/download` |
+
+Credentials and private permalinks from the other region are rejected.
 It stores client ID, client secret, refresh token, token endpoint and API domain;
 it does not store the expiring access token. Default output is local
 `secrets/zoho-authorized-user.json`; existing output is refused before exchange.
@@ -288,7 +302,7 @@ reauthorizing.
    by the verified container UID/GID, mode `0600` (directory `0700`). Set privately:
 
    ```dotenv
-   GOOGLE_ENABLED=false
+   GOOGLE_ENABLED=true
    ZOHO_ENABLED=true
    ZOHO_REGION=sa
    ZOHO_OAUTH_CREDENTIAL_JSON=/run/secrets/zoho-authorized-user.json
@@ -297,7 +311,14 @@ reauthorizing.
    ZOHO_SHEET_NAME=Ledger
    ```
 
-   Google configuration/code and existing projections remain available. Avoid
+   For the US example, transfer `zoho-client-authorized-user.json`, set
+   `ZOHO_REGION=us` and
+   `ZOHO_OAUTH_CREDENTIAL_JSON=/run/secrets/zoho-client-authorized-user.json`
+   with that account's own folder/workbook IDs. These are examples, not changes
+   to existing settings; do not reuse Saudi credentials for US or vice versa.
+
+   Keep Google enabled and configured to project new invoices to both providers,
+   or disable it if only Zoho is wanted. Existing Google projections are unchanged. Avoid
    changing Zoho destinations after archival: persisted intent/projection
    identities reject destination changes. Request timeout defaults to 60 seconds
    (`ZOHO_REQUEST_TIMEOUT_MS`); JSON responses to 2 MiB
@@ -306,12 +327,34 @@ reauthorizing.
 6. Recreate the app using the commands above. Ingest and approve a **new** test
    bill, confirm archive bytes/private access and its row, then correct and reject
    it. Approved corrections update the same row. Subsequent non-approved states
-   mark it `Rejected`; original files are retained. There is no historical
-   backfill: bills approved before migration or while Zoho was disabled are
-   excluded, including later corrections/reapprovals. Readiness checks supported
+   mark it `Rejected`; original files are retained. Enabling Zoho does not automatically
+   backfill bills approved before migration or while Zoho was disabled, including
+   later corrections/reapprovals. To explicitly enroll all currently approved,
+   classified invoices with canonical duplicate ownership and no pending deletion, run:
+
+   ```sh
+   docker compose exec -T bill-ledger bun dist/ops.js backfill-zoho
+   ```
+
+   This requires `ZOHO_ENABLED=true` and queues WorkDrive archival and Zoho Sheet
+   projection at the latest revision; the running worker performs provider calls.
+   Repeating without new eligible bills reports zero new enrollments and does not
+   reset existing jobs or ambiguous mutation intents. Invoice status/revisions and
+   Google jobs are unchanged. Ineligible bills remain excluded. Readiness checks supported
    worker jobs, not provider credentials, scopes, access, or formula interpretation.
 
 #### Ambiguous Zoho mutations and recovery
+
+HTTP 429 defers jobs using `Retry-After` seconds or an HTTP date, bounded to
+1 second–1 hour. Missing/invalid headers use 60 seconds for WorkDrive and
+5 minutes for Sheet; Sheet throttle code 2950 also uses 5 minutes. Calls share
+an in-process cooldown per provider, including WorkDrive download verification.
+Fresh throttle responses and subsequent calls during cooldown defer durably
+without charging an attempt or holding the worker/lease,
+so unrelated jobs and shutdown can proceed. Prior attempt history is preserved;
+per-job delays survive restarts, while the shared provider cooldown is in-process.
+Sheet jobs awaiting a verified WorkDrive archive also defer without charging an attempt.
+Mutations are not automatically resent; durable intents remain reconciliation-only.
 
 Run one application worker/replica per database. WorkDrive upload and Sheet
 append have **no documented idempotency key or remote uniqueness guarantee**.
@@ -323,7 +366,8 @@ Even definitive upload/add errors retain the intent conservatively.
 WorkDrive reconciliation paginates direct children, verifies identity-bearing
 names (including timestamp-renamed candidates), checks metadata/parent/size,
 downloads bounded bytes and compares SHA-256. Private metadata permalinks must
-use `https://workdrive.zoho.sa`; no public share is created. Reviewers need folder
+use the selected region's `https://workdrive.zoho.sa` or
+`https://workdrive.zoho.com` host; no public share is created. Reviewers need folder
 permissions. Sheet reconciliation fetches every Bill ID match and refuses
 duplicates/higher revisions; updates include Bill ID and observed Revision,
 then re-fetch and compare all mapped values before fenced SQLite persistence.
@@ -339,7 +383,8 @@ JOB_ID` to re-run reconciliation. **Retry does not reset intents.** If no verifi
 candidate becomes visible, leave the intent unresolved and raise an operator
 issue; no automatic resend/reset command is provided. Do not delete intents or
 insert another row/file blindly. Sheet error `2950` starts a five-minute workbook
-cooldown; jobs still have bounded retries and can require later operator replay.
+cooldown without consuming attempts; other failures still have bounded retries
+and can require later operator replay.
 
 Offline checks and a dedicated Saudi test-destination smoke test passed, including
 OAuth refresh, verified archival, replay, Sheet insertion, correction, rejection,

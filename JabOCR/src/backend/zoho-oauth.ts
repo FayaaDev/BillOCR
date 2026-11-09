@@ -2,12 +2,11 @@ import { closeSync, linkSync, lstatSync, mkdirSync, openSync, unlinkSync, writeF
 import { dirname } from "node:path";
 import type { ReadStream, WriteStream } from "node:tty";
 import type { EventEmitter } from "node:events";
+import { readZohoRegion, zohoRegions, type ZohoRegion } from "./zoho-region";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type Client = { clientId: string; clientSecret: string };
 export type ZohoCredential = { client_id: string; client_secret: string; refresh_token: string; token_uri: string; api_domain: string };
-const tokenUri = "https://accounts.zoho.sa/oauth/v2/token";
-const apiDomain = "https://www.zohoapis.sa";
 class SetupError extends Error {}
 function fail(message: string): never { throw new SetupError(message); }
 // OAuth values must not contain whitespace or control characters.
@@ -51,12 +50,15 @@ export function readHiddenGrantCode(input: ReadStream = process.stdin, output: W
       input.setRawMode(true);
       input.on("data", data); input.on("end", end); input.on("error", end);
       for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) signals.on(signal, cancel);
-      output.write("Paste Saudi Self Client grant code (hidden), then press Enter: "); input.resume();
+      output.write("Paste Zoho Self Client grant code for the selected region (hidden), then press Enter: "); input.resume();
     } catch { finish(new SetupError("Zoho OAuth terminal input failed")); }
   });
 }
 
-export async function exchangeZohoAuthorizationCode(client: Client, code: string, fetcher: Fetcher = fetch, options: { timeoutMs?: number; maxResponseBytes?: number } = {}): Promise<ZohoCredential> {
+export async function exchangeZohoAuthorizationCode(client: Client, code: string, fetcher: Fetcher = fetch, options: { timeoutMs?: number; maxResponseBytes?: number; region?: ZohoRegion } = {}): Promise<ZohoCredential> {
+  let region: ZohoRegion;
+  try { region = readZohoRegion(options.region); } catch { fail("ZOHO_REGION must be sa or us"); }
+  const { tokenUri, apiDomain, label } = zohoRegions[region];
   if (!validString(client.clientId) || !validString(client.clientSecret) || !validString(code)) fail("Zoho OAuth client credentials or grant code are invalid");
   const timeoutMs = options.timeoutMs ?? 60_000; const maxResponseBytes = options.maxResponseBytes ?? 64 * 1024;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) fail("Zoho OAuth exchange limits are invalid");
@@ -79,8 +81,22 @@ export async function exchangeZohoAuthorizationCode(client: Client, code: string
     try { body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))); } catch { fail("Zoho OAuth token response was invalid"); }
     if (!body || typeof body !== "object" || Array.isArray(body)) fail("Zoho OAuth token response was invalid");
     const token = body as Record<string, unknown>;
-    if (token.error !== undefined || !validString(token.refresh_token) || !validString(token.access_token) || token.token_type !== "Bearer" || typeof token.expires_in !== "number" || !Number.isFinite(token.expires_in) || token.expires_in <= 0) fail("Zoho OAuth token response was invalid");
-    if (token.api_domain !== apiDomain) fail("Zoho OAuth token response is not a Saudi API endpoint");
+    // Only fixed diagnostics are safe: provider error descriptions may contain credentials.
+    if (token.error !== undefined) {
+      switch (token.error) {
+        case "invalid_code": fail("Zoho OAuth token exchange failed: grant code is invalid, expired, or already used");
+        case "invalid_client": fail("Zoho OAuth token exchange failed: client ID or client region does not match");
+        case "invalid_client_secret": fail("Zoho OAuth token exchange failed: client secret does not match");
+        case "invalid_grant": fail("Zoho OAuth token exchange failed: authorization grant was rejected");
+        case "invalid_scope": fail("Zoho OAuth token exchange failed: requested scopes were rejected");
+        default: fail("Zoho OAuth token response was invalid: provider rejected authorization");
+      }
+    }
+    if (!validString(token.refresh_token)) fail("Zoho OAuth token response was invalid: missing or invalid refresh_token");
+    if (!validString(token.access_token)) fail("Zoho OAuth token response was invalid: missing or invalid access_token");
+    if (token.token_type !== "Bearer") fail("Zoho OAuth token response was invalid: missing or invalid token_type");
+    if (typeof token.expires_in !== "number" || !Number.isFinite(token.expires_in) || token.expires_in <= 0) fail("Zoho OAuth token response was invalid: missing or invalid expires_in");
+    if (token.api_domain !== apiDomain) fail(`Zoho OAuth token response is not a ${label} API endpoint`);
     return { client_id: client.clientId, client_secret: client.clientSecret, refresh_token: token.refresh_token, token_uri: tokenUri, api_domain: apiDomain };
   } catch (error) {
     if (error instanceof SetupError) throw error;
@@ -108,6 +124,8 @@ export function publishZohoCredential(output: string, credential: ZohoCredential
 }
 
 export async function runZohoOAuth(env: Record<string, string | undefined> = Bun.env, output: (line: string) => void = console.log, fetcher: Fetcher = fetch, readCode: () => Promise<string> = readHiddenGrantCode): Promise<void> {
+  let region: ZohoRegion;
+  try { region = readZohoRegion(env.ZOHO_REGION); } catch { fail("ZOHO_REGION must be sa or us"); }
   const destination = env.ZOHO_OAUTH_CREDENTIAL_JSON ?? "secrets/zoho-authorized-user.json";
   if (!destination.trim()) fail("ZOHO_OAUTH_CREDENTIAL_JSON must not be empty");
   refuseExisting(destination);
@@ -115,7 +133,7 @@ export async function runZohoOAuth(env: Record<string, string | undefined> = Bun
   if (!validString(clientId) || !validString(clientSecret)) fail("Client_ID and Client_Secret are required and must be valid");
   const code = await readCode();
   refuseExisting(destination);
-  const credential = await exchangeZohoAuthorizationCode({ clientId, clientSecret }, code, fetcher);
+  const credential = await exchangeZohoAuthorizationCode({ clientId, clientSecret }, code, fetcher, { region });
   publishZohoCredential(destination, credential);
   output("Zoho OAuth credential saved privately. Configure ZOHO_ENABLED and destinations separately.");
 }

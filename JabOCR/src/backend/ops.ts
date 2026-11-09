@@ -15,7 +15,7 @@ export interface OpsDependencies {
   afterSnapshot?: (snapshotPath: string) => Promise<void> | void;
   beforeOpenOriginalChild?: (bill: { id: string; originalPath: string }) => Promise<void> | void;
 }
-function usage(): never { throw new Error("Usage: bun run ops <migrate|inspect|failed-jobs|retry|backup> [arguments]"); }
+function usage(): never { throw new Error("Usage: bun run ops <migrate|inspect|failed-jobs|retry|backup|backfill-zoho> [arguments]"); }
 function billView(database: BillDatabase, bill: Bill): object {
   return { bill, extraction: database.getExtraction(bill.id), validationIssues: database.getValidationIssues(bill.id), jobs: database.listJobsForBill(bill.id), projections: { drive: database.getProjectionMetadata("drive", bill.id), sheets: database.getProjectionMetadata("sheets", bill.id), workdrive: database.getProjectionMetadata("workdrive", bill.id), zohoSheet: database.getProjectionMetadata("zoho_sheet", bill.id) }, zohoIntents: { upload: database.getZohoIntent(bill.id, "upload"), append: database.getZohoIntent(bill.id, "append") } };
 }
@@ -58,6 +58,11 @@ export async function runOps(args: readonly string[], dependencies: OpsDependenc
   const write = (value: unknown): void => output(JSON.stringify(value, null, 2));
   const database = (dependencies.createDatabase ?? ((path: string) => new BillDatabase(path)))(dependencies.config.databasePath);
   try {
+    if (command === "backfill-zoho") {
+      if (argv.length) usage();
+      database.zohoEnabled = dependencies.config.zoho?.enabled ?? false;
+      write(database.backfillZohoApprovals()); return;
+    }
     if (command === "migrate") { write({ database: dependencies.config.databasePath, status: "migrated" }); return; }
     if (command === "inspect") {
       const identifier = argv[0]; if (!identifier || argv.length !== 1) usage();
